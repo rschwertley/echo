@@ -7,7 +7,13 @@ import androidx.paging.LoadState
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
+import dev.brahmkshatriya.echo.common.clients.FollowClient
+import dev.brahmkshatriya.echo.common.clients.HideClient
+import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.clients.PlaylistEditClient
+import dev.brahmkshatriya.echo.common.clients.RadioClient
+import dev.brahmkshatriya.echo.common.clients.SaveClient
+import dev.brahmkshatriya.echo.common.clients.ShareClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
@@ -107,7 +113,7 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
             headerAdapter.onCurrentChanged(it)
         }
         val actionFlow =
-            combine(vm.downloadsFlow, vm.uiResultFlow) { _, _ -> }
+            combine(vm.downloadsFlow, vm.uiResultFlow, vm.extensionFlow) { _, _, _ -> }
         observe(actionFlow) {
             val client = vm.extensionFlow.value?.instance?.value()?.getOrNull()
             val result = vm.uiResultFlow.value?.getOrNull()
@@ -132,6 +138,9 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
         )
     }
 
+    private fun placeholderButton(id: String, title: Int, icon: Int) =
+        MoreButton(id, getString(title), icon, enabled = false) {}
+
     private fun getButtons(
         client: ExtensionClient?,
         state: MediaState.Loaded<*>?,
@@ -141,7 +150,7 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
             getPlayButtons(client, state?.item ?: item, loaded) +
             getPlaylistEditButtons(client, state, loaded) +
             getDownloadButtons(client, state, downloads) +
-            getActionButtons(state) +
+            getActionButtons(client, state) +
             getItemButtons(state?.item ?: item)
 
     private fun getPlayerButtons() = if (fromPlayer) listOf(
@@ -162,6 +171,11 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
         button("play", R.string.play, R.drawable.ic_play) {
             playerViewModel.play(extensionId, item, loaded)
         },
+        if (item is EchoMediaItem.Lists) button(
+            "shuffle_play", R.string.shuffle, R.drawable.ic_shuffle
+        ) {
+            playerViewModel.shuffle(extensionId, item, loaded)
+        } else null,
         if (playerViewModel.queue.isNotEmpty())
             button("next", R.string.add_to_next, R.drawable.ic_playlist_play) {
                 playerViewModel.addToNext(extensionId, item, loaded)
@@ -181,12 +195,18 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
         val item = state?.item ?: item
         val isEditable = item is Playlist && item.isEditable
         listOfNotNull(
-            if (loaded) button(
-                "save_to_playlist", R.string.save_to_playlist, R.drawable.ic_library_music
-            ) {
-                SaveToPlaylistBottomSheet.newInstance(extensionId, item)
-                    .show(parentFragmentManager, null)
-            } else null,
+            when {
+                loaded -> button(
+                    "save_to_playlist", R.string.save_to_playlist, R.drawable.ic_library_music
+                ) {
+                    SaveToPlaylistBottomSheet.newInstance(extensionId, item)
+                        .show(parentFragmentManager, null)
+                }
+                state == null -> placeholderButton(
+                    "save_to_playlist", R.string.save_to_playlist, R.drawable.ic_library_music
+                )
+                else -> null
+            },
             if (isEditable) button(
                 "edit_playlist", R.string.edit_playlist, R.drawable.ic_edit_note
             ) {
@@ -221,12 +241,18 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
             state != null && client is TrackClient && state.item.extras[EXTENSION_ID] != OfflineExtension.metadata.id
 
         listOfNotNull(
-            if (downloadable) button(
-                "download", R.string.download, R.drawable.ic_download_for_offline
-            ) {
-                val downloadViewModel by activityViewModel<DownloadViewModel>()
-                downloadViewModel.addToDownload(requireActivity(), extensionId, item, itemContext)
-            } else null,
+            when {
+                downloadable -> button(
+                    "download", R.string.download, R.drawable.ic_download_for_offline
+                ) {
+                    val downloadViewModel by activityViewModel<DownloadViewModel>()
+                    downloadViewModel.addToDownload(requireActivity(), extensionId, item, itemContext)
+                }
+                state == null && client is TrackClient -> placeholderButton(
+                    "download", R.string.download, R.drawable.ic_download_for_offline
+                )
+                else -> null
+            },
             if (shouldShowDelete) button(
                 "delete_download", R.string.delete_download, R.drawable.ic_scan_delete
             ) {
@@ -238,43 +264,68 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
     }
 
     fun getActionButtons(
+        client: ExtensionClient?,
         state: MediaState.Loaded<*>?,
     ) = listOfNotNull(
-        if (state?.isFollowed != null) button(
-            "follow", if (state.isFollowed) R.string.unfollow else R.string.follow,
-            if (state.isFollowed) R.drawable.ic_check_circle_filled else R.drawable.ic_check_circle
-        ) {
-            vm.followItem(!state.isFollowed)
-        } else null,
-        if (state?.isSaved != null) button(
-            "save_to_library",
-            if (state.isSaved) R.string.remove_from_library else R.string.save_to_library,
-            if (state.isSaved) R.drawable.ic_bookmark_filled else R.drawable.ic_bookmark_outline
-        ) {
-            vm.saveToLibrary(!state.isSaved)
-        } else null,
-        if (state?.isLiked != null) button(
-            "like", if (state.isLiked) R.string.unlike else R.string.like,
-            if (state.isLiked) R.drawable.ic_heart_filled_40dp else R.drawable.ic_heart_outline_40dp
-        ) {
-            vm.likeItem(!state.isLiked)
-        } else null,
-        if (state?.isHidden != null) button(
-            "hide", if (state.isHidden) R.string.unhide else R.string.hide,
-            if (state.isHidden) R.drawable.ic_unhide else R.drawable.ic_hide
-        ) {
-            vm.hideItem(!state.isHidden)
-        } else null,
-        if (state?.showRadio == true) button(
-            "radio", R.string.radio, R.drawable.ic_sensors
-        ) {
-            playerViewModel.radio(extensionId, state.item, true)
-        } else null,
-        if (state?.showShare == true) button(
-            "share", R.string.share, R.drawable.ic_share
-        ) {
-            vm.onShare()
-        } else null
+        when {
+            state?.isFollowed != null -> button(
+                "follow", if (state.isFollowed) R.string.unfollow else R.string.follow,
+                if (state.isFollowed) R.drawable.ic_check_circle_filled else R.drawable.ic_check_circle
+            ) { vm.followItem(!state.isFollowed) }
+            state == null && client is FollowClient && item.isFollowable -> placeholderButton(
+                "follow", R.string.follow, R.drawable.ic_check_circle
+            )
+            else -> null
+        },
+        when {
+            state?.isSaved != null -> button(
+                "save_to_library",
+                if (state.isSaved) R.string.remove_from_library else R.string.save_to_library,
+                if (state.isSaved) R.drawable.ic_bookmark_filled else R.drawable.ic_bookmark_outline
+            ) { vm.saveToLibrary(!state.isSaved) }
+            state == null && client is SaveClient && item.isSaveable -> placeholderButton(
+                "save_to_library", R.string.save_to_library, R.drawable.ic_bookmark_outline
+            )
+            else -> null
+        },
+        when {
+            state?.isLiked != null -> button(
+                "like", if (state.isLiked) R.string.unlike else R.string.like,
+                if (state.isLiked) R.drawable.ic_heart_filled_40dp else R.drawable.ic_heart_outline_40dp
+            ) { vm.likeItem(!state.isLiked) }
+            state == null && client is LikeClient && item.isLikeable -> placeholderButton(
+                "like", R.string.like, R.drawable.ic_heart_outline_40dp
+            )
+            else -> null
+        },
+        when {
+            state?.isHidden != null -> button(
+                "hide", if (state.isHidden) R.string.unhide else R.string.hide,
+                if (state.isHidden) R.drawable.ic_unhide else R.drawable.ic_hide
+            ) { vm.hideItem(!state.isHidden) }
+            state == null && client is HideClient && item.isHideable -> placeholderButton(
+                "hide", R.string.hide, R.drawable.ic_hide
+            )
+            else -> null
+        },
+        when {
+            state?.showRadio == true -> button(
+                "radio", R.string.radio, R.drawable.ic_sensors
+            ) { playerViewModel.radio(extensionId, state.item, true) }
+            state == null && client is RadioClient && item.isRadioSupported -> placeholderButton(
+                "radio", R.string.radio, R.drawable.ic_sensors
+            )
+            else -> null
+        },
+        when {
+            state?.showShare == true -> button(
+                "share", R.string.share, R.drawable.ic_share
+            ) { vm.onShare() }
+            state == null && client is ShareClient && item.isShareable -> placeholderButton(
+                "share", R.string.share, R.drawable.ic_share
+            )
+            else -> null
+        }
     )
 
     private fun getItemButtons(item: EchoMediaItem) = when (item) {

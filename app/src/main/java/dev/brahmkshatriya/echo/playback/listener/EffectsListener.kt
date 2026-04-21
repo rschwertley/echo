@@ -9,12 +9,16 @@ import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
 import androidx.annotation.OptIn
 import androidx.core.content.edit
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.PlayerMessage
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.copyTo
+import dev.brahmkshatriya.echo.playback.renderer.CrossfadeAudioProcessor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -23,7 +27,8 @@ import kotlin.math.roundToInt
 class EffectsListener(
     private val exoPlayer: ExoPlayer,
     private val context: Context,
-    private val audioSessionFlow: MutableStateFlow<Int>
+    private val audioSessionFlow: MutableStateFlow<Int>,
+    private val crossfadeProcessor: CrossfadeAudioProcessor,
 ) : Player.Listener {
 
     init {
@@ -56,7 +61,69 @@ class EffectsListener(
     private var effects: Effects = createEffects()
     private val listener = OnSharedPreferenceChangeListener { _, _ -> applyCustomEffects() }
 
-    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = applyCustomEffects()
+    private var pendingFadeOutMessage: PlayerMessage? = null
+
+    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+        applyCustomEffects()
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+            reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+        ) {
+            crossfadeProcessor.onTrackStart()
+        } else {
+            crossfadeProcessor.cancelFades()
+        }
+        scheduleFadeOut()
+    }
+
+    override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+        if (reason == Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE) scheduleFadeOut()
+    }
+
+    override fun onPositionDiscontinuity(
+        oldPosition: Player.PositionInfo,
+        newPosition: Player.PositionInfo,
+        reason: Int,
+    ) {
+        if (reason == Player.DISCONTINUITY_REASON_SEEK) {
+            crossfadeProcessor.cancelFades()
+            scheduleFadeOut()
+        }
+    }
+
+    override fun onPlaybackStateChanged(playbackState: Int) {
+        if (playbackState == Player.STATE_IDLE) {
+            pendingFadeOutMessage?.cancel()
+            pendingFadeOutMessage = null
+        }
+    }
+
+    fun updateCrossfadeSettings() {
+        if (!crossfadeProcessor.enabled) {
+            pendingFadeOutMessage?.cancel()
+            pendingFadeOutMessage = null
+            crossfadeProcessor.cancelFades()
+        } else {
+            scheduleFadeOut()
+        }
+    }
+
+    private fun scheduleFadeOut() {
+        pendingFadeOutMessage?.cancel()
+        pendingFadeOutMessage = null
+        if (!crossfadeProcessor.enabled) return
+        val duration = exoPlayer.duration
+        val crossfadeMs = crossfadeProcessor.crossfadeDurationMs.toLong()
+        if (duration == C.TIME_UNSET || duration <= crossfadeMs) return
+        val speed = exoPlayer.playbackParameters.speed.coerceAtLeast(0.1f)
+        val triggerPosition = duration - (crossfadeMs * speed).toLong()
+        if (triggerPosition <= exoPlayer.currentPosition) {
+            crossfadeProcessor.onFadeOutStart()
+            return
+        }
+        pendingFadeOutMessage = exoPlayer.createMessage(PlayerMessage.Target { _, _ ->
+            crossfadeProcessor.onFadeOutStart()
+        }).setPosition(triggerPosition).send()
+    }
     override fun onAudioSessionIdChanged(audioSessionId: Int) {
         release()
         context.broadcastAudioSession()

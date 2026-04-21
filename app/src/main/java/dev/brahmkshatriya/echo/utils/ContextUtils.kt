@@ -10,6 +10,7 @@ import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.google.common.util.concurrent.ListenableFuture
 import dev.brahmkshatriya.echo.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -40,6 +41,7 @@ object ContextUtils {
         lifecycleScope.launch {
             flow.collect {
                 runCatching { block(it) }
+                    .onFailure { if (it is CancellationException) throw it }
             }
         }
 

@@ -85,7 +85,8 @@ class PlayerCallback(
         val sessionCommands = with(PlayerCommands) {
             MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(likeCommand).add(unlikeCommand).add(repeatCommand).add(repeatOffCommand)
-                .add(repeatOneCommand).add(radioCommand).add(sleepTimer)
+                .add(repeatOneCommand).add(shuffleCommand).add(shuffleOffCommand)
+                .add(radioCommand).add(sleepTimer)
                 .add(playCommand).add(addToQueueCommand).add(addToNextCommand)
                 .add(resumeCommand).add(imageCommand)
                 .build()
@@ -107,6 +108,8 @@ class PlayerCallback(
             repeatOffCommand -> setRepeat(player, Player.REPEAT_MODE_OFF)
             repeatOneCommand -> setRepeat(player, Player.REPEAT_MODE_ONE)
             repeatCommand -> setRepeat(player, Player.REPEAT_MODE_ALL)
+            shuffleCommand -> setShuffle(player, true)
+            shuffleOffCommand -> setShuffle(player, false)
             playCommand -> playItem(player, args)
             addToQueueCommand -> addToQueue(player, args)
             addToNextCommand -> addToNext(player, args)
@@ -163,6 +166,11 @@ class PlayerCallback(
 
     private fun setRepeat(player: Player, repeat: Int) = run {
         player.repeatMode = repeat
+        Futures.immediateFuture(SessionResult(RESULT_SUCCESS))
+    }
+
+    private fun setShuffle(player: Player, enabled: Boolean) = run {
+        player.shuffleModeEnabled = enabled
         Futures.immediateFuture(SessionResult(RESULT_SUCCESS))
     }
 

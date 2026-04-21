@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /tmp)",
+      "Bash(jar tf *)",
+      "Bash(unzip -p \"/c/Users/rschw/.gradle/caches/modules-2/files-2.1/androidx.media3/media3-exoplayer/1.8.0/d55f17269dcb134c0a8324da9b58e0508523e37/media3-exoplayer-1.8.0-sources.jar\" \"androidx/media3/exoplayer/audio/DefaultAudioSink.java\")",
+      "Bash(unzip -p \"/c/Users/rschw/.gradle/caches/modules-2/files-2.1/androidx.media3/media3-common/1.8.0/27195de0ca0ba24b86dc05de6aafaedd3172c1f8/media3-common-1.8.0-sources.jar\" \"androidx/media3/common/audio/AudioProcessingPipeline.java\")"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+package dev.brahmkshatriya.echo.history.db
+
+import androidx.room.Dao
+import androidx.room.Query
+import androidx.room.Upsert
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface HistoryDao {
+    @Upsert
+    suspend fun upsert(entry: HistoryEntity)
+
+    @Query("SELECT * FROM HistoryEntity ORDER BY playedAt DESC")
+    fun getAll(): Flow<List<HistoryEntity>>
+
+    @Query("DELETE FROM HistoryEntity")
+    suspend fun deleteAll()
+}

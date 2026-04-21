@@ -18,8 +18,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.WeakHashMap
-import kotlin.coroutines.suspendCoroutine
+import java.util.Collections
+import java.util.LinkedHashMap
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 class AppRepository(
     private val scope: CoroutineScope,
@@ -39,8 +40,8 @@ class AppRepository(
         }.getOrNull().orEmpty()
     }
 
-    private val map =
-        WeakHashMap<String, Pair<String, Result<Pair<Metadata, Lazy<ExtensionClient>>>>>()
+    private val map: MutableMap<String, Pair<String, Result<Pair<Metadata, Lazy<ExtensionClient>>>>> =
+        Collections.synchronizedMap(LinkedHashMap())
     private val mutex = Mutex()
 
     override suspend fun loadExtensions() = mutex.withLock {
@@ -50,7 +51,7 @@ class AppRepository(
     override val flow = channelFlow {
         send(null)
         send(loadExtensions())
-        suspendCoroutine {
+        suspendCancellableCoroutine { cont ->
             val receiver = Receiver {
                 scope.launch {
                     send(loadExtensions())
@@ -66,6 +67,9 @@ class AppRepository(
             ContextCompat.registerReceiver(
                 context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
             )
+            cont.invokeOnCancellation {
+                context.unregisterReceiver(receiver)
+            }
         }
     }
 

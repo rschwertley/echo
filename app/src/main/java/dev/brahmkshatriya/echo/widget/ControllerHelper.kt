@@ -13,6 +13,8 @@ object ControllerHelper {
     var listener: WidgetPlayerListener? = null
 
     val map = mutableMapOf<String, () -> Unit>()
+
+    @Synchronized
     fun register(app: App, key: String, updateCallback: () -> Unit) {
         map[key] = updateCallback
         if (callback != null) return
@@ -29,6 +31,7 @@ object ControllerHelper {
         }
     }
 
+    @Synchronized
     fun unregister(key: String) {
         map.remove(key)
         if (map.isNotEmpty()) return
@@ -39,6 +42,7 @@ object ControllerHelper {
         image = null
     }
 
+    @Synchronized
     fun updateWidgets() {
         map.values.forEach { it() }
     }

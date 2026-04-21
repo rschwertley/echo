@@ -1,8 +1,12 @@
 package dev.brahmkshatriya.echo.ui.main.search
 
+import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import android.view.View
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.widget.doOnTextChanged
 import androidx.fragment.app.Fragment
 import com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
@@ -39,6 +43,25 @@ class SearchFragment : Fragment(R.layout.fragment_search) {
 
     private val argId by lazy { arguments?.getString("extensionId") }
     private val searchViewModel by viewModel<SearchViewModel>()
+
+    private val speechLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.let { searchViewModel.queryFlow.value = it }
+        }
+    }
+
+    private fun launchVoiceSearch() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, getString(R.string.voice_search))
+        }
+        runCatching { speechLauncher.launch(intent) }
+    }
 
     private var extensionId = ""
 
@@ -109,7 +132,13 @@ class SearchFragment : Fragment(R.layout.fragment_search) {
         applyBackPressCallback {
             if (it == STATE_EXPANDED) binding.quickSearchView.hide()
         }
-        val searchAdapter = SearchBarAdapter(searchViewModel, binding.quickSearchView)
+        binding.quickSearchView.inflateMenu(R.menu.search_mic_menu_white)
+        binding.quickSearchView.setOnMenuItemClickListener { item ->
+            if (item.itemId == R.id.menu_voice_search) { launchVoiceSearch(); true } else false
+        }
+        val searchAdapter = SearchBarAdapter(searchViewModel, binding.quickSearchView) {
+            launchVoiceSearch()
+        }
         observe(searchViewModel.queryFlow) {
             searchAdapter.notifyItemChanged(0)
             binding.quickSearchView.setText(it)

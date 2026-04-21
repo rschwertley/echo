@@ -4,11 +4,14 @@ import dev.brahmkshatriya.echo.download.DownloadWorker
 import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.download.db.DownloadDatabase
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
+import dev.brahmkshatriya.echo.history.HistoryRepository
+import dev.brahmkshatriya.echo.history.db.HistoryDatabase
 import dev.brahmkshatriya.echo.playback.PlayerService
 import dev.brahmkshatriya.echo.playback.PlayerState
 import dev.brahmkshatriya.echo.ui.common.SnackBarHandler
 import dev.brahmkshatriya.echo.ui.common.UiViewModel
 import dev.brahmkshatriya.echo.ui.download.DownloadViewModel
+import dev.brahmkshatriya.echo.ui.history.HistoryViewModel
 import dev.brahmkshatriya.echo.ui.extensions.ExtensionInfoViewModel
 import dev.brahmkshatriya.echo.ui.extensions.ExtensionsViewModel
 import dev.brahmkshatriya.echo.ui.extensions.add.AddViewModel
@@ -50,6 +53,12 @@ object DI {
         workerOf(::DownloadWorker)
     }
 
+    private val historyModule = module {
+        singleOf(HistoryDatabase::create)
+        single { get<HistoryDatabase>().historyDao() }
+        singleOf(::HistoryRepository)
+    }
+
     private val playerModule = module {
         includes(extensionModule)
         singleOf(PlayerService::getCache)
@@ -80,6 +89,7 @@ object DI {
         viewModelOf(::EditPlaylistViewModel)
 
         viewModelOf(::DownloadViewModel)
+        viewModelOf(::HistoryViewModel)
     }
 
     val appModule = module {
@@ -87,6 +97,7 @@ object DI {
         includes(extensionModule)
         includes(playerModule)
         includes(downloadModule)
+        includes(historyModule)
         includes(uiModules)
     }
 }

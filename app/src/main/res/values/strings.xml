@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name" translatable="false">Echo</string>
+    <string name="app_name" translatable="false">Gladix</string>
     <string name="app_github_repo" translatable="false">brahmkshatriya/echo</string>
     <string name="okay">Okay</string>
     <string name="cancel">Cancel</string>
@@ -126,8 +126,18 @@
     <string name="skip_silence">Skip Silence</string>
     <string name="skip_silence_summary">Skip silent part in the song, to provide gapless playback.</string>
 
+    <string name="crossfade">Track Fade</string>
+    <string name="crossfade_summary">Fade audio out at the end of each track and in at the start of the next</string>
+    <string name="crossfade_duration">Fade Duration</string>
+    <string name="crossfade_duration_summary">Duration in seconds (1–12)</string>
+
+    <string name="history">History</string>
+    <string name="clear_history">Clear History</string>
+
     <string name="auto_start_radio">Auto Start Radio</string>
     <string name="auto_start_radio_summary">Automatically add related songs of track in the playlist, to have an infinite queue</string>
+    <string name="auto_timed_out">Content took too long to load, please try again</string>
+    <string name="auto_error_loading">Failed to load content</string>
 
     <string name="cache_size">Cache Size</string>
     <string name="cache_size_summary">Size in MB to cache audio and video</string>
@@ -309,6 +319,7 @@
     <string name="save_to_playlist">Save to playlist</string>
     <string name="delete_playlist">Delete playlist</string>
     <string name="add_to_next">Add to next</string>
+    <string name="queue">Queue</string>
     <string name="add_to_queue">Add to queue</string>
     <string name="loading_radio_for_x">Loading radio for %1$s</string>
     <string name="playing_x">Playing %1$s</string>
@@ -412,6 +423,8 @@
 
     <string name="no_x_found">No %1$s found</string>
     <string name="playlist">Playlist</string>
+    <string name="playlists">Playlists</string>
+    <string name="voice_search">Voice search</string>
     <string name="album">Album</string>
     <string name="pre_release">Pre Release</string>
     <string name="single">Single</string>

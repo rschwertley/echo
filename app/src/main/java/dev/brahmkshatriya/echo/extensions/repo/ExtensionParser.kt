@@ -12,7 +12,6 @@ import dev.brahmkshatriya.echo.common.models.Metadata
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionLoaderException
 import dev.brahmkshatriya.echo.utils.ShaUtils.getSha256
 import java.io.File
-import java.util.WeakHashMap
 
 class ExtensionParser(
     private val context: Context,
@@ -20,7 +19,7 @@ class ExtensionParser(
 
     fun getAllDynamically(
         type: ImportType,
-        map: WeakHashMap<String, Pair<String, Result<Pair<Metadata, Lazy<ExtensionClient>>>>>,
+        map: MutableMap<String, Pair<String, Result<Pair<Metadata, Lazy<ExtensionClient>>>>>,
         files: List<File>
     ): List<Result<Pair<Metadata, Lazy<ExtensionClient>>>> {
         val new = files.associate {

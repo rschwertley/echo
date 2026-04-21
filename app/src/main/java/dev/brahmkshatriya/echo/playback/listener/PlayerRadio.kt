@@ -24,6 +24,7 @@ import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.playback.PlayerState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -108,6 +109,9 @@ class PlayerRadio(
 
     init {
         app.settings.registerOnSharedPreferenceChangeListener(listener)
+        scope.coroutineContext[Job]?.invokeOnCompletion {
+            app.settings.unregisterOnSharedPreferenceChangeListener(listener)
+        }
     }
 
     private suspend fun startRadio() {

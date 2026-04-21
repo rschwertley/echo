@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.ui.main.search
 
 import android.view.LayoutInflater
 import android.view.ViewGroup
+import dev.brahmkshatriya.echo.R
 import com.google.android.material.search.SearchView
 import dev.brahmkshatriya.echo.databinding.ItemSearchBarBinding
 import dev.brahmkshatriya.echo.ui.common.GridAdapter
@@ -11,12 +12,13 @@ import dev.brahmkshatriya.echo.utils.ui.scrolling.ScrollAnimViewHolder
 class SearchBarAdapter(
     val viewModel: SearchViewModel,
     val searchView: SearchView,
+    val onMicClick: () -> Unit,
 ) : ScrollAnimRecyclerAdapter<SearchBarAdapter.ViewHolder>(), GridAdapter {
     override val adapter = this
     override fun getSpanSize(position: Int, width: Int, count: Int) = count
     override fun getItemCount() = 1
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-        ViewHolder(parent, viewModel, searchView)
+        ViewHolder(parent, viewModel, searchView, onMicClick)
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         super.onBindViewHolder(holder, position)
@@ -27,6 +29,7 @@ class SearchBarAdapter(
         parent: ViewGroup,
         val viewModel: SearchViewModel,
         val searchView: SearchView,
+        val onMicClick: () -> Unit,
         private val binding: ItemSearchBarBinding = ItemSearchBarBinding.inflate(
             LayoutInflater.from(parent.context), parent, false
         )
@@ -34,6 +37,12 @@ class SearchBarAdapter(
         fun bind() {
             searchView.setupWithSearchBar(binding.root)
             binding.root.setText(viewModel.queryFlow.value.takeIf { it.isNotBlank() })
+            binding.root.setOnMenuItemClickListener { item ->
+                if (item.itemId == R.id.menu_voice_search) {
+                    onMicClick()
+                    true
+                } else false
+            }
         }
     }
 }

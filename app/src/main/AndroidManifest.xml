@@ -170,6 +170,9 @@
                 <action android:name="androidx.media3.session.MediaLibraryService" />
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
+            <meta-data
+                android:name="android.media.browse.MediaBrowserService.Search"
+                android:value="true" />
         </service>
 
         <receiver

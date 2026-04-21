@@ -1,0 +1,24 @@
+package dev.brahmkshatriya.echo.history
+
+import dev.brahmkshatriya.echo.common.models.Track
+import dev.brahmkshatriya.echo.history.db.HistoryDao
+import dev.brahmkshatriya.echo.history.db.HistoryEntity
+import dev.brahmkshatriya.echo.utils.Serializer.toJson
+
+class HistoryRepository(private val dao: HistoryDao) {
+
+    fun getHistory() = dao.getAll()
+
+    suspend fun recordTrack(extensionId: String, track: Track) {
+        dao.upsert(
+            HistoryEntity(
+                trackId = track.id,
+                extensionId = extensionId,
+                playedAt = System.currentTimeMillis(),
+                trackData = track.toJson(),
+            )
+        )
+    }
+
+    suspend fun clearHistory() = dao.deleteAll()
+}

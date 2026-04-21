@@ -12,6 +12,7 @@ import dev.brahmkshatriya.echo.common.models.TrackDetails
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtension
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.runIf
+import dev.brahmkshatriya.echo.history.HistoryRepository
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.context
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
@@ -37,7 +38,8 @@ class TrackingListener(
     private val scope: CoroutineScope,
     extensions: ExtensionLoader,
     private val currentFlow: MutableStateFlow<PlayerState.Current?>,
-    private val throwableFlow: MutableSharedFlow<Throwable>
+    private val throwableFlow: MutableSharedFlow<Throwable>,
+    private val historyRepository: HistoryRepository,
 ) : Player.Listener {
 
     private val musicList = extensions.music
@@ -75,6 +77,11 @@ class TrackingListener(
     private fun onTrackChanged(mediaItem: MediaItem?) {
         previousId = current?.extensionId
         current = mediaItem
+        if (mediaItem != null) scope.launch {
+            runCatching {
+                historyRepository.recordTrack(mediaItem.extensionId, mediaItem.track)
+            }
+        }
         scope.launch {
             mutex.withLock {
                 timers.forEach { (_, timer) -> timer.pause() }

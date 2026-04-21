@@ -38,6 +38,7 @@ import dev.brahmkshatriya.echo.extensions.repo.CombinedRepository
 import dev.brahmkshatriya.echo.extensions.repo.ExtensionParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,7 +56,7 @@ class ExtensionLoader(
     val cache: SimpleCache,
 ) {
     val parser = ExtensionParser(app.context)
-    val scope = CoroutineScope(Dispatchers.IO)
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val db = ExtensionDatabase.create(app.context)
 
     private var permGrantedFlow = false

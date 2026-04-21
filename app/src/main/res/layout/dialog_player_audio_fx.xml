@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:fitsSystemWindows="false"
-    android:layout_height="wrap_content">
+    android:layout_height="match_parent">
 
     <com.google.android.material.appbar.AppBarLayout
         android:id="@+id/appBarLayout"
@@ -20,7 +20,6 @@
             android:background="@null"
             android:paddingStart="0dp"
             android:paddingEnd="4dp"
-            app:layout_scrollFlags="scroll|snap"
             app:menu="@menu/refresh_menu"
             app:navigationIcon="@drawable/ic_close"
             app:title="@string/audio_fx"
@@ -34,8 +33,7 @@
             android:alpha="0.66"
             android:gravity="center"
             android:text="@string/audio_fx_desc"
-            android:textColor="?attr/colorOnSurface"
-            app:layout_scrollFlags="scroll|snap" />
+            android:textColor="?attr/colorOnSurface" />
 
     </com.google.android.material.appbar.AppBarLayout>
 
@@ -43,7 +41,7 @@
         android:id="@+id/audioFxFragment"
         layout="@layout/fragment_audio_fx"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="match_parent"
         app:layout_behavior="@string/appbar_scrolling_view_behavior" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

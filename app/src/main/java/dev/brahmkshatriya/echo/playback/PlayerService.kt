@@ -30,6 +30,7 @@ import dev.brahmkshatriya.echo.common.models.ExtensionType
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.download.Downloader
+import dev.brahmkshatriya.echo.history.HistoryRepository
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.extensionPrefId
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.prefs
@@ -39,6 +40,7 @@ import dev.brahmkshatriya.echo.playback.listener.MediaSessionServiceListener
 import dev.brahmkshatriya.echo.playback.listener.PlayerEventListener
 import dev.brahmkshatriya.echo.playback.listener.PlayerRadio
 import dev.brahmkshatriya.echo.playback.listener.TrackingListener
+import dev.brahmkshatriya.echo.playback.renderer.CrossfadeAudioProcessor
 import dev.brahmkshatriya.echo.playback.renderer.PlayerBitmapLoader
 import dev.brahmkshatriya.echo.playback.renderer.RenderersFactory
 import dev.brahmkshatriya.echo.playback.source.StreamableMediaSource
@@ -46,12 +48,15 @@ import dev.brahmkshatriya.echo.utils.ContextUtils.listenFuture
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import org.koin.android.ext.android.inject
 import java.io.File
 
+@OptIn(UnstableApi::class)
 class PlayerService : MediaLibraryService() {
 
     private val extensionLoader by inject<ExtensionLoader>()
@@ -63,7 +68,14 @@ class PlayerService : MediaLibraryService() {
 
     private val app by inject<App>()
     private val state by inject<PlayerState>()
-    private val scope = CoroutineScope(Dispatchers.IO) + CoroutineName("PlayerService")
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("PlayerService"))
+
+    private val crossfadeProcessor by lazy {
+        CrossfadeAudioProcessor().apply {
+            enabled = app.settings.getBoolean(CROSSFADE_ENABLED, false)
+            crossfadeDurationMs = app.settings.getInt(CROSSFADE_DURATION, 5) * 1000
+        }
+    }
 
     @OptIn(UnstableApi::class)
     private val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
@@ -74,10 +86,19 @@ class PlayerService : MediaLibraryService() {
                     .buildUpon()
                     .setAudioOffloadPreferences(offloadPreferences(prefs.getBoolean(key, false)))
                     .build()
+            CROSSFADE_ENABLED -> {
+                crossfadeProcessor.enabled = prefs.getBoolean(key, true)
+                effects.updateCrossfadeSettings()
+            }
+            CROSSFADE_DURATION -> {
+                crossfadeProcessor.crossfadeDurationMs = prefs.getInt(key, 5) * 1000
+                effects.updateCrossfadeSettings()
+            }
         }
     }
-    private val effects by lazy { EffectsListener(exoPlayer, this, state.session) }
+    private val effects by lazy { EffectsListener(exoPlayer, this, state.session, crossfadeProcessor) }
 
+    private val historyRepository by inject<HistoryRepository>()
     private val downloader by inject<Downloader>()
     private val downloadFlow by lazy { downloader.flow }
 
@@ -110,7 +131,7 @@ class PlayerService : MediaLibraryService() {
             )
         )
         player.addListener(
-            TrackingListener(player, scope, extensions, state.current, app.throwFlow)
+            TrackingListener(player, scope, extensions, state.current, app.throwFlow, historyRepository)
         )
         player.addListener(effects)
         app.settings.registerOnSharedPreferenceChangeListener(listener)
@@ -130,6 +151,7 @@ class PlayerService : MediaLibraryService() {
             release()
             mediaSession = null
         }
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -161,7 +183,7 @@ class PlayerService : MediaLibraryService() {
         )
 
         ExoPlayer.Builder(this, factory)
-            .setRenderersFactory(RenderersFactory(this))
+            .setRenderersFactory(RenderersFactory(this, crossfadeProcessor))
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setAudioAttributes(audioAttributes, true)
@@ -187,6 +209,8 @@ class PlayerService : MediaLibraryService() {
         const val MORE_BRAIN_CAPACITY = "offload"
         const val CLOSE_PLAYER = "close_player"
         const val SKIP_SILENCE = "skip_silence"
+        const val CROSSFADE_ENABLED = "crossfade_enabled"
+        const val CROSSFADE_DURATION = "crossfade_duration"
 
         const val CACHE_SIZE = "cache_size"
 
