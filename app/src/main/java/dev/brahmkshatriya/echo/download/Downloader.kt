@@ -27,6 +27,7 @@ import dev.brahmkshatriya.echo.utils.Serializer.toJson
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
@@ -37,7 +38,7 @@ import kotlinx.coroutines.plus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
-import java.util.WeakHashMap
+import java.util.concurrent.ConcurrentHashMap
 
 class Downloader(
     val app: App,
@@ -50,7 +51,7 @@ class Downloader(
         .find { it.isClient<DownloadClient>() && it.isEnabled }
         ?: throw DownloaderExtensionNotFoundException()
 
-    val scope = CoroutineScope(Dispatchers.IO) + CoroutineName("Downloader")
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("Downloader"))
 
     val dao = database.downloadDao()
     val downloadFlow = dao.getDownloadsFlow()
@@ -99,32 +100,34 @@ class Downloader(
         workManager.enqueueUniqueWork(TAG, ExistingWorkPolicy.KEEP, request)
     }
 
-    @Suppress("IDENTITY_SENSITIVE_OPERATIONS_WITH_VALUE_TYPE")
-    private val servers = WeakHashMap<Long, Streamable.Media.Server>()
-    @Suppress("IDENTITY_SENSITIVE_OPERATIONS_WITH_VALUE_TYPE")
-    private val mutexes = WeakHashMap<Long, Mutex>()
+    private val servers = ConcurrentHashMap<String, Streamable.Media.Server>()
+    private val mutexes = ConcurrentHashMap<String, Mutex>()
 
     suspend fun getServer(
         trackId: Long, download: DownloadEntity
-    ): Streamable.Media.Server = mutexes.getOrPut(trackId) { Mutex() }.withLock {
-        servers.getOrPut(trackId) {
-            val extensionId = download.extensionId
-            val extension = extensionLoader.music.getExtensionOrThrow(extensionId)
-            val streamable = download.track.getOrThrow()
-                .streamables.find { it.id == download.streamableId }!!
-            extension.getAs<TrackClient, Streamable.Media.Server> {
-                val media =
-                    loadStreamableMedia(streamable, true) as Streamable.Media.Server
-                media.sources.ifEmpty {
-                    throw Exception("${trackId}: No sources found")
-                }
-                media
-            }.getOrThrow()
+    ): Streamable.Media.Server {
+        val key = trackId.toString()
+        return mutexes.computeIfAbsent(key) { Mutex() }.withLock {
+            servers[key] ?: run {
+                val extensionId = download.extensionId
+                val extension = extensionLoader.music.getExtensionOrThrow(extensionId)
+                val streamable = download.track.getOrThrow()
+                    .streamables.find { it.id == download.streamableId }!!
+                extension.getAs<TrackClient, Streamable.Media.Server> {
+                    val media =
+                        loadStreamableMedia(streamable, true) as Streamable.Media.Server
+                    media.sources.ifEmpty {
+                        throw Exception("${trackId}: No sources found")
+                    }
+                    media
+                }.getOrThrow().also { servers[key] = it }
+            }
         }
     }
 
     fun cancel(trackId: Long) {
         taskManager.remove(trackId)
+        val key = trackId.toString()
         scope.launch {
             val entity = dao.getDownloadEntity(trackId) ?: return@launch
             dao.deleteDownloadEntity(entity)
@@ -132,8 +135,8 @@ class Downloader(
                 val file = File(it)
                 if (file.exists()) file.delete()
             }
-            servers.remove(trackId)
-            mutexes.remove(trackId)
+            servers.remove(key)
+            mutexes.remove(key)
         }
     }
 
@@ -148,8 +151,8 @@ class Downloader(
                 val file = File(it)
                 if (file.exists()) file.delete()
             }
-            servers.remove(trackId)
-            mutexes.remove(trackId)
+            servers.remove(trackId.toString())
+            mutexes.remove(trackId.toString())
             ensureWorker()
         }
     }
@@ -160,8 +163,8 @@ class Downloader(
             val downloads = downloadFlow.first().filter { it.finalFile == null }
             downloads.forEach { download ->
                 dao.deleteDownloadEntity(download)
-                servers.remove(download.id)
-                mutexes.remove(download.id)
+                servers.remove(download.id.toString())
+                mutexes.remove(download.id.toString())
             }
         }
     }

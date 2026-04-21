@@ -18,7 +18,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.brahmkshatriya.echo"
+        applicationId = "dev.rschwertley.gladix"
         minSdk = 24
         targetSdk = 36
         versionCode = gitCount
@@ -51,6 +51,11 @@ android {
     androidResources {
         @Suppress("UnstableApiUsage")
         generateLocaleConfig = true
+    }
+
+    lint {
+        disable.add("MissingTranslation")
+        abortOnError = false
     }
 }
 

@@ -18,6 +18,8 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.databinding.DialogPlayerAudioFxBinding
 import dev.brahmkshatriya.echo.databinding.FragmentAudioFxBinding
+import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION
+import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_ENABLED
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.BASS_BOOST
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.CHANGE_PITCH
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.CUSTOM_EFFECTS
@@ -26,6 +28,7 @@ import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.delet
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.getFxPrefs
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.globalFx
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.speedRange
+import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
 import dev.brahmkshatriya.echo.ui.player.PlayerViewModel
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.PermsUtils.registerActivityResultLauncher
@@ -60,7 +63,9 @@ class AudioEffectsBottomSheet : BottomSheetDialogFragment() {
             binding.audioFxDescription.isVisible = mediaId != null
             val mediaSettings =
                 requireContext().getFxPrefs(settings, mediaId?.hashCode()) ?: settings
-            binding.audioFxFragment.bind(mediaSettings) { onEqualizerClicked() }
+            binding.audioFxFragment.bind(
+                mediaSettings, requireContext().getSettings()
+            ) { onEqualizerClicked() }
         }
         observe(viewModel.playerState.current) {
             mediaId = it?.mediaItem?.mediaId
@@ -85,7 +90,9 @@ class AudioEffectsBottomSheet : BottomSheetDialogFragment() {
     companion object {
         @SuppressLint("SetTextI18n")
         fun FragmentAudioFxBinding.bind(
-            settings: SharedPreferences, onEqualizerClicked: () -> Unit
+            settings: SharedPreferences,
+            appSettings: SharedPreferences,
+            onEqualizerClicked: () -> Unit,
         ) {
             val speed = settings.getInt(PLAYBACK_SPEED, speedRange.indexOf(1f))
             val adapter = RulerAdapter(object : RulerAdapter.Listener<Int> {
@@ -111,6 +118,23 @@ class AudioEffectsBottomSheet : BottomSheetDialogFragment() {
                 settings.edit { putInt(BASS_BOOST, value.toInt()) }
             }
             equalizer.setOnClickListener { onEqualizerClicked() }
+
+            crossfadeSwitch.isChecked = appSettings.getBoolean(CROSSFADE_ENABLED, false)
+            crossfadeDurationSlider.isEnabled = crossfadeSwitch.isChecked
+            val durationValue = appSettings.getInt(CROSSFADE_DURATION, 5).coerceIn(1, 12)
+            crossfadeDurationSlider.value = durationValue.toFloat()
+            crossfadeDurationValue.text = "${durationValue}s"
+            crossfade.setOnClickListener {
+                crossfadeSwitch.isChecked = !crossfadeSwitch.isChecked
+            }
+            crossfadeSwitch.setOnCheckedChangeListener { _, isChecked ->
+                appSettings.edit { putBoolean(CROSSFADE_ENABLED, isChecked) }
+                crossfadeDurationSlider.isEnabled = isChecked
+            }
+            crossfadeDurationSlider.addOnChangeListener { _, value, _ ->
+                appSettings.edit { putInt(CROSSFADE_DURATION, value.toInt()) }
+                crossfadeDurationValue.text = "${value.toInt()}s"
+            }
         }
 
         private fun openEqualizer(activity: ComponentActivity, sessionId: Int) {

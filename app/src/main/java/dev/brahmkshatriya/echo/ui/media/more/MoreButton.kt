@@ -4,7 +4,7 @@ import androidx.fragment.app.DialogFragment
 import androidx.recyclerview.widget.DiffUtil
 
 data class MoreButton(
-    val id: String, val title: String, val icon: Int, val onClick: () -> Unit
+    val id: String, val title: String, val icon: Int, val enabled: Boolean = true, val onClick: () -> Unit
 ) {
     object DiffCallback : DiffUtil.ItemCallback<MoreButton>() {
         override fun areItemsTheSame(oldItem: MoreButton, newItem: MoreButton) =

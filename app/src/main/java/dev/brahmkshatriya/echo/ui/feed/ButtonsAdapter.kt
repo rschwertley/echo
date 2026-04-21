@@ -18,11 +18,12 @@ import dev.brahmkshatriya.echo.utils.ui.scrolling.ScrollAnimViewHolder
 class ButtonsAdapter(
     private val viewModel: FeedData,
     private val listener: FeedClickListener,
-    private val getAllLoaded: () -> List<Track>
+    private val getAllLoaded: () -> List<Track>,
+    private val onMicClick: () -> Unit,
 ) : ScrollAnimRecyclerAdapter<ButtonsAdapter.ViewHolder>(), GridAdapter {
     override fun getItemCount() = 1
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-        ViewHolder(parent, viewModel, listener, getAllLoaded)
+        ViewHolder(parent, viewModel, listener, getAllLoaded, onMicClick)
 
     var buttons: FeedData.Buttons? = null
         set(value) {
@@ -47,6 +48,7 @@ class ButtonsAdapter(
         private val viewModel: FeedData,
         private val listener: FeedClickListener,
         private val getAllLoaded: () -> List<Track>,
+        private val onMicClick: () -> Unit,
         private val binding: ItemFeedButtonsBinding = ItemFeedButtonsBinding.inflate(
             LayoutInflater.from(parent.context), parent, false
         )
@@ -55,6 +57,7 @@ class ButtonsAdapter(
         private var feed: FeedData.Buttons? = null
 
         init {
+            binding.micButton.setOnClickListener { onMicClick() }
             binding.searchToggleButton.addOnCheckedChangeListener { _, isChecked ->
                 viewModel.searchToggled = isChecked
                 if (!isChecked) {

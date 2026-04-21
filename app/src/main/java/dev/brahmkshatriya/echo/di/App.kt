@@ -12,6 +12,7 @@ import dev.brahmkshatriya.echo.common.models.NetworkConnection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,7 +26,7 @@ data class App(
 ) {
     val throwFlow = MutableSharedFlow<Throwable>()
     val messageFlow = MutableSharedFlow<Message>()
-    val scope = CoroutineScope(Dispatchers.IO)
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private suspend fun getCache() = FileKache(
         context.cacheDir.resolve("kache").toString(),

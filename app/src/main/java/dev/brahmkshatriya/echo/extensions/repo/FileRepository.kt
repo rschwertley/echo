@@ -12,7 +12,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
-import java.util.WeakHashMap
+import java.util.Collections
+import java.util.LinkedHashMap
 
 class FileRepository(
     private val folder: File,
@@ -20,8 +21,8 @@ class FileRepository(
     private val fileIgnoreFlow: Flow<File?>
 ) : ExtensionRepository {
 
-    private val map =
-        WeakHashMap<String, Pair<String, Result<Pair<Metadata, Lazy<ExtensionClient>>>>>()
+    private val map: MutableMap<String, Pair<String, Result<Pair<Metadata, Lazy<ExtensionClient>>>>> =
+        Collections.synchronizedMap(LinkedHashMap())
     private val mutex = Mutex()
 
     private var toIgnoreFile: File? = null

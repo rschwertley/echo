@@ -12,4 +12,5 @@
     app:defaultMarginsEnabled="false"
     app:navigationIcon="@drawable/ic_search_outline"
     app:strokeColor="?colorSurfaceContainerHighest"
-    app:strokeWidth="1dp" />
+    app:strokeWidth="1dp"
+    app:menu="@menu/search_mic_menu" />

@@ -1,7 +1,11 @@
 package dev.brahmkshatriya.echo.ui.feed
 
+import android.app.Activity
+import android.content.Intent
+import android.speech.RecognizerIntent
 import android.view.LayoutInflater
 import android.view.ViewGroup
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.paging.LoadState
@@ -158,7 +162,27 @@ class FeedAdapter(
         }
         fragment.observe(viewModel.tabsFlow) { tabs.data = it }
         fragment.observe(viewModel.selectedTabIndexFlow) { tabs.selected = it }
-        val buttons = ButtonsAdapter(viewModel, listener, ::getAllTracks)
+        var buttonsAdapter: ButtonsAdapter? = null
+        val speechLauncher = fragment.registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                    ?.firstOrNull()?.let { text ->
+                        viewModel.searchToggled = true
+                        viewModel.searchQuery = text
+                        buttonsAdapter?.notifyItemChanged(0)
+                        viewModel.onSearchClicked()
+                    }
+            }
+        }
+        val buttons = ButtonsAdapter(viewModel, listener, ::getAllTracks) {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            }
+            runCatching { speechLauncher.launch(intent) }
+        }
+        buttonsAdapter = buttons
         fragment.observe(viewModel.buttonsFlow) {
             buttons.buttons = it
             isPlayButtonShown = it?.buttons?.showPlayAndShuffle == true

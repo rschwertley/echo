@@ -14,7 +14,7 @@ class MoreButtonAdapter
         holder.bind(getItem(position))
 
     override val adapter = this
-    override fun getSpanSize(position: Int, width: Int, count: Int) = 1
+    override fun getSpanSize(position: Int, width: Int, count: Int) = count
 
     class ViewHolder(
         parent: ViewGroup,
@@ -24,6 +24,7 @@ class MoreButtonAdapter
     ) : ScrollAnimViewHolder(binding.root) {
         fun bind(item: MoreButton) = with(binding.root) {
             text = item.title
+            isEnabled = item.enabled
             setOnClickListener { item.onClick() }
             setIconResource(item.icon)
         }

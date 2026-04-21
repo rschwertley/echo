@@ -17,10 +17,13 @@ import dev.brahmkshatriya.echo.playback.MediaItemUtils.isLoaded
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.retries
 import dev.brahmkshatriya.echo.playback.PlayerCommands.getLikeButton
 import dev.brahmkshatriya.echo.playback.PlayerCommands.getRepeatButton
+import dev.brahmkshatriya.echo.playback.PlayerCommands.getShuffleButton
 import dev.brahmkshatriya.echo.playback.PlayerState
 import dev.brahmkshatriya.echo.playback.ResumptionUtils
 import dev.brahmkshatriya.echo.playback.exceptions.PlayerException
+import dev.brahmkshatriya.echo.playback.exceptions.TrackUnavailableException
 import dev.brahmkshatriya.echo.utils.Serializer.rootCause
+import dev.brahmkshatriya.echo.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -46,6 +49,7 @@ class PlayerEventListener(
             extensions.music.getExtension(item.extensionId)?.isClient<LikeClient>() ?: false
         }
         val commandButtons = listOfNotNull(
+            getShuffleButton(context, player.shuffleModeEnabled),
             getRepeatButton(context, player.repeatMode),
             getLikeButton(context, item).takeIf { supportsLike }
         )
@@ -75,6 +79,13 @@ class PlayerEventListener(
     override fun onTimelineChanged(timeline: Timeline, reason: Int) {
         updateCurrentFlow()
         scope.launch { ResumptionUtils.saveQueue(context, player) }
+        if (!timeline.isEmpty() && reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED
+            && player.playlistMetadata.title.isNullOrEmpty()
+        ) {
+            player.setPlaylistMetadata(
+                MediaMetadata.Builder().setTitle(context.getString(R.string.queue)).build()
+            )
+        }
     }
 
     override fun onRepeatModeChanged(repeatMode: Int) {
@@ -83,11 +94,13 @@ class PlayerEventListener(
     }
 
     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+        updateCustomLayout()
         ResumptionUtils.saveShuffle(context, shuffleModeEnabled)
     }
 
     override fun onPlaybackStateChanged(playbackState: Int) {
         updateCurrentFlow()
+        if (playbackState == Player.STATE_READY) consecutiveUnavailableSkips = 0
     }
 
     override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -105,13 +118,34 @@ class PlayerEventListener(
     private val maxSingleItemRetries = 1
     private var currentRetries = 0
     private var last: KClass<*>? = null
+
+    private val maxConsecutiveUnavailableSkips = 3
+    private var consecutiveUnavailableSkips = 0
+
     override fun onPlayerError(error: PlaybackException) {
         val cause = error.cause ?: error
+        val rootCause = cause.rootCause
         val mediaItem = player.currentMediaItem
+
+        if (rootCause is TrackUnavailableException || rootCause.message?.contains("not available", ignoreCase = true) == true) {
+            consecutiveUnavailableSkips++
+            if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
+                consecutiveUnavailableSkips = 0
+                scope.launch { throwableFlow.emit(PlayerException(mediaItem, rootCause)) }
+                return
+            }
+            val hasMore = player.currentMediaItemIndex < player.mediaItemCount - 1
+            if (!hasMore) return
+            player.seekToNextMediaItem()
+            player.prepare()
+            player.play()
+            return
+        }
+
         scope.launch { throwableFlow.emit(PlayerException(mediaItem, cause)) }
 
         val old = last
-        last = cause.rootCause::class
+        last = rootCause::class
         if (old != null && old == last) currentRetries++
         else currentRetries = 0
 
