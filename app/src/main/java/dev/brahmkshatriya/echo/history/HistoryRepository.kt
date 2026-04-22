@@ -9,6 +9,8 @@ class HistoryRepository(private val dao: HistoryDao) {
 
     fun getHistory() = dao.getAll()
 
+    fun getLatest() = dao.getLatest()
+
     suspend fun recordTrack(extensionId: String, track: Track) {
         dao.upsert(
             HistoryEntity(

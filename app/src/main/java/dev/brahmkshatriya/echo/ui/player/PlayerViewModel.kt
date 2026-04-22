@@ -41,6 +41,8 @@ import dev.brahmkshatriya.echo.playback.PlayerState
 import dev.brahmkshatriya.echo.utils.ContextUtils.listenFuture
 import dev.brahmkshatriya.echo.utils.Serializer.putSerialized
 import kotlinx.coroutines.Dispatchers
+import dev.brahmkshatriya.echo.history.HistoryRepository
+import dev.brahmkshatriya.echo.history.db.HistoryEntity
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -58,11 +60,41 @@ class PlayerViewModel(
     val settings: SharedPreferences,
     val cache: SimpleCache,
     val extensions: ExtensionLoader,
+    val historyRepository: HistoryRepository,
     downloader: Downloader,
 ) : ViewModel() {
     private val downloadFlow = downloader.flow
 
     val browser = MutableStateFlow<MediaController?>(null)
+
+    init {
+        viewModelScope.launch {
+            historyRepository.getLatest().collect { entity ->
+                if (browser.value == null && entity != null) {
+                    val track = entity.track ?: return@collect
+                    val mediaItem = MediaItemUtils.build(
+                        app,
+                        downloadFlow.value,
+                        MediaState.Unloaded(entity.extensionId, track),
+                        null
+                    )
+                    if (playerState.current.value == null) {
+                        playerState.current.value = PlayerState.Current(
+                            index = 0,
+                            mediaItem = mediaItem,
+                            isLoaded = false,
+                            isPlaying = false,
+                            isPlaceholder = true
+                        )
+                        queue = listOf(mediaItem)
+                        queueFlow.emit(Unit)
+                    }
+                }
+                if (browser.value != null) return@collect
+            }
+        }
+    }
+
     private fun withBrowser(block: suspend (MediaController) -> Unit) {
         viewModelScope.launch {
             val browser = browser.first { it != null }!!
@@ -296,6 +328,7 @@ class PlayerViewModel(
 
     val buffering = MutableStateFlow(false)
     val isPlaying = MutableStateFlow(false)
+    val playWhenReady = MutableStateFlow(false)
     val nextEnabled = MutableStateFlow(false)
     val previousEnabled = MutableStateFlow(false)
     val repeatMode = MutableStateFlow(0)

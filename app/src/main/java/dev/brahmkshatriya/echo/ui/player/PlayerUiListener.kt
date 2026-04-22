@@ -21,6 +21,7 @@ class PlayerUiListener(
         with(viewModel) {
             tracksFlow.value = player.currentTracks
             isPlaying.value = player.isPlaying
+            playWhenReady.value = player.playWhenReady
             buffering.value = player.playbackState == Player.STATE_BUFFERING
             shuffleMode.value = player.shuffleModeEnabled
             repeatMode.value = player.repeatMode
@@ -30,8 +31,13 @@ class PlayerUiListener(
 
     private fun updateList() = viewModel.run {
         updateNavigation()
-        queue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
-        viewModelScope.launch { queueFlow.emit(Unit) }
+        val newQueue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
+        val showingPlaceholder = playerState.current.value?.isPlaceholder == true && player.mediaItemCount == 0
+
+        if (player.mediaItemCount > 0 || !showingPlaceholder) {
+            queue = newQueue
+            viewModelScope.launch { queueFlow.emit(Unit) }
+        }
     }
 
     private fun updateNavigation() {
@@ -83,6 +89,11 @@ class PlayerUiListener(
 
     override fun onIsPlayingChanged(isPlaying: Boolean) {
         viewModel.isPlaying.value = isPlaying
+        viewModel.playWhenReady.value = player.playWhenReady
+    }
+
+    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+        viewModel.playWhenReady.value = playWhenReady
     }
 
     override fun onPositionDiscontinuity(

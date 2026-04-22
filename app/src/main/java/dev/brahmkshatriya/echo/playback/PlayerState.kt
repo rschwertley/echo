@@ -27,6 +27,7 @@ data class PlayerState(
         val mediaItem: MediaItem,
         val isLoaded: Boolean,
         val isPlaying: Boolean,
+        val isPlaceholder: Boolean = false,
     ) {
 
         val context by lazy { mediaItem.context }

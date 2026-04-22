@@ -359,17 +359,23 @@ class PlayerFragment : Fragment() {
             .addOnCheckedStateChangedListener(playPauseListener)
         binding.playerCollapsedContainer.collapsedTrackPlayPause
             .addOnCheckedStateChangedListener(playPauseListener)
-        observe(viewModel.isPlaying) {
+        observe(viewModel.playWhenReady) {
             binding.run {
                 playPauseListener.enabled = false
                 playerControls.trackPlayPause.isChecked = it
                 playerCollapsedContainer.collapsedTrackPlayPause.isChecked = it
                 playPauseListener.enabled = true
+
+                val isBuffering = viewModel.buffering.value && it
+                playerControls.playingIndicator.alpha = if (isBuffering) 1f else 0f
+                playerCollapsedContainer.collapsedPlayingIndicator.alpha = if (isBuffering) 1f else 0f
             }
         }
         observe(viewModel.buffering) {
-            binding.playerControls.playingIndicator.alpha = if (it) 1f else 0f
-            binding.playerCollapsedContainer.collapsedPlayingIndicator.alpha = if (it) 1f else 0f
+            val playWhenReady = viewModel.playWhenReady.value
+            val isBuffering = it && playWhenReady
+            binding.playerControls.playingIndicator.alpha = if (isBuffering) 1f else 0f
+            binding.playerCollapsedContainer.collapsedPlayingIndicator.alpha = if (isBuffering) 1f else 0f
         }
 
         observe(viewModel.progress) { (curr, buff) ->

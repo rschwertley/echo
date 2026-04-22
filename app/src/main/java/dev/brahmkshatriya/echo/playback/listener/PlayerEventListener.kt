@@ -57,11 +57,16 @@ class PlayerEventListener(
     }
 
     private fun updateCurrentFlow() {
-        if (player.currentMediaItem == null && player.mediaItemCount > 0)
-            throw Exception("This is possible")
-        currentFlow.value = player.currentMediaItem?.let {
+        val item = player.currentMediaItem
+        if (item != null) {
             val isPlaying = player.isPlaying && player.playbackState == Player.STATE_READY
-            PlayerState.Current(player.currentMediaItemIndex, it, it.isLoaded, isPlaying)
+            currentFlow.value = PlayerState.Current(
+                player.currentMediaItemIndex, item, item.isLoaded, isPlaying, false
+            )
+        } else if (player.mediaItemCount == 0 && currentFlow.value?.isPlaceholder == true) {
+            // Keep the placeholder until we have real items or decide to clear
+        } else {
+            currentFlow.value = null
         }
     }
 
