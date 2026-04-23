@@ -9,3 +9,10 @@
 .cxx
 local.properties
 .kotlin
+
+# Secrets and API Keys
+secrets.xml
+deezer-keys.properties
+*.jks
+*.keystore
+google-services.json

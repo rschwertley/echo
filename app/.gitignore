@@ -1,3 +1,10 @@
 /build
 /release
 google-services.json
+
+# Secrets and API Keys
+secrets.xml
+local.properties
+deezer-keys.properties
+*.jks
+*.keystore

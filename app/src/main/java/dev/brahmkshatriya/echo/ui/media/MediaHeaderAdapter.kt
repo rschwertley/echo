@@ -6,6 +6,7 @@ import android.text.SpannableString
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.view.LayoutInflater
+import androidx.core.text.HtmlCompat
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
@@ -288,6 +289,11 @@ class MediaHeaderAdapter(
         } else this
 
         private const val DIVIDER = " • "
+        private fun String.parseHtml(): String {
+            return HtmlCompat.fromHtml(this, HtmlCompat.FROM_HTML_MODE_COMPACT)
+                .toString().trim()
+        }
+
         fun Context.getSpan(
             compact: Boolean,
             extensionId: String,
@@ -307,7 +313,7 @@ class MediaHeaderAdapter(
                     ).joinToString(DIVIDER)
                     if (firstRow.isNotEmpty()) appendLine(firstRow)
                     if (secondRow.isNotEmpty()) appendLine(secondRow)
-                    val desc = item.description
+                    val desc = item.description?.parseHtml()
                     if (desc != null) {
                         appendLine()
                         appendLine(if (compact) desc.ellipsize() else desc)
@@ -338,7 +344,8 @@ class MediaHeaderAdapter(
             }
 
             is Artist -> {
-                val desc = if (compact) item.bio?.ellipsize() else item.bio
+                val desc = if (compact) item.bio?.parseHtml()?.ellipsize() 
+                    else item.bio?.parseHtml()
                 SpannableString(desc ?: "")
             }
 
@@ -368,7 +375,7 @@ class MediaHeaderAdapter(
                         appendLine()
                         appendLine(notPlayable)
                     }
-                    val desc = item.description
+                    val desc = item.description?.parseHtml()
                     if (desc != null) {
                         appendLine()
                         appendLine(if (compact) desc.ellipsize() else desc)

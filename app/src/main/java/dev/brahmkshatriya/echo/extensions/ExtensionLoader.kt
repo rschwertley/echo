@@ -14,7 +14,9 @@ import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.helpers.Injectable
 import dev.brahmkshatriya.echo.common.helpers.WebViewClient
 import dev.brahmkshatriya.echo.common.models.ExtensionType
+import dev.brahmkshatriya.echo.common.models.ImportType
 import dev.brahmkshatriya.echo.common.models.Metadata
+import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.providers.GlobalSettingsProvider
 import dev.brahmkshatriya.echo.common.providers.LyricsExtensionsProvider
 import dev.brahmkshatriya.echo.common.providers.MessageFlowProvider
@@ -30,6 +32,7 @@ import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getOrThrow
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.inject
 import dev.brahmkshatriya.echo.extensions.builtin.offline.OfflineExtension
 import dev.brahmkshatriya.echo.extensions.builtin.unified.UnifiedExtension
+import dev.brahmkshatriya.echo.extension.DeezerExtension
 import dev.brahmkshatriya.echo.extensions.db.ExtensionDatabase
 import dev.brahmkshatriya.echo.extensions.db.models.CurrentUser
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException.Companion.toAppException
@@ -79,6 +82,23 @@ class ExtensionLoader(
         scope, app.context, fileIgnoreFlow, parser,
         UnifiedExtension.metadata to unified,
         OfflineExtension.metadata to lazy { OfflineExtension(app.context) },
+        Metadata(
+            className = "dev.brahmkshatriya.echo.extension.DeezerExtension",
+            path = "",
+            importType = ImportType.BuiltIn,
+            type = ExtensionType.MUSIC,
+            id = "deezer",
+            name = "Deezer",
+            version = "v1.0.0",
+            description = "Deezer Extension for Echo.",
+            author = "Luftnos",
+            authorUrl = null,
+            icon = "https://cdn-files.dzcdn.net/img/common/og-deezer-logo.png".toImageHolder(),
+            repoUrl = null,
+            updateUrl = null,
+            preservedPackages = emptyList(),
+            isEnabled = true,
+        ) to lazy { DeezerExtension() },
 //        TestExtension.metadata to lazy { TestExtension() },
 //        DownloadExtension.metadata to lazy { DownloadExtension(app.context) }
 //        TrackerTestExtension.metadata to Injectable { TrackerTestExtension() },

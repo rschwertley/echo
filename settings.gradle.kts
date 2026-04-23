@@ -25,4 +25,5 @@ dependencyResolutionManagement {
 rootProject.name = "Echo"
 include(":app")
 include(":common")
- 
+include(":deezer-extension")
+project(":deezer-extension").projectDir = file("deezer-extension/ext")

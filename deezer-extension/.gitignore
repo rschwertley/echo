@@ -1,8 +1,15 @@
+*.iml
+.gradle
+.idea
+.DS_Store
 /build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
 
 # Secrets and API Keys
 secrets.xml
-local.properties
 deezer-keys.properties
 *.jks
 *.keystore
