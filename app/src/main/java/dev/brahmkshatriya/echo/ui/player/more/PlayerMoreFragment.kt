@@ -110,7 +110,7 @@ class PlayerMoreFragment : Fragment() {
         }
 
         showFragment()
-        binding.buttonToggleGroup.addOnButtonCheckedListener { group, _, _ ->
+        binding.buttonToggleGroup.addOnButtonCheckedListener { group, _, isChecked ->
             uiViewModel.run {
                 val current = moreSheetState.value
                 if (current != BottomSheetBehavior.STATE_COLLAPSED && current != BottomSheetBehavior.STATE_EXPANDED) return@run
@@ -118,7 +118,7 @@ class PlayerMoreFragment : Fragment() {
                     if (group.checkedButtonId != -1) BottomSheetBehavior.STATE_EXPANDED else BottomSheetBehavior.STATE_COLLAPSED
                 )
             }
-            showFragment()
+            if (isChecked) showFragment()
         }
 
         @SuppressLint("ClickableViewAccessibility")
