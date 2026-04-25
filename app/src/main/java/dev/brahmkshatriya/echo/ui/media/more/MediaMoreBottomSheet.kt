@@ -3,6 +3,9 @@ package dev.brahmkshatriya.echo.ui.media.more
 import android.os.Bundle
 import android.view.View
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
+import androidx.fragment.app.activityViewModels
+import androidx.lifecycle.ViewModel
 import androidx.paging.LoadState
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import dev.brahmkshatriya.echo.R
@@ -44,16 +47,22 @@ import dev.brahmkshatriya.echo.ui.playlist.edit.EditPlaylistBottomSheet
 import dev.brahmkshatriya.echo.ui.playlist.edit.EditPlaylistFragment
 import dev.brahmkshatriya.echo.ui.playlist.save.SaveToPlaylistBottomSheet
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
-import dev.brahmkshatriya.echo.utils.Serializer.getSerialized
-import dev.brahmkshatriya.echo.utils.Serializer.putSerialized
 import kotlinx.coroutines.flow.combine
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
 import org.koin.androidx.viewmodel.ext.android.viewModel
 import org.koin.core.parameter.parametersOf
 
 class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_more) {
+
+    class Args : ViewModel() {
+        var item: EchoMediaItem? = null
+        var context: EchoMediaItem? = null
+    }
+
     companion object {
-        fun newInstance(
+        fun show(
+            host: Fragment,
+            manager: FragmentManager = host.parentFragmentManager,
             contId: Int,
             extensionId: String,
             item: EchoMediaItem,
@@ -62,30 +71,42 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
             context: EchoMediaItem? = null,
             tabId: String? = null,
             pos: Int? = null,
-        ) = MediaMoreBottomSheet().apply {
-            arguments = Bundle().apply {
-                putInt("contId", contId)
-                putString("extensionId", extensionId)
-                putSerialized("item", item)
-                putBoolean("loaded", loaded)
-                putSerialized("context", context)
-                putBoolean("fromPlayer", fromPlayer)
-                putString("tabId", tabId)
-                putInt("pos", pos ?: -1)
-            }
+        ) {
+            val argsVm by host.activityViewModels<Args>()
+            argsVm.item = item
+            argsVm.context = context
+            MediaMoreBottomSheet().apply {
+                arguments = Bundle().apply {
+                    putInt("contId", contId)
+                    putString("extensionId", extensionId)
+                    putBoolean("loaded", loaded)
+                    putBoolean("fromPlayer", fromPlayer)
+                    putString("tabId", tabId)
+                    putInt("pos", pos ?: -1)
+                }
+            }.show(manager, null)
         }
     }
+
+    private val argsVm by activityViewModels<Args>()
+    private lateinit var item: EchoMediaItem
+    private var itemContext: EchoMediaItem? = null
 
     private val args by lazy { requireArguments() }
     private val contId by lazy { args.getInt("contId", -1).takeIf { it != -1 }!! }
     private val extensionId by lazy { args.getString("extensionId")!! }
-    private val item by lazy { args.getSerialized<EchoMediaItem>("item")!!.getOrThrow() }
     private val loaded by lazy { args.getBoolean("loaded") }
-    private val itemContext by lazy { args.getSerialized<EchoMediaItem?>("context")?.getOrThrow() }
     private val tabId by lazy { args.getString("tabId") }
     private val pos by lazy { args.getInt("pos") }
     private val fromPlayer by lazy { args.getBoolean("fromPlayer") }
     private val delete by lazy { args.getBoolean("delete", false) }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // argsVm.item is null only on process-death restoration; the sheet can't recover gracefully.
+        item = argsVm.item ?: run { dismissAllowingStateLoss(); return }
+        itemContext = argsVm.context
+    }
 
     private val vm by viewModel<MediaViewModel> {
         parametersOf(false, extensionId, item, loaded, delete)

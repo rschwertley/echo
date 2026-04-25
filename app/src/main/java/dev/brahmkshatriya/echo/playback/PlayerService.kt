@@ -2,11 +2,16 @@ package dev.brahmkshatriya.echo.playback
 
 import android.app.Activity
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ServiceInfo
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -105,6 +110,7 @@ class PlayerService : MediaLibraryService() {
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
+        startForegroundCompat()
         setListener(MediaSessionServiceListener(this, getPendingIntent(this)))
 
         val player = ShufflePlayer(exoPlayer)
@@ -143,6 +149,43 @@ class PlayerService : MediaLibraryService() {
         setMediaNotificationProvider(notificationProvider)
 
         mediaSession = session
+    }
+
+    // Called at the very top of onCreate() to satisfy Android's 5-second startForeground()
+    // requirement before any heavyweight initialization (ExoPlayer, MediaLibrarySession, etc.).
+    // Uses DefaultMediaNotificationProvider's channel/notification IDs so that Media3's own
+    // startForeground() call (which fires once the session has an active player state) cleanly
+    // replaces this placeholder notification with real media controls.
+    @OptIn(UnstableApi::class)
+    private fun startForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(NotificationManager::class.java)
+            if (nm.getNotificationChannel(DefaultMediaNotificationProvider.DEFAULT_CHANNEL_ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        DefaultMediaNotificationProvider.DEFAULT_CHANNEL_ID,
+                        getString(R.string.app_name),
+                        NotificationManager.IMPORTANCE_LOW
+                    )
+                )
+            }
+        }
+        val notification = NotificationCompat.Builder(
+            this, DefaultMediaNotificationProvider.DEFAULT_CHANNEL_ID
+        )
+            .setSmallIcon(R.drawable.ic_mono)
+            .setContentTitle(getString(R.string.app_name))
+            .setSilent(true)
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } else {
+            startForeground(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onDestroy() {

@@ -318,6 +318,7 @@ class PlayerFragment : Fragment() {
         }
     }
 
+    private var isInitialLoad = true
     private fun configurePlayerControls() {
         val viewPager = binding!!.viewPager
         viewPager.adapter = adapter
@@ -331,8 +332,9 @@ class PlayerFragment : Fragment() {
                 val index = (viewModel.playerState.current.value?.index ?: -1).takeIf { it != -1 }
                     ?: return@submitList
                 val current = binding?.viewPager?.currentItem ?: 0
-                val smooth = abs(index - current) <= 1
+                val smooth = !isInitialLoad && abs(index - current) <= 1
                 binding?.viewPager?.setCurrentItem(index, smooth)
+                isInitialLoad = false
             }
         }
 
@@ -610,9 +612,10 @@ class PlayerFragment : Fragment() {
     }
 
     private fun onMoreClicked(item: MediaItem) {
-        MediaMoreBottomSheet.newInstance(
+        MediaMoreBottomSheet.show(
+            this, requireActivity().supportFragmentManager,
             R.id.navHostFragment, item.extensionId, item.track, item.isLoaded, true
-        ).show(requireActivity().supportFragmentManager, null)
+        )
     }
 
     private fun Player?.hasVideo() =

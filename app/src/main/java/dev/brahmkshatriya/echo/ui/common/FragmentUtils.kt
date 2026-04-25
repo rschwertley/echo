@@ -32,7 +32,7 @@ object FragmentUtils {
         view: View? = null, bundle: Bundle? = null,
     ) {
         val viewModel by activityViewModels<UiViewModel>()
-        openFragment<T>(id, parentFragmentManager, viewModel, view, bundle)
+        openFragment<T>(id, parentFragmentManager, viewModel, view, bundle, caller = this)
     }
 
     inline fun <reified T : Fragment> openFragment(
@@ -41,13 +41,16 @@ object FragmentUtils {
         viewModel: UiViewModel,
         view: View? = null,
         bundle: Bundle? = null,
+        caller: Fragment? = null,
     ) {
         viewModel.collapsePlayer()
         manager.commit {
             setReorderingAllowed(true)
             addToBackStack(null)
             val fragment = createFragment<T>(bundle)
-            val old = manager.findFragmentById(cont)
+            // Use the calling fragment directly — findFragmentById is unreliable when multiple
+            // fragments share the same container (e.g. the tab hide/show pattern in MainFragment).
+            val old = caller ?: manager.findFragmentById(cont)
             if (old != null) hide(old)
             add(cont, fragment)
             setPrimaryNavigationFragment(fragment)

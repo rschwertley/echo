@@ -138,10 +138,11 @@ open class FeedClickListener(
     ): Boolean {
         if (extensionId == null) return notFoundSnack(R.string.extension)
         if (item == null) return notFoundSnack(R.string.item)
-        MediaMoreBottomSheet.newInstance(
+        MediaMoreBottomSheet.show(
+            fragment, fragmentManager,
             containerId, extensionId, item, false,
             context = context, tabId = tabId, pos = index
-        ).show(fragmentManager, null)
+        )
         return true
     }
 

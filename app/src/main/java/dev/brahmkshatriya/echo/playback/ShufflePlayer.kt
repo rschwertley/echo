@@ -1,8 +1,10 @@
 package dev.brahmkshatriya.echo.playback
 
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ShuffleOrder
@@ -174,6 +176,69 @@ class ShufflePlayer(
         original = emptyList()
         player.clearMediaItems()
         log("Clear media items")
+    }
+
+    // Limit the timeline exposed to the media session (and thus Bluetooth/AVRCP) to a sliding
+    // window around the current item. ExoPlayer's internal timeline is unchanged; only the view
+    // the session serializes over Binder is trimmed, preventing BadParcelableException when the
+    // queue is large (tested failure point: 199 items over com.google.android.bluetooth).
+    override fun getCurrentTimeline(): Timeline {
+        val full = super.getCurrentTimeline()
+        val count = full.windowCount
+        if (count <= QUEUE_WINDOW_SIZE) return full
+        val current = currentMediaItemIndex.coerceAtLeast(0)
+        val half = QUEUE_WINDOW_SIZE / 2
+        val start = (current - half).coerceIn(0, count - QUEUE_WINDOW_SIZE)
+        return WindowedTimeline(full, start, QUEUE_WINDOW_SIZE)
+    }
+
+    private class WindowedTimeline(
+        private val delegate: Timeline,
+        private val windowStart: Int,
+        private val windowSize: Int,
+    ) : Timeline() {
+
+        private val periodStart: Int
+        private val periodCount: Int
+
+        init {
+            val w1 = Window()
+            val w2 = Window()
+            periodStart = delegate.getWindow(windowStart, w1).firstPeriodIndex
+            delegate.getWindow(windowStart + windowSize - 1, w2)
+            periodCount = w2.lastPeriodIndex - periodStart + 1
+        }
+
+        override fun getWindowCount() = windowSize
+
+        override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
+            delegate.getWindow(windowStart + windowIndex, window, defaultPositionProjectionUs)
+            window.firstPeriodIndex -= periodStart
+            window.lastPeriodIndex -= periodStart
+            return window
+        }
+
+        override fun getPeriodCount() = periodCount
+
+        override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
+            delegate.getPeriod(periodStart + periodIndex, period, setIds)
+            period.windowIndex -= windowStart
+            return period
+        }
+
+        override fun getIndexOfPeriod(uid: Any): Int {
+            val idx = delegate.getIndexOfPeriod(uid)
+            if (idx == C.INDEX_UNSET) return C.INDEX_UNSET
+            val relative = idx - periodStart
+            return if (relative in 0 until periodCount) relative else C.INDEX_UNSET
+        }
+
+        override fun getUidOfPeriod(periodIndex: Int): Any =
+            delegate.getUidOfPeriod(periodStart + periodIndex)
+    }
+
+    companion object {
+        private const val QUEUE_WINDOW_SIZE = 50
     }
 
 }

@@ -67,9 +67,10 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
         }
         binding.toolBar.setOnMenuItemClickListener {
             val item = viewModel.itemResultFlow.value?.getOrNull()?.item ?: item
-            MediaMoreBottomSheet.newInstance(
+            MediaMoreBottomSheet.show(
+                this, parentFragmentManager,
                 id, extensionId, item, !viewModel.isRefreshing
-            ).show(parentFragmentManager, null)
+            )
             true
         }
         applyInsets {
