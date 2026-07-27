@@ -83,10 +83,21 @@ class HorizontalListViewHolder(
         when {
             shelf is Shelf.Lists.Items && shelf.list.all { it is Radio } -> {
                 val coverSize = resolvedItemCoverSizePx()
-                // Vertical chrome around the cover in item_shelf_lists_media + item_shelf_media_cover_big:
-                // root paddingVertical 8dp + cover container paddingVertical 8dp - cover container
-                // topMargin 4dp = 12dp. Density-scaled, font-scale-independent (it holds no text).
-                val coverChrome = 12.dpToPx(this)
+                // Vertical chrome around the cover, READ FROM THE ACTUAL inflated card (measureBinding) so it
+                // tracks whichever layout variant is in use instead of assuming phone's. It is the card root's
+                // vertical padding + the cover container's net vertical chrome = its vertical padding + its
+                // SIGNED topMargin (item_shelf_media_cover_big pulls up by -4dp, so this subtracts). This
+                // reproduces the value the old hardcoded constant was derived from:
+                //   phone  item_shelf_lists_media padding 4dp  → root 8 + cover(8 + (-4)) = 12dp  (byte-identical)
+                //   TV     item_shelf_lists_media padding 12dp → root 24 + cover(8 + (-4)) = 28dp  (was under-budgeted
+                //          at 12dp, clipping the title/subtitle off the bottom of the fixed row height).
+                // Density-scaled, font-scale-independent (holds no text); future padding tweaks to either
+                // layout can't reintroduce the mismatch since the number now comes from the layout itself.
+                val coverRoot = measureBinding.coverContainer.root
+                val coverTopMargin =
+                    (coverRoot.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
+                val coverChrome = measureBinding.root.paddingTop + measureBinding.root.paddingBottom +
+                    coverRoot.paddingTop + coverRoot.paddingBottom + coverTopMargin
                 contentRowHeightPx(
                     items = shelf.list,
                     baseHeightPx = coverSize + coverChrome,
