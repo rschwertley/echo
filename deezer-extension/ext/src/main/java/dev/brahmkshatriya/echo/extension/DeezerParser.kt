@@ -287,6 +287,18 @@ class DeezerParser(private val session: DeezerSession) {
             else -> this["SONGS"]?.jsonObject?.int("total")
         }
         val created = data.str("DATE_ADD")?.toDate()
+        // ── PLAYLIST-DATE-DIAG (TEMP — remove after capture) ─────────────────────────────────────
+        // Confirms whether DATE_MOD (Deezer's "Updated"/modified date) is present in playlist payloads,
+        // and on WHICH endpoint. The parser can't distinguish pageProfile (Library→Playlists list) from
+        // pagePlaylist (single-playlist detail), so we also dump the top-level key set — its shape
+        // identifies which endpoint produced this parse and shows exactly what fields it returns.
+        // Load Library→Playlists AND open a single playlist, then compare DATE_MOD across the two.
+        // Behavior unchanged — this only logs.
+        println(
+            "GladixDeezer PLAYLIST-DATE-DIAG title=${data.str("TITLE")} " +
+                "DATE_ADD=${data.str("DATE_ADD")} DATE_MOD=${data.str("DATE_MOD")} keys=${data.keys}"
+        )
+        // ─────────────────────────────────────────────────────────────────────────────────────────
         Playlist(
             id = data.str("PLAYLIST_ID").orEmpty(),
             title = data.str("TITLE").orEmpty(),
