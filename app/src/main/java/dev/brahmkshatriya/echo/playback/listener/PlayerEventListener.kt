@@ -433,6 +433,11 @@ class PlayerEventListener(
         // ≥ Deezer stream-resolution ceiling: DeezerApi clientNP connect 15s + read 10s;
         // getContentLength 10s. If clientNP ever gains a callTimeout, anchor to that instead.
         private const val COLD_GRACE_MS = 25_000L
+        // Bounds for enriched skip-cause reporting (safeCause) — keep the Crashlytics non-fatal small and
+        // spiral-proof: per-cause detail is capped, and only maxConsecutiveUnavailableSkips (3) causes are
+        // ever joined, so lastCauses stays ~a few hundred chars regardless of how nested a message is.
+        private const val MAX_MSG_LEN = 80
+        private const val MAX_CAUSE_LEN = 140
     }
 
     private val maxRetries = 3
@@ -477,9 +482,9 @@ class PlayerEventListener(
     // The ONLY way to advance the breaker: increments the counter and records this skip's cause together,
     // so they cannot drift. Called at every skip site; never at the exempt (5xx / removed-extension) sites,
     // which do not skip. cause == null for the buffering watchdog (a stuck resolve, no error object).
-    private fun recordSkip(cause: Throwable?) {
+    private fun recordSkip(cause: Throwable?, playbackError: PlaybackException? = null) {
         consecutiveUnavailableSkips++
-        recentSkipCauses.addLast(safeCause(cause))
+        recentSkipCauses.addLast(safeCause(cause, playbackError))
         if (recentSkipCauses.size > maxConsecutiveUnavailableSkips) recentSkipCauses.removeFirst()
     }
 
@@ -490,13 +495,33 @@ class PlayerEventListener(
         recentSkipCauses.clear()
     }
 
-    // Class + a whitelisted safe detail only — never the raw message (Media3 embeds the signed CDN URL with
-    // token/hmac in it). HTTP responseCode is the 401-vs-404-vs-timeout discriminator and carries no secret;
-    // responseMessage/headers are deliberately excluded.
-    private fun safeCause(cause: Throwable?): String {
-        if (cause == null) return "StuckBuffering"
-        val cls = cause::class.simpleName ?: "Unknown"
-        return if (cause is HttpDataSource.InvalidResponseCodeException) "$cls HTTP ${cause.responseCode}" else cls
+    // Enriched skip-cause detail (build-985 "lastCauses=Exception,Exception,Exception" was uselessly bare —
+    // it stored only the class simpleName, hiding the real reason). Now carries, most-diagnostic first:
+    //   • the Media3 PlaybackException errorCodeName (ERROR_CODE_IO_BAD_HTTP_STATUS / _PARSING_ / etc.) —
+    //     the true IO-vs-parse-vs-source discriminator, previously not captured at all;
+    //   • the exception type + HTTP responseCode (401/403/404 = token/auth vs missing);
+    //   • the DEEPEST cause's message, URL-STRIPPED and length-capped.
+    // Message handling is the security-sensitive part: Media3 embeds the signed CDN URL (token/hmac) in the
+    // raw message, so any URL is replaced with <url> and the whole thing is hard-capped — never emitted raw.
+    // Bounded by construction (MAX_CAUSE_LEN per cause × 3 causes) so a nested message can't spiral.
+    private fun safeCause(cause: Throwable?, playbackError: PlaybackException? = null): String {
+        val code = playbackError?.errorCodeName
+        val cls = cause?.let { it::class.simpleName ?: "Unknown" } ?: "StuckBuffering"
+        val http = (cause as? HttpDataSource.InvalidResponseCodeException)?.let { "HTTP ${it.responseCode}" }
+        val msg = cause?.deepestSafeMessage()
+        return listOfNotNull(code, cls, http, msg).joinToString(" ").take(MAX_CAUSE_LEN)
+    }
+
+    // Deepest non-null message in the cause chain, URL-stripped (signed-CDN-token guard) and capped. Returns
+    // null if every message is null (the type alone then carries the cause).
+    private fun Throwable.deepestSafeMessage(): String? {
+        var t: Throwable? = this
+        var last: String? = null
+        while (t != null) {
+            t.message?.let { last = it }
+            t = t.cause
+        }
+        return last?.replace(Regex("https?://\\S+"), "<url>")?.trim()?.take(MAX_MSG_LEN)
     }
 
     private fun reportAndResetConsecutiveSkips(extensionId: String?) {
@@ -547,7 +572,7 @@ class PlayerEventListener(
             } else {
                 retried404MediaId = null
                 Log.d("GladixPlayback", "onPlayerError: 404 retry failed for $currentMediaId, skipping")
-                recordSkip(rootCause)
+                recordSkip(rootCause, error)
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                     reportAndResetConsecutiveSkips(mediaItem?.extensionId)
                     player.stop()
@@ -617,7 +642,7 @@ class PlayerEventListener(
             } else {
                 retriedSocketMediaId = null
                 Log.d("GladixPlayback", "onPlayerError: SocketException retry failed for $currentMediaId, skipping")
-                recordSkip(rootCause)
+                recordSkip(rootCause, error)
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                     reportAndResetConsecutiveSkips(mediaItem?.extensionId)
                     player.stop()
@@ -679,7 +704,7 @@ class PlayerEventListener(
         }
 
         if (rootCause is TrackUnavailableException || rootCause.message?.contains("not available", ignoreCase = true) == true) {
-            recordSkip(rootCause)
+            recordSkip(rootCause, error)
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                 reportAndResetConsecutiveSkips(mediaItem?.extensionId)
                 player.stop()
@@ -751,7 +776,7 @@ class PlayerEventListener(
         val isExtensionRemoved = rootCause is ExtensionNotFoundException
         if (isMissingFile || is401 || isMalformedContent || isTimeout || isExtensionRemoved) {
             if (!isExtensionRemoved) {
-                recordSkip(rootCause)
+                recordSkip(rootCause, error)
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                     reportAndResetConsecutiveSkips(mediaItem?.extensionId)
                     player.stop()
@@ -809,7 +834,7 @@ class PlayerEventListener(
             currentRetries = 0
             last = null
             Log.d("GladixPlayback", "onPlayerError: maxRetries exhausted for ${mediaItem.mediaId}, skipping")
-            recordSkip(rootCause)
+            recordSkip(rootCause, error)
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                 reportAndResetConsecutiveSkips(mediaItem.extensionId)
                 player.stop()

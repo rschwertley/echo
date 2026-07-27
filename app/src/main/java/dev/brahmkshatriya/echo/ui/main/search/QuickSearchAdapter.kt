@@ -1,5 +1,6 @@
 package dev.brahmkshatriya.echo.ui.main.search
 
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import androidx.core.view.isVisible
@@ -9,6 +10,9 @@ import dev.brahmkshatriya.echo.utils.ui.scrolling.ScrollAnimListAdapter
 
 class QuickSearchAdapter(
     val listener: Listener,
+    // O6 (TV-only): invoked when D-pad UP is pressed on the FIRST suggestion/history row, to return focus to
+    // the search field. Null on phone — the key listener is then never installed, so touch is byte-identical.
+    private val onFirstRowUp: (() -> Unit)? = null,
 ) : ScrollAnimListAdapter<QuickSearchAdapter.Item, QuickSearchViewHolder>(DiffCallback) {
     data class Item(
         val extensionId: String,
@@ -58,6 +62,18 @@ class QuickSearchAdapter(
         holder.deleteView.isVisible = item.actual.searched
         holder.deleteView.setOnClickListener {
             listener.onDeleteClick(item)
+        }
+
+        // O6 (TV): UP on the FIRST row returns focus to the search field (the plain overlay RecyclerView has
+        // no TvAwareRecyclerView focus handling, and geometric UP doesn't cross into the toolbar's edit text).
+        // Non-first rows keep normal list movement (return false). Re-applied every bind, so it survives list
+        // rebuilds. Consumes both DOWN and UP of the key at row 0 so the press is fully handled; acts once on
+        // DOWN. Installed only when onFirstRowUp != null (TV) — phone rows get no key listener.
+        if (onFirstRowUp != null) holder.itemView.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP && holder.bindingAdapterPosition == 0) {
+                if (event.action == KeyEvent.ACTION_DOWN) onFirstRowUp.invoke()
+                true
+            } else false
         }
     }
 }

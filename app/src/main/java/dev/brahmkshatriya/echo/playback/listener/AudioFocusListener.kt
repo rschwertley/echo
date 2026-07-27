@@ -85,13 +85,25 @@ class AudioFocusListener(
     } else null
 
     internal fun requestFocus() {
-        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            audioManager.requestAudioFocus(focusRequest!!)
-        else audioManager.requestAudioFocus(
-            focusChangeListener,
-            AudioManager.STREAM_MUSIC,
-            AudioManager.AUDIOFOCUS_GAIN
-        )
+        val result = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                audioManager.requestAudioFocus(focusRequest!!)
+            else audioManager.requestAudioFocus(
+                focusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+        } catch (e: RuntimeException) {
+            // The system can REJECT focus by THROWING instead of returning a code — SecurityException
+            // "not allowed to perform TAKE_AUDIO_FOCUS" on some OEM / managed / restricted-background
+            // contexts — which the return-value `when` below can't catch, so it was propagating out of
+            // onPlayWhenReadyChanged and crashing (build 985). Treat a thrown denial EXACTLY like a
+            // returned AUDIOFOCUS_REQUEST_FAILED (pause, no auto-resume) so it degrades gracefully.
+            // RuntimeException (SecurityException's supertype) also covers any other binder-thrown
+            // RuntimeException (DeadObject/IllegalState) from the same call.
+            Log.w("GladixAudio", "requestAudioFocus threw — treating as REQUEST_FAILED", e)
+            AudioManager.AUDIOFOCUS_REQUEST_FAILED
+        }
         when (result) {
             AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> { /* normal, proceed */ }
             AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> {
@@ -125,9 +137,16 @@ class AudioFocusListener(
 
     private fun abandonFocus() {
         cancelCommit()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            audioManager.abandonAudioFocusRequest(focusRequest!!)
-        else audioManager.abandonAudioFocus(focusChangeListener)
+        // Same binder-throw risk as requestFocus (SecurityException / other RuntimeException from the
+        // system): a throw here would crash from the many teardown paths that call this (release, STATE_IDLE,
+        // becoming-noisy, the grace-window commit). Best-effort — abandoning focus has no fallback behavior.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                audioManager.abandonAudioFocusRequest(focusRequest!!)
+            else audioManager.abandonAudioFocus(focusChangeListener)
+        } catch (e: RuntimeException) {
+            Log.w("GladixAudio", "abandonAudioFocus threw — ignoring", e)
+        }
     }
 
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {

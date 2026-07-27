@@ -10,6 +10,8 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.extensions.MediaState
+import dev.brahmkshatriya.echo.history.db.toSlim
+import dev.brahmkshatriya.echo.history.db.toSlimContext
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.context
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
@@ -36,8 +38,21 @@ object ResumptionUtils {
     // Bound on how much of the persisted queue is materialized/persisted: current + up to this many
     // upcoming. Shared by the restore window (recoverQueue) and the save cap (capForPersist) so disk,
     // restore, and player converge on the same size. 2000 clears every normal queue (a big playlist ≈
-    // hundreds; 2000 ≈ 130+ hrs ahead) and trims only would-OOM "play all" queues. Tunable.
+    // hundreds; 2000 ≈ 130+ hrs ahead) and trims only would-OOM "play all" queues. Tunable. The build-1008
+    // OOM fix is slim-on-write (writeQueueEntries), NOT this cap — 2000 slim entries is only ~1.5–2.4 MB.
     private const val QUEUE_CAP_UPCOMING = 2000
+
+    // Size-gate for the queue JSON files (build 1008 OOM defense). Any queue file larger than this is
+    // discarded UNREAD (see getFromQueue / the cacheDir legacy read) rather than pulled into a giant
+    // String/decode — the exact readText/decode that OOM'd the 256 MB heap on fat, cap-2000 "play all"
+    // files. Chosen to sit in the gap between slim files and OOM-class fat files: with encodeDefaults=false
+    // and toSlim dropping streamables/extras/nested (but KEEPING track/artist/album covers, which dominate),
+    // a slim entry is ~0.74–1.2 KB, so a FULL 2000-entry slim QUEUE_ENTRIES tops out ≈ 2.4 MB for a
+    // collab-heavy queue (CONTEXTS far less). 4 MB leaves ≈1.7× margin so a full slim file is NEVER falsely
+    // dropped; it also clears a normal EXISTING fat queue (a few hundred fat tracks) so those survive the
+    // upgrade read and get slimmed on next save, and sits BELOW the pathological fat files (cap-2000 fat
+    // ≈ 5–15 MB) that OOM. Tunable; do NOT drop toward the ~2.4 MB full-2000 slim ceiling.
+    private const val QUEUE_FILE_MAX_BYTES = 4L * 1024 * 1024
 
     // Atomic composite of the ESSENTIAL per-track pair (track + extensionId). Bundling just these two
     // keeps them physically un-desyncable — a torn/interleaved save can't mispair a track with a
@@ -77,8 +92,18 @@ object ResumptionUtils {
 
     private inline fun <reified T> Context.getFromQueue(id: String): T? {
         val file = File(queueDir(this), id.hashCode().toString())
-        return if (file.exists()) runCatching { file.readText().toData<T>().getOrThrow() }.getOrNull()
-        else null
+        if (!file.exists()) return null
+        // Size-gate BEFORE any readText, on EVERY key that goes through here (QUEUE_ENTRIES, CONTEXTS, and
+        // the legacy TRACKS/EXTENSIONS reads; the tiny scalar keys never approach the limit). An oversized
+        // file — a pre-slim fat queue big enough to OOM readText/decode — is deleted UNREAD and treated as
+        // absent, so cold start proceeds with no queue and the next save writes a slim file. This is the
+        // build-1008 upgrade trap: the first post-upgrade read would otherwise pull the fat file into memory
+        // before slim-on-write could ever help. Mirrors the History migration discarding an oversized row.
+        if (file.length() > QUEUE_FILE_MAX_BYTES) {
+            file.delete()
+            return null
+        }
+        return runCatching { file.readText().toData<T>().getOrThrow() }.getOrNull()
     }
 
     private fun Context.deleteQueueKey(id: String) {
@@ -106,9 +131,16 @@ object ResumptionUtils {
     // next time. Then retire the legacy essential files (QUEUE_ENTRIES supersedes them); CONTEXTS is
     // shared with this format, so it is NOT deleted.
     private fun Context.writeQueueEntries(list: List<MediaItem>) {
-        val entries = list.map { QueueEntry(it.track, it.extensionId) }
+        // Slim every entry before persisting (build-1008 OOM fix): drop streamables/extras/description/
+        // nested-artist-album heaviness via the SAME History slimmers (toSlim/toSlimContext), which keep
+        // exactly what the queue needs — id (playback re-resolves by id), extensionId, and display fields —
+        // and, crucially, PRESERVE Radio context extras (toSlimContext keeps them for a Radio), so the
+        // recent radio work's re-resolution + "<title> Radio" header survive restore. This shrinks the file
+        // ~10× (fixing the readText/decode OOM) and shrinks the build-time re-serialization in toMetaData.
+        val entries = list.map { QueueEntry(it.track.toSlim(), it.extensionId) }
         if (saveToQueue(QUEUE_ENTRIES, entries).isSuccess) {
-            if (saveToQueue(CONTEXTS, list.map { it.context }).isFailure) deleteQueueKey(CONTEXTS)
+            if (saveToQueue(CONTEXTS, list.map { it.context?.toSlimContext() }).isFailure)
+                deleteQueueKey(CONTEXTS)
             deleteQueueKey(TRACKS)
             deleteQueueKey(EXTENSIONS)
         }
@@ -193,9 +225,11 @@ object ResumptionUtils {
             getFromQueue<List<String>>(EXTENSIONS),
             getFromQueue<List<EchoMediaItem?>>(CONTEXTS),
         ) ?: assembleLegacy(
-            getFromCache<List<Track>>(TRACKS, "queue"),
-            getFromCache<List<String>>(EXTENSIONS, "queue"),
-            getFromCache<List<EchoMediaItem?>>(CONTEXTS, "queue"),
+            // Same size-gate as getFromQueue (via maxBytes): the ancient cacheDir fat-Track queue is the
+            // last unguarded fat-read path, so an oversized legacy file here is skipped UNREAD too.
+            getFromCache<List<Track>>(TRACKS, "queue", maxBytes = QUEUE_FILE_MAX_BYTES),
+            getFromCache<List<String>>(EXTENSIONS, "queue", maxBytes = QUEUE_FILE_MAX_BYTES),
+            getFromCache<List<EchoMediaItem?>>(CONTEXTS, "queue", maxBytes = QUEUE_FILE_MAX_BYTES),
         )
     }
 

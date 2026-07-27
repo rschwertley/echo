@@ -258,7 +258,8 @@ class SearchFragment : Fragment(R.layout.fragment_search) {
                     setSelection(length())
                 }
             }
-        })
+        }, onFirstRowUp = if (view.context.isTv())
+            ({ binding.quickSearchView.editText.requestFocus() }) else null)
 
         binding.quickSearchRecyclerView.adapter = quickSearchAdapter
         observe(uiViewModel.combined) { insets ->

@@ -39,7 +39,7 @@ data class App(
     // path as every other extension error (the throwFlow collector below does printStackTrace + Crashlytics
     // recordException with isLoginRequired() suppression; the ExceptionUtils collector shows the snackbar).
     // Notes: CoroutineExceptionHandler is never invoked for CancellationException (normal cancellation) — the
-    // guard is defensive so it can never be reported. We bridge the non-suspend handler to the suspend emit via
+    // guard is defensive so it can never be reported. We bridge the non-suspend handler to the suspending emit via
     // scope.launch (safe: SupervisorJob keeps `scope` alive after a child fails), wrapped in runCatching so a
     // failure to record can never re-crash or loop. We only emit — the existing collectors do the handling.
     private val exceptionHandler: CoroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
@@ -83,6 +83,17 @@ data class App(
                 // login shelf, and the player's LoginOrAuth stop() all still fire. isLoginRequired walks the cause
                 // chain to catch BOTH forms — the player path's PlayerException→AppException.LoginRequired AND the
                 // AA getList path's RAW ClientException.LoginRequired (which classify() would miss).
+                // HAS_FIREBASE is a REAL build toggle (true only when google-services.json is present — false
+                // in the no-Firebase / F-Droid variant, where FirebaseCrashlytics isn't on the classpath).
+                // Lint sees only THIS build's baked-true value ("condition always true" / "can be simplified"),
+                // but the guard MUST stay or the no-Firebase build won't compile. Do NOT simplify. Suppression
+                // Two distinct inspections fire here: KotlinConstantConditions ("condition always true", the
+                // ID already IDE-generated for the analogous constant-BuildConfig check in AppUpdater) and
+                // SimplifyBooleanWithConstants ("boolean expression can be simplified"). The latter's ID is
+                // the shortName derived from SimplifyBooleanWithConstantsInspection (no explicit shortName in
+                // the Kotlin plugin's registration → class name minus "Inspection"), confirmed against the
+                // plugin jar — not guessed.
+                @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants")
                 if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) FirebaseCrashlytics.getInstance().apply {
                     setCustomKey("extension_id", crashExtensionId)
                     setCustomKey("player_state", crashPlayerState)

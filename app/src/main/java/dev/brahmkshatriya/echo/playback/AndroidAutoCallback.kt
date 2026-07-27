@@ -617,8 +617,13 @@ abstract class AndroidAutoCallback(
                 MediaItemUtils.build(app, downloadFlow.value, MediaState.Unloaded(extId, it), item)
             }
             val shuffled = unshuffled.shuffled()
-            if (unshuffled.isNotEmpty())
+            // Player access MUST be on the application/main thread — this future runs on a background
+            // dispatcher (see CoroutineUtils.future default). notifyShuffleTileOriginal only sets a field,
+            // but it's consumed on the main thread when Media3 applies the returned queue, so hop to Main
+            // for ordering/visibility (and parity with the syncShuffleFlag fix below).
+            if (unshuffled.isNotEmpty()) withContext(Dispatchers.Main) {
                 (mediaSession.player as? ShufflePlayer)?.notifyShuffleTileOriginal(unshuffled)
+            }
             return@future super.onSetMediaItems(
                 mediaSession, controller, shuffled.toMutableList(), 0, startPositionMs
             ).await(context)
@@ -629,7 +634,12 @@ abstract class AndroidAutoCallback(
             // In-order tap (all branches below build current+upcoming): sync the shuffle flag/icon OFF WITHOUT
             // changeQueue. Set here (not after the framework applies the returned queue) because the ensuing
             // setMediaItems doesn't touch the flag, so this survives — and `original` becomes the in-order queue.
-            (mediaSession.player as? ShufflePlayer)?.syncShuffleFlag(false)
+            // Main-thread hop: this future runs on a background dispatcher, but syncShuffleFlag mutates the
+            // ExoPlayer (setShuffleModeEnabled), which asserts main-thread access — the build-999 "wrong
+            // thread" crash. Only the player mutation moves to Main; resolution/build below stay on IO.
+            withContext(Dispatchers.Main) {
+                (mediaSession.player as? ShufflePlayer)?.syncShuffleFlag(false)
+            }
             val auto = parseAutoId(mediaItems[0].mediaId)
             val cached = auto?.let {
                 context.getFromCache<Triple<Track, String, EchoMediaItem?>>(it.t, "auto", durable = true)

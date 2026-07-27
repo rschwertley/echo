@@ -41,12 +41,19 @@ object CacheUtils {
     }
 
     inline fun <reified T> Context.getFromCache(
-        id: String, folderName: String = T::class.java.simpleName, durable: Boolean = false
+        id: String, folderName: String = T::class.java.simpleName, durable: Boolean = false,
+        maxBytes: Long = Long.MAX_VALUE,
     ): T? {
         val fileName = id.hashCode().toString()
         val cacheDir = cacheDir(this, folderName, durable)
         val file = File(cacheDir, fileName)
         if (!file.exists()) return null
+        // Size-gate BEFORE readText, parity with ResumptionUtils.getFromQueue: an oversized file — the
+        // legacy cacheDir queue read backs the same fat-Track class as the build-1008 OOM — is skipped
+        // UNREAD instead of pulled into memory. NOT deleted, matching this util's no-delete policy (a valid
+        // file can fail a transient decode; the ancient cacheDir queue is a vanishing population, so a cheap
+        // re-stat is fine). Default Long.MAX_VALUE = no gate, so every existing caller is byte-identical.
+        if (file.length() > maxBytes) return null
         return runCatching {
             file.readText().toData<T>().getOrThrow()
         }.getOrElse {
