@@ -287,32 +287,28 @@ class DeezerParser(private val session: DeezerSession) {
             else -> this["SONGS"]?.jsonObject?.int("total")
         }
         val created = data.str("DATE_ADD")?.toDate()
-        // ── PLAYLIST-DATE-DIAG (TEMP — remove after capture) ─────────────────────────────────────
-        // Confirms whether DATE_MOD (Deezer's "Updated"/modified date) is present in playlist payloads,
-        // and on WHICH endpoint. The parser can't distinguish pageProfile (Library→Playlists list) from
-        // pagePlaylist (single-playlist detail), so we also dump the top-level key set — its shape
-        // identifies which endpoint produced this parse and shows exactly what fields it returns.
-        // Load Library→Playlists AND open a single playlist, then compare DATE_MOD across the two.
-        // Behavior unchanged — this only logs.
-        println(
-            "GladixDeezer PLAYLIST-DATE-DIAG title=${data.str("TITLE")} " +
-                "DATE_ADD=${data.str("DATE_ADD")} DATE_MOD=${data.str("DATE_MOD")} keys=${data.keys}"
-        )
-        // ─────────────────────────────────────────────────────────────────────────────────────────
+        // Show/sort by the last-modified date (DATE_MOD, Deezer's "Updated"), falling back to the
+        // added/created date (DATE_ADD) when absent. The fallback is REQUIRED, not cosmetic: confirmed on
+        // real payloads that OWNED playlists carry DATE_MOD but FOLLOWED/favorited ones do not (they only
+        // have DATE_ADD/DATE_FAVORITE), so without it a followed playlist would show a blank date. DATE_MOD
+        // is present in both the library-list (pageProfile) and detail (pagePlaylist) payloads, so this one
+        // spot fixes both screens.
+        val modified = data.str("DATE_MOD")?.toDate()
+        val date = modified ?: created
         Playlist(
             id = data.str("PLAYLIST_ID").orEmpty(),
             title = data.str("TITLE").orEmpty(),
             cover = getCover(md5, type),
             description = data.str("DESCRIPTION").orEmpty(),
             subtitle = str("subtitle") ?: when {
-                tracks != null && created != null -> "$tracks Songs • $created"
+                tracks != null && date != null -> "$tracks Songs • $date"
                 tracks != null -> "$tracks Songs"
-                else -> created?.toString()
+                else -> date?.toString()
             },
             isEditable = parentUser?.contains(session.credentials.userId) == true,
             trackCount = tracks?.toLong(),
             duration = data.long("DURATION")?.times(1000),
-            creationDate = created
+            creationDate = date
         )
     }
 
