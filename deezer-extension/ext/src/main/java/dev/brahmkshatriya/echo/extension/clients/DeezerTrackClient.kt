@@ -92,6 +92,9 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
             }
             val keySourceId = fallbackTrack?.id ?: currentTrackId
 
+            // TEMPORARY (TOKEN-LIFETIME-DIAG) — remove after measuring stream-URL expiry.
+            println("GladixDeezer TOKEN-LIFETIME-DIAG url=$finalUrl")
+
             Streamable.server(
                 id = finalUrl,
                 quality = qualityValue,
