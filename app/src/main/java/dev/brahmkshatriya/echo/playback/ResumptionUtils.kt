@@ -17,11 +17,13 @@ import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
 import dev.brahmkshatriya.echo.utils.HealthMonitor
-import dev.brahmkshatriya.echo.utils.Serializer.toData
+import dev.brahmkshatriya.echo.utils.Serializer.json
 import dev.brahmkshatriya.echo.utils.Serializer.toJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.decodeFromStream
 import java.io.File
 
 object ResumptionUtils {
@@ -90,6 +92,7 @@ object ResumptionUtils {
         check(tmp.renameTo(target)) { "Queue rename failed for $id" }
     }
 
+    @OptIn(ExperimentalSerializationApi::class)
     private inline fun <reified T> Context.getFromQueue(id: String): T? {
         val file = File(queueDir(this), id.hashCode().toString())
         if (!file.exists()) return null
@@ -103,7 +106,15 @@ object ResumptionUtils {
             file.delete()
             return null
         }
-        return runCatching { file.readText().toData<T>().getOrThrow() }.getOrNull()
+        // Stream-decode instead of readText()+decodeFromString (build-1013 OOM). readText built the ENTIRE
+        // file into one String (StringWriter.toString) — that transient whole-file String, ~3–5× the file
+        // size, is what OOM'd the 256 MB heap when recoverTracks fires concurrently at cold start (service
+        // restore + AA tiles), even for sub-gate files. decodeFromStream parses straight from a buffered
+        // stream, allocating only the (slim) decoded objects, never a whole-file String. Same Json instance
+        // → byte-for-byte identical parse/result. Gate above still cheaply rejects genuinely huge files.
+        return runCatching {
+            file.inputStream().buffered().use { json.decodeFromStream<T>(it) }
+        }.getOrNull()
     }
 
     private fun Context.deleteQueueKey(id: String) {

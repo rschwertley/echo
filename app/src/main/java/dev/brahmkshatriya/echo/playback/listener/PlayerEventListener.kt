@@ -125,12 +125,28 @@ class PlayerEventListener(
         }
     }
 
+    // True only while an INVOLUNTARY auto-skip's seekToNextMediaItem is in flight. onMediaItemTransition
+    // reads it to SKIP persisting the resume pointer (saveIndex) for this advance, so CURRENT_ID stays on
+    // the failed/stuck track: cold start then retries that track (recovering a transient token/network
+    // failure) instead of over-advancing past it (the "resume one track ahead" bug). Same single-thread
+    // bracket invariant as internalSeekInFlight — seekToNextMediaItem delivers onMediaItemTransition
+    // SYNCHRONOUSLY on this (Main) thread inline (ListenerSet.flushEvents inside seekTo), so the flag is
+    // reliably set when the callback observes it. Dedicated flag (NOT internalSeekInFlight, which gates the
+    // restore-seek latch) and MARKER-gated, not reason-gated: an involuntary skip and a user's manual Next
+    // both surface as reason=SEEK, so only this marker distinguishes them. finally-reset so it can't stick.
+    private var involuntarySkipInFlight = false
+
     // Every skip in this listener is an INVOLUNTARY auto-skip (a failed/stuck current track). Route
     // them through here so ShufflePlayer removes the departing track WITHOUT pushing it to the play-
     // history back-stack (Seam 3) — Previous must never land back on a dead track that would re-fail.
     private fun skipInvoluntarily() {
         (player as? ShufflePlayer)?.suppressPushOnNextAdvance = true
-        player.seekToNextMediaItem()
+        involuntarySkipInFlight = true
+        try {
+            player.seekToNextMediaItem()
+        } finally {
+            involuntarySkipInFlight = false
+        }
     }
 
     private var pendingFullQueueUpdate: Job? = null
@@ -191,7 +207,12 @@ class PlayerEventListener(
         // Persist the current index so cold-start restore seeks to the correct track. mediaItem is the
         // new current item.
         val fullIndex = player.currentMediaItemIndex
-        ResumptionUtils.saveIndex(context, fullIndex, mediaItem.mediaId)
+        // Skip persisting the resume pointer for an INVOLUNTARY auto-skip (see involuntarySkipInFlight):
+        // keep CURRENT_ID/INDEX on the failed track so cold start retries it instead of resuming one ahead.
+        // Genuine advances and the user's manual Next (marker not set) persist as before; the debounced
+        // saveQueue is untouched and still reconciles the persisted queue to the live post-skip state.
+        if (!involuntarySkipInFlight)
+            ResumptionUtils.saveIndex(context, fullIndex, mediaItem.mediaId)
         session.notifyChildrenChanged("recent", 1, null)
         retriedMediaId = null
         retriedWatchdogCount = 0

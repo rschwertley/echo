@@ -2,8 +2,10 @@ package dev.brahmkshatriya.echo.utils
 
 import android.content.Context
 import android.util.Log
-import dev.brahmkshatriya.echo.utils.Serializer.toData
+import dev.brahmkshatriya.echo.utils.Serializer.json
 import dev.brahmkshatriya.echo.utils.Serializer.toJson
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.decodeFromStream
 import java.io.File
 
 object CacheUtils {
@@ -40,6 +42,7 @@ object CacheUtils {
         Log.e("CacheUtils", "saveToCache failed: folder=$folderName key=$id", it)
     }
 
+    @OptIn(ExperimentalSerializationApi::class)
     inline fun <reified T> Context.getFromCache(
         id: String, folderName: String = T::class.java.simpleName, durable: Boolean = false,
         maxBytes: Long = Long.MAX_VALUE,
@@ -54,8 +57,12 @@ object CacheUtils {
         // file can fail a transient decode; the ancient cacheDir queue is a vanishing population, so a cheap
         // re-stat is fine). Default Long.MAX_VALUE = no gate, so every existing caller is byte-identical.
         if (file.length() > maxBytes) return null
+        // Stream-decode instead of readText()+decodeFromString: readText built the whole file into one
+        // String (the build-1013 queue-restore OOM vector, via the legacy cacheDir read). decodeFromStream
+        // parses straight from a buffered stream — only the decoded objects are allocated, never a whole-file
+        // String. Same Json instance → identical parse/result; the size-gate above is unchanged.
         return runCatching {
-            file.readText().toData<T>().getOrThrow()
+            file.inputStream().buffered().use { json.decodeFromStream<T>(it) }
         }.getOrElse {
             // Present but unreadable → SURFACE it, don't swallow (a swallowed decode failure is how the
             // queue bug hid for five fixes). NOT deleted: "corrupt" can be a transient software decode

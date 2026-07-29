@@ -34,7 +34,7 @@ import com.google.android.material.navigation.NavigationBarView
 import dev.brahmkshatriya.echo.databinding.ActivityMainBinding
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.playback.PlayerState
-import dev.brahmkshatriya.echo.playback.ResumptionUtils.recoverTracks
+import dev.brahmkshatriya.echo.playback.ResumptionUtils.hasSavedQueue
 import dev.brahmkshatriya.echo.ui.common.ExceptionUtils.setupExceptionHandler
 import dev.brahmkshatriya.echo.ui.common.FragmentUtils.setupIntents
 import dev.brahmkshatriya.echo.ui.common.SnackBarHandler.Companion.setupSnackBar
@@ -131,7 +131,11 @@ open class MainActivity : AppCompatActivity() {
         }
         if (savedInstanceState == null && isFromGearhead) {
             lifecycleScope.launch {
-                val hasTracks = withContext(Dispatchers.IO) { !recoverTracks().isNullOrEmpty() }
+                // Stat-only (hasSavedQueue = file exists() checks), NOT recoverTracks() — the latter did a
+                // full read+decode of the whole queue just to compute this boolean, one of the concurrent
+                // cold-start reads that fed the build-1013 restore OOM. Presence of the queue file faithfully
+                // means "non-empty saved queue" (writeQueueEntries only writes non-empty; clearQueue deletes).
+                val hasTracks = withContext(Dispatchers.IO) { hasSavedQueue(this@MainActivity) }
                 if (hasTracks && playerViewModel.playWhenReady.value) {
                     uiViewModel.changePlayerState(STATE_EXPANDED)
                     uiViewModel.changeMoreState(STATE_COLLAPSED)
