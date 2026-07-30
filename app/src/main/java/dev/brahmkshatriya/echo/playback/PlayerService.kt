@@ -509,7 +509,7 @@ class PlayerService : MediaLibraryService() {
                     .buildUpon()
                     .setAudioOffloadPreferences(audioOffloadPreferences)
                     .build()
-                it.preloadConfiguration = ExoPlayer.PreloadConfiguration(C.TIME_UNSET)
+                it.preloadConfiguration = ExoPlayer.PreloadConfiguration(5_000_000L)
                 it.skipSilenceEnabled = app.settings.getBoolean(SKIP_SILENCE, true)
             }
     }

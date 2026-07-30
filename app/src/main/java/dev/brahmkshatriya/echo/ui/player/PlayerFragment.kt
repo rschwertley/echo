@@ -32,7 +32,6 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.core.net.toUri
 import androidx.core.view.doOnLayout
 import androidx.core.view.doOnNextLayout
-import androidx.core.view.doOnPreDraw
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -144,29 +143,7 @@ class PlayerFragment : Fragment() {
         super.onResume()
         if (uiViewModel.playerSheetState.value == STATE_EXPANDED)
             binding?.bgImage?.resume()
-        // A track that auto-advanced while the screen was OFF leaves this ViewPager on the previous page:
-        // the de-gated collector DID call setCurrentItem while stopped, but its scroll/layout can't run
-        // until the window is visible again, so the first wake frame draws the stale page and only then
-        // swaps. Re-commit the current page in the PRE-DRAW pass — before that first visible frame. It
-        // targets currentPageIndex() (the SAME current-index expression submit()'s scroll uses), non-smooth,
-        // and is skipped when the page is already there, so it cannot fight the pending/posted scroll:
-        // whichever lands first wins at that index, the other is a no-op at the same index — no flicker, no
-        // double-scroll. Phone full-screen only; touches nothing but this ViewPager's page position.
-        binding?.viewPager?.let { vp ->
-            vp.doOnPreDraw {
-                val index = currentPageIndex() ?: return@doOnPreDraw
-                if (vp.currentItem != index) vp.setCurrentItem(index, false)
-            }
-        }
     }
-
-    // Index of the current track within the queue — the SAME expression submit()'s scroll uses
-    // (playerState.current.value → indexOfFirst by mediaId, null when absent), so the resume re-commit can
-    // never resolve to a different page than the pending/posted scroll. Single canonical copy for this path.
-    private fun currentPageIndex(): Int? =
-        viewModel.playerState.current.value?.let { c ->
-            viewModel.queue.indexOfFirst { it.mediaId == c.mediaItem.mediaId }.takeIf { it != -1 }
-        }
 
     private val collapseHeight by lazy {
         resources.getDimension(R.dimen.collapsed_cover_size).toInt()
