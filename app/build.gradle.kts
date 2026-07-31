@@ -42,6 +42,10 @@ android {
             isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
+                // Load-bearing: without this line the release R8 run never reads proguard-rules.pro,
+                // so the extension-ABI keep rule below would be silently dropped. nightly/stable inherit
+                // this via initWith(getByName("release")).
+                "proguard-rules.pro",
             )
         }
         create("nightly") {
@@ -124,3 +128,48 @@ if (hasGoogleServices) {
 fun execute(vararg command: String): String = providers.exec {
     commandLine(*command)
 }.standardOutput.asText.get().trim()
+
+// RECURRENCE GUARD for the extension-ABI keep rule (see app/proguard-rules.pro). Fails the release
+// build if R8 repackaged/renamed any core :common ABI class — the exact symptom that breaks every
+// third-party extension at load. Dumb-and-robust: string-matches a handful of critical classes to
+// themselves in mapping.txt; skips gracefully when minify is off (no mapping.txt).
+tasks.register("verifyExtensionAbi") {
+    doLast {
+        val critical = listOf(
+            "dev.brahmkshatriya.echo.common.clients.ExtensionClient",
+            "dev.brahmkshatriya.echo.common.clients.TrackClient",
+            "dev.brahmkshatriya.echo.common.clients.AlbumClient",
+            "dev.brahmkshatriya.echo.common.clients.RadioClient",
+            "dev.brahmkshatriya.echo.common.models.Track",
+            "dev.brahmkshatriya.echo.common.models.EchoMediaItem",
+        )
+        val mappingRoot = layout.buildDirectory.dir("outputs/mapping").get().asFile
+        val mappingFiles = mappingRoot.listFiles()
+            ?.map { java.io.File(it, "mapping.txt") }
+            ?.filter { it.exists() }
+            .orEmpty()
+        if (mappingFiles.isEmpty()) {
+            logger.lifecycle("verifyExtensionAbi: no mapping.txt found (minify off?) — skipping ABI check.")
+            return@doLast
+        }
+        mappingFiles.forEach { file ->
+            val variant = file.parentFile.name
+            val lines = file.readLines()
+            critical.forEach { fqcn ->
+                val selfMapped = lines.any { it.startsWith("$fqcn -> $fqcn:") }
+                if (!selfMapped) throw GradleException(
+                    "Extension ABI broken: $fqcn was repackaged/renamed by R8 in variant '$variant'. " +
+                        "The -keep rule for dev.brahmkshatriya.echo.common.** is missing or not applied — " +
+                        "third-party extensions will fail to load (NoClassDefFoundError). " +
+                        "See app/proguard-rules.pro."
+                )
+            }
+            logger.lifecycle("verifyExtensionAbi: '$variant' ABI intact (${critical.size} core classes self-mapped).")
+        }
+    }
+}
+
+// Run the guard whenever R8 runs (release/nightly/stable). A failure in this finalizer fails the build.
+tasks.matching { it.name.matches(Regex("^minify.*WithR8$")) }.configureEach {
+    finalizedBy("verifyExtensionAbi")
+}

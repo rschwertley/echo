@@ -12,6 +12,7 @@ import dev.brahmkshatriya.echo.download.exceptions.DownloaderExtensionNotFoundEx
 import dev.brahmkshatriya.echo.download.tasks.BaseTask.Companion.getTitle
 import dev.brahmkshatriya.echo.extensions.db.models.UserEntity
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException
+import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionLoadException
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionLoaderException
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionNotFoundException
 import dev.brahmkshatriya.echo.extensions.exceptions.InvalidExtensionListException
@@ -42,8 +43,28 @@ import java.nio.channels.UnresolvedAddressException
 object ExceptionUtils {
 
     private fun Context.getTitle(throwable: Throwable): String? = when (throwable) {
-        is LinkageError, is ReflectiveOperationException -> getString(R.string.extension_out_of_date)
+        // Class/library LOAD failure — the extension can't be loaded at all (missing/repackaged class,
+        // bad dex, missing native lib). Often the APP's fault (e.g. an R8 ABI break repackaging :common),
+        // never fixable by "updating". Name the cause + missing class so the real problem is self-evident.
+        // MUST precede the LinkageError/ReflectiveOperationException catch-all below (these are subtypes).
+        is NoClassDefFoundError, is ClassNotFoundException, is UnsatisfiedLinkError ->
+            getString(R.string.extension_failed_to_load_x, "${throwable::class.simpleName}: ${throwable.message}")
+
+        // Method/field-level ABI drift (built against a different :common signature). A compatibility
+        // STATE, not an installable update — worded to NOT borrow the update system's "out of date /
+        // update available" language (the update checker may correctly report no update exists).
+        is LinkageError, is ReflectiveOperationException ->
+            getString(R.string.extension_incompatible_version)
+
         is UnknownHostException, is UnresolvedAddressException -> getString(R.string.no_internet)
+
+        // Deferred class-load/instantiate failure carrying extension identity (see ExtensionParser).
+        // Root-cause unwrapped so a constructor failure wrapped in InvocationTargetException shows the
+        // real error, not the reflection wrapper.
+        is ExtensionLoadException -> getString(
+            R.string.extension_failed_to_load_x,
+            throwable.cause.rootCause.let { "${throwable.name} — ${it::class.simpleName}: ${it.message}" }
+        )
 
         is ExtensionLoaderException ->
             getString(R.string.error_loading_extension_from_x, throwable.clazz)
@@ -89,6 +110,12 @@ object ExceptionUtils {
         is ExtensionLoaderException -> """
             Class: ${throwable.clazz}
             Source: ${throwable.source}
+        """.trimIndent()
+
+        is ExtensionLoadException -> """
+            Extension: ${throwable.name}
+            ID: ${throwable.id}
+            Class: ${throwable.className}
         """.trimIndent()
 
         is ExtensionNotFoundException -> "Extension ID: ${throwable.id}"

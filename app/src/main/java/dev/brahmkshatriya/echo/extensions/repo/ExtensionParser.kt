@@ -9,8 +9,10 @@ import dev.brahmkshatriya.echo.common.models.ExtensionType
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.models.ImportType
 import dev.brahmkshatriya.echo.common.models.Metadata
+import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionLoadException
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionLoaderException
 import dev.brahmkshatriya.echo.utils.ShaUtils.getSha256
+import kotlinx.coroutines.CancellationException
 import java.io.File
 
 class ExtensionParser(
@@ -37,7 +39,16 @@ class ExtensionParser(
     private fun parse(source: File, importType: ImportType) = runCatching {
         runCatching {
             val metadata = parseManifest(source, importType)
-            val lazy = lazy { loadFrom(metadata) }
+            // The class-load/instantiate step is deferred to first use. Wrap its failure with the
+            // extension's identity so a load error (e.g. NoClassDefFoundError from an ABI break)
+            // surfaces as an accurate "Failed to load <name>: <cause>" instead of a raw LinkageError
+            // that ExceptionUtils would otherwise mislabel. CancellationException passes through.
+            val lazy = lazy {
+                runCatching { loadFrom(metadata) }.getOrElse {
+                    if (it is CancellationException) throw it
+                    throw ExtensionLoadException(metadata.name, metadata.id, metadata.className, it)
+                }
+            }
             metadata to lazy
         }.getOrElse {
             throw ExtensionLoaderException(javaClass.simpleName, source.toString(), it)

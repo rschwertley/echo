@@ -71,6 +71,8 @@
     <string name="view">View</string>
 
     <string name="extension_out_of_date">Out of date</string>
+    <string name="extension_failed_to_load_x">Failed to load extension: %1$s</string>
+    <string name="extension_incompatible_version">Incompatible with this app version — some features may not work</string>
     <string name="no_internet">No Internet</string>
     <string name="error_loading_extension_from_x">Error loading extension from %1$s</string>
     <string name="extension_x_not_found">Extension %1$s not found</string>
