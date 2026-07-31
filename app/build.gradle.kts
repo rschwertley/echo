@@ -136,22 +136,24 @@ fun execute(vararg command: String): String = providers.exec {
 // third-party extension at load. Dumb-and-robust: string-matches a handful of critical classes to
 // themselves in mapping.txt; skips gracefully when minify is off (no mapping.txt).
 tasks.register("verifyExtensionAbi") {
+    // Resolve everything from Project at CONFIGURATION time into plain, serializable locals (a File and a
+    // List<String>). The doLast action below captures ONLY these + File I/O — no layout/logger/project
+    // reference at execution time — so it is compatible with the configuration cache (the bundle build).
+    val mappingRoot: File = layout.buildDirectory.dir("outputs/mapping").get().asFile
+    val critical = listOf(
+        "dev.brahmkshatriya.echo.common.clients.ExtensionClient",
+        "dev.brahmkshatriya.echo.common.clients.TrackClient",
+        "dev.brahmkshatriya.echo.common.clients.AlbumClient",
+        "dev.brahmkshatriya.echo.common.clients.RadioClient",
+        "dev.brahmkshatriya.echo.common.models.Track",
+        "dev.brahmkshatriya.echo.common.models.EchoMediaItem",
+    )
     doLast {
-        val critical = listOf(
-            "dev.brahmkshatriya.echo.common.clients.ExtensionClient",
-            "dev.brahmkshatriya.echo.common.clients.TrackClient",
-            "dev.brahmkshatriya.echo.common.clients.AlbumClient",
-            "dev.brahmkshatriya.echo.common.clients.RadioClient",
-            "dev.brahmkshatriya.echo.common.models.Track",
-            "dev.brahmkshatriya.echo.common.models.EchoMediaItem",
-        )
-        val mappingRoot: File = layout.buildDirectory.dir("outputs/mapping").get().asFile
-        val variantDirs: List<File> = mappingRoot.listFiles()?.toList().orEmpty()
-        val mappingFiles: List<File> = variantDirs
+        val mappingFiles: List<File> = (mappingRoot.listFiles()?.toList().orEmpty())
             .map { dir -> File(dir, "mapping.txt") }
             .filter { it.exists() }
         if (mappingFiles.isEmpty()) {
-            logger.lifecycle("verifyExtensionAbi: no mapping.txt found (minify off?) — skipping ABI check.")
+            println("verifyExtensionAbi: no mapping.txt found (minify off?) — skipping ABI check.")
             return@doLast
         }
         mappingFiles.forEach { file ->
@@ -166,7 +168,7 @@ tasks.register("verifyExtensionAbi") {
                         "See app/proguard-rules.pro."
                 )
             }
-            logger.lifecycle("verifyExtensionAbi: '$variant' ABI intact (${critical.size} core classes self-mapped).")
+            println("verifyExtensionAbi: '$variant' ABI intact (${critical.size} core classes self-mapped).")
         }
     }
 }
