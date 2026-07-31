@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.ksp)
@@ -143,20 +145,20 @@ tasks.register("verifyExtensionAbi") {
             "dev.brahmkshatriya.echo.common.models.Track",
             "dev.brahmkshatriya.echo.common.models.EchoMediaItem",
         )
-        val mappingRoot = layout.buildDirectory.dir("outputs/mapping").get().asFile
-        val mappingFiles = mappingRoot.listFiles()
-            ?.map { java.io.File(it, "mapping.txt") }
-            ?.filter { it.exists() }
-            .orEmpty()
+        val mappingRoot: File = layout.buildDirectory.dir("outputs/mapping").get().asFile
+        val variantDirs: List<File> = mappingRoot.listFiles()?.toList().orEmpty()
+        val mappingFiles: List<File> = variantDirs
+            .map { dir -> File(dir, "mapping.txt") }
+            .filter { it.exists() }
         if (mappingFiles.isEmpty()) {
             logger.lifecycle("verifyExtensionAbi: no mapping.txt found (minify off?) — skipping ABI check.")
             return@doLast
         }
         mappingFiles.forEach { file ->
-            val variant = file.parentFile.name
+            val variant = file.parentFile?.name ?: "unknown"
             val lines = file.readLines()
             critical.forEach { fqcn ->
-                val selfMapped = lines.any { it.startsWith("$fqcn -> $fqcn:") }
+                val selfMapped = lines.any { line -> line.startsWith("$fqcn -> $fqcn:") }
                 if (!selfMapped) throw GradleException(
                     "Extension ABI broken: $fqcn was repackaged/renamed by R8 in variant '$variant'. " +
                         "The -keep rule for dev.brahmkshatriya.echo.common.** is missing or not applied — " +
