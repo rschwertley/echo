@@ -1,3 +1,10 @@
+// Suppresses the IDE "the 'apply' plugin syntax is older and not recommended" inspection for the
+// CONDITIONAL apply(plugin = …) calls below (gms/crashlytics), which cannot move to the plugins {}
+// block because they must apply only when google-services.json is present (see the NOTE there).
+// NOTE: verify this id matches your Android Studio version — Alt+Enter on the warning → "Suppress for
+// file" inserts the exact id. An unknown id is silently ignored (won't clear the panel), so confirm it.
+@file:Suppress("GrDeprecatedAPIUsage")
+
 import java.io.File
 
 plugins {
@@ -12,7 +19,7 @@ plugins {
 // True only when a PARSEABLE google-services.json is present. CI (nightly/stable) writes this file
 // by base64-decoding the GOOGLE_SERVICES_B64 secret; an empty/misconfigured secret yields an empty
 // or malformed file that would otherwise pass a bare exists() and hard-fail processGoogleServices.
-// Parsing here degrades a bad/absent json to the Firebase-free (compileOnly) path instead.
+// Parsing here degrades a bad/absent JSON to the Firebase-free (compileOnly) path instead.
 val hasGoogleServices = file("google-services.json").let { f ->
     f.exists() && runCatching { groovy.json.JsonSlurper().parse(f); true }.getOrDefault(false)
 }
@@ -34,7 +41,7 @@ android {
         versionCode = gitCount
         versionName = "v${version}_$gitHash${if (isDirty) "-dirty" else ""}($gitCount)"
         // True only when google-services.json is present. Compile-time constant used to guard
-        // every Firebase call site so no-json builds never load the (compileOnly) Firebase classes.
+        // every Firebase call site so no-JSON builds never load the (compileOnly) Firebase classes.
         buildConfigField("boolean", "HAS_FIREBASE", "$hasGoogleServices")
     }
 
@@ -111,17 +118,26 @@ dependencies {
 
     testImplementation(libs.junit)
 
-    // Firebase on the COMPILE classpath in every build so direct references in main source
-    // resolve even without google-services.json (CI / F-Droid). Packaged (runtime) only when
-    // json is present, so Firebase-free builds stay Firebase-free.
-    compileOnly(platform(libs.firebase.bom))
-    compileOnly(libs.bundles.firebase)
+    // Firebase on the COMPILE classpath in every build so direct references in main source resolve
+    // even without google-services.json (CI / F-Droid). Mutually exclusive by design: with JSON present
+    // it is `implementation` (compile + runtime, packaged); without, it stays `compileOnly` (compile
+    // only, never packaged) so Firebase-free builds stay Firebase-free. `implementation` is a superset of
+    // `compileOnly` for the compile classpath, so this is identical to declaring both — but avoids putting
+    // the same artifact on both configurations (the "declared multiple times" warning).
     if (hasGoogleServices) {
         implementation(platform(libs.firebase.bom))
         implementation(libs.bundles.firebase)
+    } else {
+        compileOnly(platform(libs.firebase.bom))
+        compileOnly(libs.bundles.firebase)
     }
 }
 
+// NOTE: apply() is REQUIRED here, not a `plugins {}` entry — these plugins are applied CONDITIONALLY
+// (only when google-services.json is present). The declarative plugins {} block cannot be conditional;
+// gms/crashlytics are declared there with `apply false` and applied here. Moving them into plugins {}
+// unconditionally would run processGoogleServices in every build and hard-fail the Firebase-free
+// (no-JSON) path (CI / F-Droid). The "use the plugins DSL" inspection is a false positive for this case.
 if (hasGoogleServices) {
     apply(plugin = libs.plugins.gms.get().pluginId)
     apply(plugin = libs.plugins.crashlytics.get().pluginId)
@@ -136,17 +152,30 @@ fun execute(vararg command: String): String = providers.exec {
 // third-party extension at load. Dumb-and-robust: string-matches a handful of critical classes to
 // themselves in mapping.txt; skips gracefully when minify is off (no mapping.txt).
 tasks.register("verifyExtensionAbi") {
+    description = "Verifies R8 did not repackage/rename the extension ABI (common.** + kept stdlib packages), failing the build if it did."
+    group = "verification"
     // Resolve everything from Project at CONFIGURATION time into plain, serializable locals (a File and a
     // List<String>). The doLast action below captures ONLY these + File I/O — no layout/logger/project
     // reference at execution time — so it is compatible with the configuration cache (the bundle build).
     val mappingRoot: File = layout.buildDirectory.dir("outputs/mapping").get().asFile
+    // One anchor per kept ABI category (see proguard-rules.pro). Each is guaranteed present in the app,
+    // so a "not self-mapped" result means R8 repackaged that whole category — the exact regression that
+    // breaks extension loading. common.** anchors + the stdlib/runtime anchors.
     val critical = listOf(
+        // our ABI (dev.brahmkshatriya.echo.common.**)
         "dev.brahmkshatriya.echo.common.clients.ExtensionClient",
         "dev.brahmkshatriya.echo.common.clients.TrackClient",
         "dev.brahmkshatriya.echo.common.clients.AlbumClient",
         "dev.brahmkshatriya.echo.common.clients.RadioClient",
         "dev.brahmkshatriya.echo.common.models.Track",
         "dev.brahmkshatriya.echo.common.models.EchoMediaItem",
+        // stdlib / runtime ABI (one anchor per kept package)
+        "kotlin.jvm.functions.Function0",       // kotlin.** — function types
+        "kotlin.jvm.functions.Function1",
+        "kotlin.coroutines.Continuation",        // kotlin.** — suspend machinery
+        "kotlinx.coroutines.flow.Flow",          // kotlinx.coroutines.**
+        "kotlinx.serialization.KSerializer",     // kotlinx.serialization.**
+        "okhttp3.OkHttpClient",                  // okhttp3.**
     )
     doLast {
         val mappingFiles: List<File> = (mappingRoot.listFiles()?.toList().orEmpty())
@@ -163,9 +192,10 @@ tasks.register("verifyExtensionAbi") {
                 val selfMapped = lines.any { line -> line.startsWith("$fqcn -> $fqcn:") }
                 if (!selfMapped) throw GradleException(
                     "Extension ABI broken: $fqcn was repackaged/renamed by R8 in variant '$variant'. " +
-                        "The -keep rule for dev.brahmkshatriya.echo.common.** is missing or not applied — " +
-                        "third-party extensions will fail to load (NoClassDefFoundError). " +
-                        "See app/proguard-rules.pro."
+                        "An extension-ABI -keep rule is missing or not applied — extensions will fail to " +
+                        "load (NoClassDefFoundError). The kept ABI is common.** + kotlin.** + " +
+                        "kotlinx.coroutines.** + kotlinx.serialization.** + okhttp3.** + okio.** + " +
+                        "com.google.protobuf.**. See app/proguard-rules.pro."
                 )
             }
             println("verifyExtensionAbi: '$variant' ABI intact (${critical.size} core classes self-mapped).")
