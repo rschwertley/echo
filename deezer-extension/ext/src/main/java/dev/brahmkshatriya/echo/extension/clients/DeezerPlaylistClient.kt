@@ -9,8 +9,11 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.DeezerApi
 import dev.brahmkshatriya.echo.extension.DeezerExtension
 import dev.brahmkshatriya.echo.extension.DeezerParser
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private val api: DeezerApi, private val parser: DeezerParser) {
 
@@ -29,14 +32,32 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
 
     fun loadTracks(playlist: Playlist): Feed<Track> = PagedData.Single {
         deezerExtension.handleArlExpiration()
-        val jsonObject = api.playlist(playlist)
-        val dataArray = jsonObject["results"]!!.jsonObject["SONGS"]!!.jsonObject["data"]!!.jsonArray
-        dataArray.mapIndexed { index, song ->
-            val currentTrack = parser.run { song.jsonObject.toTrack() }
-            val nextTrack = parser.run { dataArray.getOrNull(index + 1)?.jsonObject?.toTrack() }
-            currentTrack.copy(
-                extras = currentTrack.extras + mapOf(
-                    "NEXT" to nextTrack?.id.orEmpty(),
+        // Tracks come from the dedicated playlist.getSongs (the app/deezer-py authoritative path), NOT from
+        // deezer.pagePlaylist's inline SONGS (a summary that can carry a wrong same-named-artist twin).
+        // pagePlaylist is still used for playlist METADATA in loadPlaylist above.
+        val jsonObject = api.playlistSongs(playlist)
+        // `results` is present for ANY valid response (empty playlists included), so a missing `results`
+        // is a genuine Deezer error response (callApi returns non-CSRF errors un-thrown). Surface it with
+        // Deezer's error message if available — do NOT degrade to empty, which would mask the failure as an
+        // empty playlist. (message extraction is runCatching-guarded so it can never throw over the real error.)
+        val results = jsonObject["results"]?.jsonObject ?: run {
+            val message = runCatching {
+                jsonObject["error"]?.jsonObject?.entries
+                    ?.joinToString { (key, value) -> value.jsonPrimitive.contentOrNull ?: key }
+                    ?.takeIf { it.isNotBlank() }
+            }.getOrNull()
+            throw Exception(message ?: "Failed to load playlist tracks")
+        }
+        // playlist.getSongs returns tracks at results.data[] (flat — NOT results.SONGS.data). Absent/empty
+        // (empty or edge playlist) degrades to an empty list rather than NPE. PagedData.Single (non-paginated),
+        // so an empty result can never mask a mid-pagination gap.
+        val dataArray = results["data"]?.jsonArray ?: JsonArray(emptyList())
+        val baseTracks = dataArray.mapNotNull { it as? JsonObject }
+            .map { parser.run { it.toTrack() } }
+        baseTracks.mapIndexed { index, track ->
+            track.copy(
+                extras = track.extras + mapOf(
+                    "NEXT" to baseTracks.getOrNull(index + 1)?.id.orEmpty(),
                     "playlist_id" to playlist.id
                 )
             )

@@ -23,6 +23,19 @@ class DeezerPlaylist(private val deezerApi: DeezerApi) {
         )
     }
 
+    // Dedicated, authoritative track-list method — the path Deezer's own app / deezer-py use for playlist
+    // tracks (deezer.pagePlaylist's inline SONGS is a summary and can carry mis-attributed entries).
+    // Returns results.data[] of canonical SONG objects. nb=-1 fetches all tracks.
+    suspend fun getSongs(playlist: Playlist): JsonObject {
+        return deezerApi.callApi(
+            method = "playlist.getSongs",
+            paramsBuilder = {
+                put("PLAYLIST_ID", playlist.id)
+                put("nb", -1)
+            }
+        )
+    }
+
     suspend fun getPlaylists(userId: String): JsonObject {
         return deezerApi.callApi(
             method = "deezer.pageProfile",
