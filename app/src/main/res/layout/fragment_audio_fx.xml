@@ -252,9 +252,9 @@
             android:layout_marginHorizontal="8dp"
             android:layout_marginVertical="8dp"
             android:stepSize="1"
-            android:value="5"
+            android:value="2"
             android:valueFrom="1"
-            android:valueTo="12" />
+            android:valueTo="5" />
 
         <LinearLayout
             android:id="@+id/skipFadeOnAlbums"

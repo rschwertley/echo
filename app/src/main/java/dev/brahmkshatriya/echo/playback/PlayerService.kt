@@ -27,15 +27,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED
-import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.analytics.PlayerId
-import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaController
@@ -143,7 +139,7 @@ class PlayerService : MediaLibraryService() {
                 }
             }
             crossfadeEnabled = app.settings.getBoolean(CROSSFADE_ENABLED, false)
-            crossfadeDurationMs = app.settings.getInt(CROSSFADE_DURATION, 5) * 1000
+            crossfadeDurationMs = app.settings.getInt(CROSSFADE_DURATION, 2) * 1000
             normalizationEnabled = app.settings.getBoolean(LOUDNESS_NORMALIZATION, false)
         }
     }
@@ -161,7 +157,7 @@ class PlayerService : MediaLibraryService() {
                 effects.updateCrossfadeSettings()
             }
             CROSSFADE_DURATION -> {
-                audioEffectsProcessor.crossfadeDurationMs = prefs.getInt(key, 5) * 1000
+                audioEffectsProcessor.crossfadeDurationMs = prefs.getInt(key, 2) * 1000
                 effects.updateCrossfadeSettings()
             }
         }
@@ -507,17 +503,12 @@ class PlayerService : MediaLibraryService() {
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setAudioAttributes(musicAudioAttributes, false)
             .setReleaseTimeoutMs(150)
-            // TEMPORARY (PRELOAD-DEPTH-DIAG) — remove after confirming N+1 preload depth. Byte-identical to
-            // the default (ExoPlayer.Builder's default is DefaultLoadControl::new); this subclass only adds a
-            // log in shouldContinuePreloading. Remove this line together with PreloadDepthLoggingLoadControl.
-            .setLoadControl(PreloadDepthLoggingLoadControl())
             .build()
             .also {
                 it.trackSelectionParameters = it.trackSelectionParameters
                     .buildUpon()
                     .setAudioOffloadPreferences(audioOffloadPreferences)
                     .build()
-                it.preloadConfiguration = ExoPlayer.PreloadConfiguration(10_000_000L)
                 it.skipSilenceEnabled = app.settings.getBoolean(SKIP_SILENCE, true)
             }
     }
@@ -643,39 +634,5 @@ class PlayerService : MediaLibraryService() {
             },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-    }
-}
-
-// TEMPORARY (PRELOAD-DEPTH-DIAG) — remove after confirming N+1 preload buffers to the target (~10s), along
-// with the .setLoadControl(...) line in createExoplayer and the imports it added (DefaultLoadControl,
-// PlayerId, Timeline, MediaSource).
-//
-// Byte-identical to the default LoadControl: ExoPlayer.Builder's default is `DefaultLoadControl::new`, and
-// this SUBCLASSES DefaultLoadControl with the default constructor, overriding ONLY shouldContinuePreloading
-// to add a log and delegating the actual decision to super. Every other LoadControl method is inherited from
-// DefaultLoadControl unchanged. (Subclassing — not Kotlin `by` interface delegation — because LoadControl's
-// methods are almost all Java `default` bridges whose real behavior lives in DefaultLoadControl's overrides;
-// `by` delegation does not reliably forward Java default methods, which would change loading behavior.)
-//
-// Media3 calls shouldContinuePreloading ONLY for the preloading (N+1) period — never the current track — so
-// this log isolates the NEXT track's buffer growth. bufferedDurationUs is that period's buffered position
-// (≈ depth from its start, since N+1 starts at 0); it climbs toward the target and then preload pauses
-// (isFullyPreloaded → the period drops out of the preload pool → shouldContinuePreloading stops being
-// called), so the last logged value ≈ the target and then the tag goes silent for that track.
-@OptIn(UnstableApi::class)
-private class PreloadDepthLoggingLoadControl : DefaultLoadControl() {
-    override fun shouldContinuePreloading(
-        playerId: PlayerId,
-        timeline: Timeline,
-        mediaPeriodId: MediaSource.MediaPeriodId,
-        bufferedDurationUs: Long
-    ): Boolean {
-        val decision = super.shouldContinuePreloading(playerId, timeline, mediaPeriodId, bufferedDurationUs)
-        Log.d(
-            "GladixPlayback",
-            "PRELOAD-DEPTH-DIAG N+1 period=${mediaPeriodId.periodUid} " +
-                "buffered ~${"%.1f".format(bufferedDurationUs / 1_000_000.0)}s continuePreload=$decision"
-        )
-        return decision
     }
 }

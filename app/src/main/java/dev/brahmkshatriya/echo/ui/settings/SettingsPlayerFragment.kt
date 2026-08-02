@@ -149,12 +149,12 @@ class SettingsPlayerFragment : BaseSettingsFragment() {
                     addPreference(this)
                 }
 
-                MaterialSliderPreference(context, 1, 12).apply {
+                MaterialSliderPreference(context, 1, 5).apply {
                     key = CROSSFADE_DURATION
                     title = getString(R.string.crossfade_duration)
                     summary = getString(R.string.crossfade_duration_summary)
                     isIconSpaceReserved = false
-                    setDefaultValue(5)
+                    setDefaultValue(2)
                     addPreference(this)
                 }
 
