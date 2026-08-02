@@ -102,7 +102,7 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
             item.background.loadWithThumb(view) { gradientScope.launch { applyGradient(view, it) } }
         }
         parentFragmentManager.setFragmentResultListener("reload", this) { _, data ->
-            if (data.getString("id") == item.id) viewModel.refresh()
+            if (data.getString("id") == item.id) viewModel.refreshTracks()
         }
         parentFragmentManager.setFragmentResultListener("delete", this) { _, data ->
             val playlist = item as? Playlist ?: return@setFragmentResultListener

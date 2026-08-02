@@ -20,6 +20,8 @@ import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
+import dev.brahmkshatriya.echo.common.models.Feed.Companion.loadAll
+import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.Lyrics
@@ -37,14 +39,39 @@ import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getIf
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.isClient
 import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException.Companion.toAppException
+import dev.brahmkshatriya.echo.history.db.toSlim
+import dev.brahmkshatriya.echo.utils.CacheUtils
+import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
+import dev.brahmkshatriya.echo.utils.CacheUtils.saveToCache
 import dev.brahmkshatriya.echo.utils.Serializer.toData
 import dev.brahmkshatriya.echo.utils.Serializer.toJson
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.Serializable
 import java.io.File
+
+@Serializable
+data class CachedPlaylistTracks(val savedAtMs: Long, val tracks: List<Track>)
 
 object Cached {
     class NotFound(id: String) : Exception("Cache not found for $id")
+
+    private const val DURABLE_PLAYLIST_FOLDER = "playlist-tracks"
+    private const val PLAYLIST_TRACKS_TTL_MS = 24L * 60 * 60 * 1000  // 24h
+
+    // History's toSlim drops ALL extras; a playlist track's NEXT / playlist_id are read by DeezerUtil.log
+    // (play-logging context), so preserve exactly those two while dropping streamables + everything heavy.
+    private fun Track.toPlaylistSlim(): Track =
+        toSlim().copy(extras = extras.filterKeys { it == "NEXT" || it == "playlist_id" })
+
+    // Invalidate the durable playlist-tracks entry so the next loadTracks re-fetches (via the canonical
+    // re-resolve path) instead of short-circuiting within TTL. Wired to pull-to-refresh + edit "reload".
+    fun bustPlaylistTracksCache(app: App, playlistId: String) {
+        runCatching {
+            val dir = CacheUtils.cacheDir(app.context, DURABLE_PLAYLIST_FOLDER, durable = true)
+            File(dir, "$playlistId-tracks".hashCode().toString()).delete()
+        }
+    }
 
     suspend inline fun <reified T> FileKache.getData(id: String) = runCatching {
         val file = get(id) ?: throw NotFound(id)
@@ -174,18 +201,49 @@ object Cached {
     ) = runCatching {
         if (item !is EchoMediaItem.Lists) return@runCatching null
         val itemId = item.id
+        // Playlist tracks live in an isolated durable store (canonical re-resolve is expensive). Instant
+        // cached read, age-agnostic; loadTracks owns the TTL/revalidate decision.
+        if (item is Playlist) {
+            val cached = app.context.getFromCache<CachedPlaylistTracks>(
+                "$itemId-tracks", DURABLE_PLAYLIST_FOLDER, durable = true
+            )
+            if (cached != null) return@runCatching cached.tracks.toFeed()
+        }
         getFeed<Track>(app, extensionId, "$itemId-tracks") { it }
     }
 
     suspend fun loadTracks(app: App, extension: Extension<*>, item: EchoMediaItem) = runCatching {
+        if (item is Playlist) return@runCatching loadPlaylistTracksCached(app, extension, item)
         val feed = when (item) {
             is Album -> extension.getAs<AlbumClient, Feed<Track>?> { loadTracks(item) }
-            is Playlist -> extension.getAs<PlaylistClient, Feed<Track>> { loadTracks(item) }
             is Radio -> extension.getAs<RadioClient, Feed<Track>> { loadTracks(item) }
             is Artist -> null
             is Track -> null
+            is Playlist -> null // handled above
         }?.getOrThrow() ?: return@runCatching null
         savingFeed(app, extension, "${item.id}-tracks", feed)
+    }
+
+    // Durable SWR on top of the canonical re-resolve. Within TTL: pure short-circuit (no fetch, no
+    // revalidate). Otherwise fetch via the extension (the song.getListData re-resolve path), materialize
+    // (Deezer = PagedData.Single → one page), store slim {now, tracks}, and return the fresh tracks.
+    private suspend fun loadPlaylistTracksCached(
+        app: App, extension: Extension<*>, item: Playlist,
+    ): Feed<Track> {
+        val cached = app.context.getFromCache<CachedPlaylistTracks>(
+            "${item.id}-tracks", DURABLE_PLAYLIST_FOLDER, durable = true
+        )
+        if (cached != null && System.currentTimeMillis() - cached.savedAtMs < PLAYLIST_TRACKS_TTL_MS)
+            return cached.tracks.toFeed()
+
+        val feed = extension.getAs<PlaylistClient, Feed<Track>> { loadTracks(item) }.getOrThrow()
+        val tracks = feed.loadAll()
+        app.context.saveToCache(
+            "${item.id}-tracks",
+            CachedPlaylistTracks(System.currentTimeMillis(), tracks.map { it.toPlaylistSlim() }),
+            DURABLE_PLAYLIST_FOLDER, durable = true
+        )
+        return tracks.toFeed()
     }
 
     suspend fun getFeed(

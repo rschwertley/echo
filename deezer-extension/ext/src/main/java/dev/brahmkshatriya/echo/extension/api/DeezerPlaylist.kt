@@ -3,9 +3,12 @@ package dev.brahmkshatriya.echo.extension.api
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.DeezerApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 class DeezerPlaylist(private val deezerApi: DeezerApi) {
@@ -34,6 +37,31 @@ class DeezerPlaylist(private val deezerApi: DeezerApi) {
                 put("nb", -1)
             }
         )
+    }
+
+    // Canonical per-track re-resolve. playlist.getSongs / deezer.pagePlaylist return the playlist's STORED
+    // track records, which can carry a mis-attributed same-named-artist twin (wrong ART_ID/ALB_ID/ALB_PICTURE);
+    // song.getListData returns each track's canonical SONG by id. SNG_IDS is UPPERCASE (confirmed vs deezer-py;
+    // lowercase silently returns an empty data[]). Chunked at 100 (batch ceiling), sequential; a failed chunk
+    // drops out (those ids fall back to their lean entry upstream) rather than failing the whole list.
+    // Response: results.data[] flat.
+    suspend fun getListData(ids: List<String>): List<JsonObject> {
+        if (ids.isEmpty()) return emptyList()
+        return ids.chunked(100).flatMap { chunk ->
+            runCatching {
+                val response = deezerApi.callApi(
+                    method = "song.getListData",
+                    paramsBuilder = {
+                        put("SNG_IDS", buildJsonArray { chunk.forEach { add(it) } })
+                    }
+                )
+                response["results"]?.jsonObject?.get("data")?.jsonArray
+                    ?.mapNotNull { it as? JsonObject }.orEmpty()
+            }.getOrElse {
+                if (it is CancellationException) throw it
+                emptyList()
+            }
+        }
     }
 
     suspend fun getPlaylists(userId: String): JsonObject {

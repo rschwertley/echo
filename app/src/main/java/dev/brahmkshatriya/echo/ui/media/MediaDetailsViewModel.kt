@@ -18,12 +18,14 @@ import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Message
+import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getIf
 import dev.brahmkshatriya.echo.extensions.MediaState
+import dev.brahmkshatriya.echo.extensions.cache.Cached.bustPlaylistTracksCache
 import dev.brahmkshatriya.echo.extensions.cache.Cached.getFeed
 import dev.brahmkshatriya.echo.extensions.cache.Cached.getTracks
 import dev.brahmkshatriya.echo.extensions.cache.Cached.loadFeed
@@ -134,6 +136,14 @@ abstract class MediaDetailsViewModel(
     }.stateIn(viewModelScope, Eagerly, null)
 
     fun refresh() = viewModelScope.launch {
+        refreshFlow.emit(Unit)
+    }
+
+    // Force a fresh canonical re-fetch: bust the durable playlist-tracks entry (so loadTracks skips its
+    // 24h short-circuit) then refresh. Gated to pull-to-refresh + edit "reload" — NOT like/save/follow/hide,
+    // which call refresh() and must keep serving the cached tracks. No-op for non-playlist items.
+    fun refreshTracks() = viewModelScope.launch {
+        (getItem()?.second as? Playlist)?.let { bustPlaylistTracksCache(app, it.id) }
         refreshFlow.emit(Unit)
     }
 

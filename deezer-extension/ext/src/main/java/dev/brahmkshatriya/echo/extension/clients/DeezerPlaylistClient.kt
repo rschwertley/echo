@@ -53,12 +53,28 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
         // (empty or edge playlist) degrades to an empty list rather than NPE. PagedData.Single (non-paginated),
         // so an empty result can never mask a mid-pagination gap.
         val dataArray = results["data"]?.jsonArray ?: JsonArray(emptyList())
-        val baseTracks = dataArray.mapNotNull { it as? JsonObject }
+        // Lean entries from playlist.getSongs (STORED records — may carry the wrong same-named-artist twin).
+        val leanTracks = dataArray.mapNotNull { it as? JsonObject }
             .map { parser.run { it.toTrack() } }
-        baseTracks.mapIndexed { index, track ->
+
+        // Canonical re-resolve by SNG_ID: song.getListData returns each track's canonical record (correct
+        // ART_ID/ALB_ID/ALB_PICTURE/ARTISTS). Per-track graceful fallback — a track absent from (or
+        // un-parseable in) the canonical response keeps its lean entry. Track.id == SNG_ID, so keys line up.
+        val sngIds = leanTracks.map { it.id }.filter { it.isNotEmpty() }
+        val canonicalMap = api.getListData(sngIds).mapNotNull { obj ->
+            val id = parser.run { obj.unwrap().str("SNG_ID") }
+            if (id.isNullOrEmpty()) null else id to obj
+        }.toMap()
+
+        val resolved = leanTracks.map { lean ->
+            val canonical = canonicalMap[lean.id] ?: return@map lean
+            runCatching { parser.run { canonical.toTrack() } }.getOrElse { lean }
+        }
+
+        resolved.mapIndexed { index, track ->
             track.copy(
                 extras = track.extras + mapOf(
-                    "NEXT" to baseTracks.getOrNull(index + 1)?.id.orEmpty(),
+                    "NEXT" to resolved.getOrNull(index + 1)?.id.orEmpty(),
                     "playlist_id" to playlist.id
                 )
             )

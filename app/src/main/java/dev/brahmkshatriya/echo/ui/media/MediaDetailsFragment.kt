@@ -141,7 +141,7 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
                 .combine(feedData.isRefreshingFlow) { a, b -> a || b }
         binding.swipeRefresh.run {
             configure()
-            setOnRefreshListener { viewModel.refresh() }
+            setOnRefreshListener { viewModel.refreshTracks() }
             var hasEverLoaded = false
             observe(loadingFlow) { isLoading ->
                 if (!isLoading) hasEverLoaded = true
