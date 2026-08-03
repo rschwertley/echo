@@ -73,9 +73,8 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
                         "fbAlb=${fb.str("ALB_ID")}/'${fb.str("ALB_TITLE")}' fbAlbPic=$fbPic " +
                         "same=${d.str("SNG_ID") == fb.str("SNG_ID")} fbKeys=[${fb.keys.joinToString(",")}]"
                 }
-                android.util.Log.d(
-                    "PIPER-DIAG",
-                    "#$i sng=${d.str("SNG_ID")} art=${d.str("ART_ID")}/'${d.str("ART_NAME")}' " +
+                println(
+                    "PIPER-DIAG #$i sng=${d.str("SNG_ID")} art=${d.str("ART_ID")}/'${d.str("ART_NAME")}' " +
                         "alb=${d.str("ALB_ID")}/'${d.str("ALB_TITLE")}' topAlbPic=$topPic $fbPart"
                 )
             }
