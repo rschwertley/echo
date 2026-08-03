@@ -179,11 +179,25 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
         // fallback in createStreamableForQuality still applies — never crashing. CancellationException
         // is rethrown so coroutine cancellation is honoured.
         val track = if (original.extras["TRACK_TOKEN"].isNullOrEmpty()) {
-            runCatching {
+            val fresh = runCatching {
                 api.track(original.id)["results"]?.jsonObject?.let { results ->
                     parser.run { results.toTrack() }
                 }
-            }.getOrElse { if (it is CancellationException) throw it else null } ?: original
+            }.getOrElse { if (it is CancellationException) throw it else null }
+            when {
+                fresh == null -> original
+                // Seed already carries display metadata (e.g. a FALLBACK-grafted playlist track whose
+                // top-level TRACK_TOKEN was empty): KEEP the seed's artists/album/cover/background and take
+                // ONLY the token/streamable extras from the fresh fetch. Re-fetching by the top-level id
+                // returns the substitute's OWN (un-grafted) record, so replacing wholesale would discard the
+                // graft and show the wrong/old cover in the player (the fullscreen ViewHolder reads the loaded
+                // track). Streaming is unaffected: track.id stays the top-level id and we take fresh's TOKEN.
+                original.cover != null || original.artists.isNotEmpty() || original.album != null ->
+                    original.copy(extras = original.extras + fresh.extras)
+                // Thin recovered track (context-less/bare, e.g. an Android Auto cache-miss): no display
+                // metadata to preserve → use the full fresh fetch.
+                else -> fresh
+            }
         } else original
 
         val isMp3Misc = track.extras["FILESIZE_MP3_MISC"]?.let { it != "0" } ?: false

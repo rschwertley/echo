@@ -4,6 +4,7 @@ import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Tab
+import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.DeezerApi
 import dev.brahmkshatriya.echo.extension.DeezerExtension
 import dev.brahmkshatriya.echo.extension.DeezerParser
@@ -75,8 +76,11 @@ class DeezerLibraryClient(
             async(cpuDispatcher) {
                 val json = cfg.request(api)
                 val items = cfg.extractor(json) ?: return@async null
-                if (cfg.id == TabId.TRACKS) logPiperDiagFav(items)
-                parser.run { items.toShelfItemsList(cfg.title) }
+                if (cfg.id == TabId.TRACKS) {
+                    val grafted = items.mapNotNull { el -> (el as? JsonObject)?.let { graftFavTrack(it) } }
+                    grafted.takeIf { it.isNotEmpty() }
+                        ?.let { Shelf.Lists.Items(id = cfg.title, title = cfg.title, list = it) }
+                } else parser.run { items.toShelfItemsList(cfg.title) }
             }
         }.awaitAll().filterNotNull()
     }
@@ -86,8 +90,9 @@ class DeezerLibraryClient(
         deezerExtension.handleArlExpiration()
         val json = cfg.request(api)
         val arr = cfg.extractor(json) ?: return emptyList()
-        if (id == TabId.TRACKS.id) logPiperDiagFav(arr)
-        return parser.run { arr.mapNotNull { it.jsonObject.toEchoMediaItem()?.toShelf() } }
+        return if (id == TabId.TRACKS.id)
+            arr.mapNotNull { el -> (el as? JsonObject)?.let { graftFavTrack(it).toShelf() } }
+        else parser.run { arr.mapNotNull { it.jsonObject.toEchoMediaItem()?.toShelf() } }
     }
 
     private fun JsonObject.results(): JsonObject? = this["results"]?.jsonObject
@@ -96,27 +101,26 @@ class DeezerLibraryClient(
     private fun JsonObject.tabDataArray(tabId: String): JsonArray? =
         results()?.get("TAB")?.jsonObject?.get(tabId)?.jsonObject?.get("data")?.jsonArray
 
-    // TEMPORARY (PIPER-DIAG-FAV) — same per-track dump as the playlist PIPER-DIAG, on the favorites/liked
-    // TRACKS tab (favorite_song.getList), to confirm empirically whether liked tracks carry a FALLBACK with
-    // correct data (i.e. the same latent bug as playlists). One line per RAW entry. Remove after capture.
-    private fun logPiperDiagFav(arr: JsonArray) {
-        parser.run {
-            arr.mapNotNull { it as? JsonObject }.forEachIndexed { i, entry ->
-                val d = entry.unwrap()
-                val topPic = if (!d.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
-                val fb = d["FALLBACK"] as? JsonObject
-                val fbPart = if (fb == null) "fb=no" else {
-                    val fbPic = if (!fb.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
-                    "fb=yes fbSng=${fb.str("SNG_ID")} fbArt=${fb.str("ART_ID")}/'${fb.str("ART_NAME")}' " +
-                        "fbAlb=${fb.str("ALB_ID")}/'${fb.str("ALB_TITLE")}' fbAlbPic=$fbPic " +
-                        "same=${d.str("SNG_ID") == fb.str("SNG_ID")} fbKeys=[${fb.keys.joinToString(",")}]"
-                }
-                println(
-                    "PIPER-DIAG-FAV #$i sng=${d.str("SNG_ID")} status=${d.str("STATUS")} " +
-                        "art=${d.str("ART_ID")}/'${d.str("ART_NAME")}' " +
-                        "alb=${d.str("ALB_ID")}/'${d.str("ALB_TITLE")}' topAlbPic=$topPic $fbPart"
-                )
-            }
+    // FALLBACK-graft for favorites/liked TRACKS — identical to DeezerPlaylistClient.loadTracks:
+    // favorite_song.getList pre-substitutes an unavailable original with a playable-but-dead/mis-attributed
+    // track at TOP-LEVEL and moves the CORRECT catalog data into a full FALLBACK object. When a FALLBACK
+    // exists, take DISPLAY fields (artists/album/cover/background) from it while keeping the top-level SNG_ID
+    // as the id for STREAMING. No FALLBACK → top-level as-is. (Confirmed on-device: karaoke → correct artist;
+    // P.J. Proby → live/openable album; fb=no favorites unchanged.) Play-time art is preserved by
+    // DeezerTrackClient.loadTrack's merge, so grafted favorites carry through to the player/fullscreen.
+    private fun graftFavTrack(entry: JsonObject): Track = parser.run {
+        val d = entry.unwrap()
+        val top = d.toTrack()
+        val fb = d["FALLBACK"] as? JsonObject
+        if (fb == null) top
+        else {
+            val fbTrack = fb.toTrack()
+            top.copy(
+                artists = fbTrack.artists,
+                album = fbTrack.album,
+                cover = fbTrack.cover,
+                background = fbTrack.background
+            )
         }
     }
 }
