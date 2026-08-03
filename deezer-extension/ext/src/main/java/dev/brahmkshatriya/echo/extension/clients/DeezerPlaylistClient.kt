@@ -53,54 +53,32 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
         // (empty or edge playlist) degrades to an empty list rather than NPE. PagedData.Single (non-paginated),
         // so an empty result can never mask a mid-pagination gap.
         val dataArray = results["data"]?.jsonArray ?: JsonArray(emptyList())
-        // TEMPORARY (PIPER-DIAG) — one line per RAW playlist.getSongs entry, dumping top-level + FALLBACK
-        // id/name/art fields + the FALLBACK key list, so a SINGLE capture answers every open question:
-        //  • discriminator safety: do correctly-arted tracks (topAlbPic=present) also carry a FALLBACK, or
-        //    only broken ones (topAlbPic=BLANK)?  (compare fb=yes/no against topAlbPic across tracks)
-        //  • is "different id" (same=false) a reliable "broken" signal, or can a same=false track still
-        //    have topAlbPic=present (good art)?
-        //  • re-resolve necessity: is FALLBACK full (fbKeys shows ART_ID/ALB_ID/ALB_PICTURE) or thin
-        //    (fbKeys=[SNG_ID])?
-        // Remove after capture.
-        parser.run {
-            dataArray.mapNotNull { it as? JsonObject }.forEachIndexed { i, entry ->
+        // playlist.getSongs pre-substitutes an unavailable original with a playable-but-dead/mis-attributed
+        // track at TOP-LEVEL and moves the CORRECT catalog data into a full FALLBACK object. So when a
+        // FALLBACK exists, take the DISPLAY fields (artists/album/cover) from it while keeping the top-level
+        // SNG_ID as the track id for STREAMING (top-level is the confirmed-playable one). No FALLBACK →
+        // top-level is already correct, use as-is. (Verified on Piper/Baby Beluga/Dora; fb=no unchanged.)
+        val baseTracks = dataArray.mapNotNull { it as? JsonObject }.map { entry ->
+            parser.run {
                 val d = entry.unwrap()
-                val topPic = if (!d.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
+                val top = d.toTrack()
                 val fb = d["FALLBACK"] as? JsonObject
-                val fbPart = if (fb == null) "fb=no" else {
-                    val fbPic = if (!fb.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
-                    "fb=yes fbSng=${fb.str("SNG_ID")} fbArt=${fb.str("ART_ID")}/'${fb.str("ART_NAME")}' " +
-                        "fbAlb=${fb.str("ALB_ID")}/'${fb.str("ALB_TITLE")}' fbAlbPic=$fbPic " +
-                        "same=${d.str("SNG_ID") == fb.str("SNG_ID")} fbKeys=[${fb.keys.joinToString(",")}]"
+                if (fb == null) top
+                else {
+                    val fbTrack = fb.toTrack()
+                    top.copy(
+                        artists = fbTrack.artists,
+                        album = fbTrack.album,
+                        cover = fbTrack.cover,
+                        background = fbTrack.background
+                    )
                 }
-                println(
-                    "PIPER-DIAG #$i sng=${d.str("SNG_ID")} art=${d.str("ART_ID")}/'${d.str("ART_NAME")}' " +
-                        "alb=${d.str("ALB_ID")}/'${d.str("ALB_TITLE")}' topAlbPic=$topPic $fbPart"
-                )
             }
         }
-        // Lean entries from playlist.getSongs (STORED records — may carry the wrong same-named-artist twin).
-        val leanTracks = dataArray.mapNotNull { it as? JsonObject }
-            .map { parser.run { it.toTrack() } }
-
-        // Canonical re-resolve by SNG_ID: song.getListData returns each track's canonical record (correct
-        // ART_ID/ALB_ID/ALB_PICTURE/ARTISTS). Per-track graceful fallback — a track absent from (or
-        // un-parseable in) the canonical response keeps its lean entry. Track.id == SNG_ID, so keys line up.
-        val sngIds = leanTracks.map { it.id }.filter { it.isNotEmpty() }
-        val canonicalMap = api.getListData(sngIds).mapNotNull { obj ->
-            val id = parser.run { obj.unwrap().str("SNG_ID") }
-            if (id.isNullOrEmpty()) null else id to obj
-        }.toMap()
-
-        val resolved = leanTracks.map { lean ->
-            val canonical = canonicalMap[lean.id] ?: return@map lean
-            runCatching { parser.run { canonical.toTrack() } }.getOrElse { lean }
-        }
-
-        resolved.mapIndexed { index, track ->
+        baseTracks.mapIndexed { index, track ->
             track.copy(
                 extras = track.extras + mapOf(
-                    "NEXT" to resolved.getOrNull(index + 1)?.id.orEmpty(),
+                    "NEXT" to baseTracks.getOrNull(index + 1)?.id.orEmpty(),
                     "playlist_id" to playlist.id
                 )
             )

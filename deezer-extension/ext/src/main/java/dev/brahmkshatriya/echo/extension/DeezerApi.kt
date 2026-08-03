@@ -507,8 +507,6 @@ class DeezerApi(private val session: DeezerSession) {
 
     suspend fun playlistSongs(playlist: Playlist): JsonObject = deezerPlaylist.getSongs(playlist)
 
-    suspend fun getListData(ids: List<String>): List<JsonObject> = deezerPlaylist.getListData(ids)
-
     suspend fun getPlaylists(): JsonObject = deezerPlaylist.getPlaylists(userId)
 
     suspend fun addFavoritePlaylist(id: String) = deezerPlaylist.addFavoritePlaylist(id)

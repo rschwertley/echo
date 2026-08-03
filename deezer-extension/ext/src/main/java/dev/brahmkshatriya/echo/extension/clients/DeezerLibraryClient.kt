@@ -75,6 +75,7 @@ class DeezerLibraryClient(
             async(cpuDispatcher) {
                 val json = cfg.request(api)
                 val items = cfg.extractor(json) ?: return@async null
+                if (cfg.id == TabId.TRACKS) logPiperDiagFav(items)
                 parser.run { items.toShelfItemsList(cfg.title) }
             }
         }.awaitAll().filterNotNull()
@@ -85,6 +86,7 @@ class DeezerLibraryClient(
         deezerExtension.handleArlExpiration()
         val json = cfg.request(api)
         val arr = cfg.extractor(json) ?: return emptyList()
+        if (id == TabId.TRACKS.id) logPiperDiagFav(arr)
         return parser.run { arr.mapNotNull { it.jsonObject.toEchoMediaItem()?.toShelf() } }
     }
 
@@ -93,4 +95,28 @@ class DeezerLibraryClient(
         results()?.get("data")?.jsonArray
     private fun JsonObject.tabDataArray(tabId: String): JsonArray? =
         results()?.get("TAB")?.jsonObject?.get(tabId)?.jsonObject?.get("data")?.jsonArray
+
+    // TEMPORARY (PIPER-DIAG-FAV) — same per-track dump as the playlist PIPER-DIAG, on the favorites/liked
+    // TRACKS tab (favorite_song.getList), to confirm empirically whether liked tracks carry a FALLBACK with
+    // correct data (i.e. the same latent bug as playlists). One line per RAW entry. Remove after capture.
+    private fun logPiperDiagFav(arr: JsonArray) {
+        parser.run {
+            arr.mapNotNull { it as? JsonObject }.forEachIndexed { i, entry ->
+                val d = entry.unwrap()
+                val topPic = if (!d.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
+                val fb = d["FALLBACK"] as? JsonObject
+                val fbPart = if (fb == null) "fb=no" else {
+                    val fbPic = if (!fb.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
+                    "fb=yes fbSng=${fb.str("SNG_ID")} fbArt=${fb.str("ART_ID")}/'${fb.str("ART_NAME")}' " +
+                        "fbAlb=${fb.str("ALB_ID")}/'${fb.str("ALB_TITLE")}' fbAlbPic=$fbPic " +
+                        "same=${d.str("SNG_ID") == fb.str("SNG_ID")} fbKeys=[${fb.keys.joinToString(",")}]"
+                }
+                println(
+                    "PIPER-DIAG-FAV #$i sng=${d.str("SNG_ID")} status=${d.str("STATUS")} " +
+                        "art=${d.str("ART_ID")}/'${d.str("ART_NAME")}' " +
+                        "alb=${d.str("ALB_ID")}/'${d.str("ALB_TITLE")}' topAlbPic=$topPic $fbPart"
+                )
+            }
+        }
+    }
 }
