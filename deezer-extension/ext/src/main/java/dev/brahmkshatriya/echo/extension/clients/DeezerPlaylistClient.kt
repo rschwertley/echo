@@ -53,6 +53,33 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
         // (empty or edge playlist) degrades to an empty list rather than NPE. PagedData.Single (non-paginated),
         // so an empty result can never mask a mid-pagination gap.
         val dataArray = results["data"]?.jsonArray ?: JsonArray(emptyList())
+        // TEMPORARY (PIPER-DIAG) — one line per RAW playlist.getSongs entry, dumping top-level + FALLBACK
+        // id/name/art fields + the FALLBACK key list, so a SINGLE capture answers every open question:
+        //  • discriminator safety: do correctly-arted tracks (topAlbPic=present) also carry a FALLBACK, or
+        //    only broken ones (topAlbPic=BLANK)?  (compare fb=yes/no against topAlbPic across tracks)
+        //  • is "different id" (same=false) a reliable "broken" signal, or can a same=false track still
+        //    have topAlbPic=present (good art)?
+        //  • re-resolve necessity: is FALLBACK full (fbKeys shows ART_ID/ALB_ID/ALB_PICTURE) or thin
+        //    (fbKeys=[SNG_ID])?
+        // Remove after capture.
+        parser.run {
+            dataArray.mapNotNull { it as? JsonObject }.forEachIndexed { i, entry ->
+                val d = entry.unwrap()
+                val topPic = if (!d.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
+                val fb = d["FALLBACK"] as? JsonObject
+                val fbPart = if (fb == null) "fb=no" else {
+                    val fbPic = if (!fb.str("ALB_PICTURE").isNullOrBlank()) "present" else "BLANK"
+                    "fb=yes fbSng=${fb.str("SNG_ID")} fbArt=${fb.str("ART_ID")}/'${fb.str("ART_NAME")}' " +
+                        "fbAlb=${fb.str("ALB_ID")}/'${fb.str("ALB_TITLE")}' fbAlbPic=$fbPic " +
+                        "same=${d.str("SNG_ID") == fb.str("SNG_ID")} fbKeys=[${fb.keys.joinToString(",")}]"
+                }
+                android.util.Log.d(
+                    "PIPER-DIAG",
+                    "#$i sng=${d.str("SNG_ID")} art=${d.str("ART_ID")}/'${d.str("ART_NAME")}' " +
+                        "alb=${d.str("ALB_ID")}/'${d.str("ALB_TITLE")}' topAlbPic=$topPic $fbPart"
+                )
+            }
+        }
         // Lean entries from playlist.getSongs (STORED records — may carry the wrong same-named-artist twin).
         val leanTracks = dataArray.mapNotNull { it as? JsonObject }
             .map { parser.run { it.toTrack() } }
