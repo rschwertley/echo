@@ -93,10 +93,18 @@ class ColorListPreference(val fragment: Fragment, var listener: Listener? = null
             RecyclerView.ViewHolder(binding.root) {
             init {
                 binding.root.setOnClickListener {
-                    listener.onColorSelected(colors[bindingAdapterPosition].second)
+                    // Read the LIVE position at click time and bounds-check before indexing: a click can
+                    // fire while the holder is unbound/mid-rebind/being removed, when bindingAdapterPosition
+                    // is NO_POSITION (-1) — indexing colors[-1] crashed with IndexOutOfBoundsException.
+                    // `!in colors.indices` covers both NO_POSITION and any stale out-of-range position.
+                    val pos = bindingAdapterPosition
+                    if (pos !in colors.indices) return@setOnClickListener
+                    listener.onColorSelected(colors[pos].second)
                 }
                 binding.root.setOnLongClickListener {
-                    listener.onColorRemoved(colors[bindingAdapterPosition].second)
+                    val pos = bindingAdapterPosition
+                    if (pos !in colors.indices) return@setOnLongClickListener false
+                    listener.onColorRemoved(colors[pos].second)
                 }
             }
         }

@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.ui.extensions.login
 import android.app.UiModeManager
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.util.Log
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
@@ -418,6 +419,10 @@ class LoginFragment : Fragment() {
         }
 
         private suspend fun pollWorker(code: String): String? = withContext(Dispatchers.IO) {
+            // Deliberate best-effort poll: a failure just means "try again next tick", so returning null is
+            // intended. The cause is logged below; rethrowing would change the poll-retry control flow.
+            // Suppressing Detekt SwallowedException here.
+            @Suppress("SwallowedException")
             try {
                 val conn = java.net.URL("https://gladix-pairing.schwertley.workers.dev/pair/$code")
                     .openConnection() as java.net.HttpURLConnection
@@ -427,7 +432,14 @@ class LoginFragment : Fragment() {
                     val body = conn.inputStream.bufferedReader().readText()
                     org.json.JSONObject(body).optString("arl", "").takeIf { it.isNotEmpty() }
                 } else null
-            } catch (e: Exception) { null }
+            } catch (e: Exception) {
+                // Fires only on a real connection failure (DNS/timeout/cert/offline) — NOT the normal
+                // "not paired yet", which returns via the branches above. Log so a device that can't reach
+                // the pairing endpoint is diagnosable. Do NOT log `code` (pairing secret) or the response
+                // body (carries the ARL) — .message only.
+                Log.w("GladixLogin", "pairing poll request failed: ${e.message}")
+                null
+            }
         }
 
         override fun onDestroyView() {

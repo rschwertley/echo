@@ -1,6 +1,12 @@
 [versions]
 agp = "9.3.1"
 kotlin = "2.4.10"
+# NOTE: Detekt bundles its OWN Kotlin analyzer for PSI parsing; 1.23.8 bundles ~Kotlin 2.0.x, while this
+# project is on Kotlin 2.4.10. PSI-only analysis of ordinary code (incl. reified generics / @OptIn) works,
+# but files using brand-new 2.4-only SYNTAX may report a parse error for that file (NOT a hang — detekt is a
+# batch parser, so it still completes and analyzes the rest). If you hit such parse errors, bump to the
+# newest Detekt release that lists Kotlin 2.4 support.
+detekt = "1.23.8"
 
 car-app = "1.7.0"
 androidx-paging = "3.5.0"
@@ -98,3 +104,4 @@ kotlinx-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", vers
 ksp = { id = "com.google.devtools.ksp", version = "2.3.9" }
 gms = { id = "com.google.gms.google-services", version = "4.5.0" }
 crashlytics = { id = "com.google.firebase.crashlytics", version = "3.0.7" }
+detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }

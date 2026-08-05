@@ -37,7 +37,13 @@ ExtensionAdapter(
             oldItem.id == newItem.id
 
         override fun areContentsTheSame(oldItem: Extension<*>, newItem: Extension<*>) =
-            oldItem == newItem
+            // Compare the Metadata data class by VALUE, not Extension by reference. Extension has no
+            // equals() (sealed class), so `oldItem == newItem` was reference equality (the DiffUtilEquals
+            // warning) — it could miss content changes or force needless rebinds. Metadata is a data class
+            // holding every field the row renders (id/name/version/importType/type/icon/isEnabled), so its
+            // value equality is exactly "did the row's contents change". Avoids adding equals() to Extension
+            // (and sidesteps its non-value `instance` field).
+            oldItem.metadata == newItem.metadata
     }
 
     private val empty = EmptyAdapter()

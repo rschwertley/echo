@@ -273,7 +273,7 @@
     <string name="deleted_x">%1$s silindi</string>
     <string name="loading_x">Yükleniyor %1s</string>
     <string name="saving_x">%1$s Kaydediliyor</string>
-    <string name="adding_x">[E7X] Ekleme</string>
+    <string name="adding_x">%1$s ekleniyor</string>
     <string name="moving_x">Taşınıyor %1$s</string>
     <string name="removing_x">%1$s Kaldırılıyor</string>
     <string name="no_download_extension">İndirilecek uzantı bulunamadı, \"echodown\" kodunu kullanarak edinin.</string>

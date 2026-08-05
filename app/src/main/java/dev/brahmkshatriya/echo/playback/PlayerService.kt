@@ -542,6 +542,11 @@ class PlayerService : MediaLibraryService() {
 
         const val CACHE_SIZE = "cache_size"
 
+        // Function-level suppression: getCache has exactly ONE try/catch (the corrupt-cache wipe+rebuild
+        // recovery below), so this scopes to precisely that one finding with no collateral. The swallow is
+        // deliberate best-effort recovery and the cause is now logged (Log.w) — rethrowing would change the
+        // wipe-and-retry control flow. Not try-scoped only because it's a return-position try.
+        @Suppress("SwallowedException")
         @OptIn(UnstableApi::class)
         fun getCache(
             app: Application,
@@ -553,6 +558,9 @@ class PlayerService : MediaLibraryService() {
             return try {
                 SimpleCache(cacheDir, evictor, StandaloneDatabaseProvider(app))
             } catch (e: Exception) {
+                // Corrupt/locked ExoPlayer cache → wipe and rebuild (deliberate recovery). Log the cause so
+                // a recurring rebuild (disk full / corruption / lock) isn't invisible — control flow unchanged.
+                Log.w("GladixPlayback", "ExoPlayer cache init failed, recreating: ${e.message}")
                 cacheDir.deleteRecursively()
                 SimpleCache(cacheDir, evictor, StandaloneDatabaseProvider(app))
             }

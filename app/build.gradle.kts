@@ -26,7 +26,14 @@ val hasGoogleServices = file("google-services.json").let { f ->
 val gitHash = runCatching { execute("git", "rev-parse", "HEAD").take(7) }.getOrDefault("dev")
 val gitCount = runCatching { execute("git", "rev-list", "--count", "HEAD").toInt() }.getOrDefault(1)
 val isDirty = runCatching { execute("git", "status", "--porcelain", "-uno").isNotEmpty() }.getOrDefault(false)
-val version = "3.0.$gitCount"
+// "3.1." prefix + zero-padded gitCount so versionName sorts NUMERICALLY as a string in Firebase Crashlytics
+// Release Monitoring (which orders the version picker lexicographically). Two things this fixes:
+//  • the 3→4 digit lexicographic break ("1000" < "999"): padStart(5,'0') → "01024" > "00999" as strings;
+//  • the frozen un-padded 3.0.xxx history: bumping the prefix to 3.1. sorts every new build above all old
+//    "3.0.###" entries at once (they can't be re-padded retroactively).
+// versionCode stays the raw gitCount (Android requires an Int; it's already monotonic). Display stays tied
+// to the count: "3.1.01024" == count 1024, just padded.
+val version = "3.1." + gitCount.toString().padStart(5, '0')
 
 android {
     namespace = "dev.brahmkshatriya.echo"

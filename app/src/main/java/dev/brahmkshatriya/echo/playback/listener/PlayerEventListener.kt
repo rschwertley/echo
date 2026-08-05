@@ -118,10 +118,16 @@ class PlayerEventListener(
     // gate still suppresses the placeholder 0 during the restore window. A child of `scope`, so it is
     // cancelled with the service in onDestroy (scope.cancel), and cannot fire between player.release() and
     // that cancel because both run synchronously on Main.
-    private val positionSaveTicker = scope.launch(Dispatchers.Main) {
-        while (isActive) {
-            delay(POSITION_SAVE_INTERVAL_MS)
-            if (player.isPlaying) saveCurrentPosGated()
+    // Launched from init{} (fire-and-forget, no stored Job handle): teardown is via scope.cancel() in
+    // onDestroy, as the comment above describes. Same construction-phase launch and dependencies as the
+    // former property-initializer form — only scope (a constructor param) is needed at launch-call time;
+    // the body runs async (posted to Main + 5s delay) so player/saveCurrentPosGated are fully ready.
+    init {
+        scope.launch(Dispatchers.Main) {
+            while (isActive) {
+                delay(POSITION_SAVE_INTERVAL_MS)
+                if (player.isPlaying) saveCurrentPosGated()
+            }
         }
     }
 

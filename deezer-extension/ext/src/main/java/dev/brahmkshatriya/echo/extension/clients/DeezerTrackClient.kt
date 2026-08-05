@@ -101,11 +101,16 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
         } catch (e: Exception) {
             if (e.message?.contains("Song not available") == true) {
                 if (retry) {
+                    // Deliberate best-effort fallback: the cause is logged above; rethrowing would change
+                    // the intended quality-fallback control flow. Suppressing Detekt SwallowedException here.
+                    @Suppress("SwallowedException")
                     try {
                         deezerExtension.handleArlExpiration()
                         return createStreamableForQuality(track, quality, false)
                     } catch (retryEx: Exception) {
-                        // ignore and proceed to quality fallback or final error
+                        // Best-effort: proceed to quality fallback. Log so a failing ARL-refresh retry
+                        // (a token issue) isn't invisible — control flow unchanged.
+                        println("GladixDeezer createStreamableForQuality ARL-refresh retry failed id=${track.id} q=$quality: ${retryEx.message}")
                     }
                 }
             }
@@ -135,13 +140,19 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
             var resolved: Streamable? = null
             for (attempt in 0..1) {
                 if (attempt > 0) delay(2000L)
+                // Deliberate best-effort retry: the per-attempt cause is logged above; the loop retries and
+                // ends in the "not available after retries" throw. Rethrowing/chaining would change that
+                // retry control flow. Suppressing Detekt SwallowedException here.
+                @Suppress("SwallowedException")
                 try {
                     resolved = createStreamableForQuality(newTrack, quality)
                     break
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // retry on next attempt
+                    // Retry on next attempt; log the real per-attempt cause so it isn't lost behind the
+                    // generic "not available after retries" throw below (token/stream-resolution path).
+                    println("GladixDeezer loadStreamableMedia attempt $attempt failed id=$trackId q=$quality: ${e.message}")
                 }
             }
             resolved ?: throw Exception("Track not available after retries: $trackId")
