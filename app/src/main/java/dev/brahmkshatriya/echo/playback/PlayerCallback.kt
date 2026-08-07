@@ -3,8 +3,10 @@ package dev.brahmkshatriya.echo.playback
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.core.graphics.drawable.toBitmap
@@ -106,6 +108,35 @@ class PlayerCallback(
     }
 
     private val radioFlow get() = state.radio
+
+    // Swallow the phantom hardware KEYCODE_MEDIA_PLAY that a head unit emits around a BT/car/AA
+    // disconnect, which would otherwise reach applyMediaButtonKeyEvent -> play() -> onPlaybackResumption
+    // and auto-start playback the user never asked for (traced against Media3 1.10.1 MediaSessionImpl:
+    // this callback is invoked at line 1460, strictly BEFORE the keycode->play() dispatch, and returning
+    // true stops propagation with no player/notification side effects). This path is reached ONLY for
+    // system-routed ACTION_MEDIA_BUTTON key events (e.g. Bluetooth); a MediaController.play() from our
+    // own UI travels the AIDL path and never enters here, so in-app playback is never suppressed. Gated
+    // purely on route-STATE (PlayerState.isPostDisconnect); no timing window. Both ACTION_DOWN and
+    // ACTION_UP of MEDIA_PLAY are swallowed while post-disconnect.
+    override fun onMediaButtonEvent(
+        session: MediaSession,
+        controllerInfo: MediaSession.ControllerInfo,
+        intent: Intent,
+    ): Boolean {
+        if (state.isPostDisconnect) {
+            val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+            else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+            if (keyEvent?.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) {
+                Log.d(
+                    "GladixPlayback",
+                    "Swallowing post-disconnect phantom KEYCODE_MEDIA_PLAY (action=${keyEvent.action})"
+                )
+                return true
+            }
+        }
+        return super.onMediaButtonEvent(session, controllerInfo, intent)
+    }
 
     override fun onConnect(
         session: MediaSession, controller: MediaSession.ControllerInfo,

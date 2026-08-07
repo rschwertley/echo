@@ -11,8 +11,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.car.app.connection.CarConnection
@@ -117,9 +122,45 @@ class PlayerService : MediaLibraryService() {
             || connectionType == CarConnection.CONNECTION_TYPE_NATIVE
         val wasConnected = isAndroidAutoConnected
         isAndroidAutoConnected = isConnected
+        // AA is the authoritative connect/disconnect signal for the phantom-PLAY route-state, because AA
+        // projection does NOT reliably present as an audio-output device to AudioDeviceCallback — so an
+        // AA disconnect may never fire onAudioDevicesRemoved. Recompute on every AA transition (connect
+        // clears the flag so a head-unit resume-on-connect passes through; disconnect sets it when no
+        // other external route remains). recompute reads isAndroidAutoConnected, updated just above.
+        recomputeRouteState()
         if (wasConnected && !isConnected) {
             mediaSession?.player?.let { if (it.playWhenReady) it.pause() }
         }
+    }
+
+    // Phantom-PLAY route tracking (see PlayerState.isPostDisconnect). AudioDeviceCallback covers the
+    // BT-A2DP / wired / USB-audio disconnect; the CarConnection observer covers AA/Automotive; the
+    // onCreate seed covers cold-open after the service was killed during a long disconnect.
+    private val audioManager by lazy { getSystemService<AudioManager>()!! }
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) = recomputeRouteState()
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) = recomputeRouteState()
+    }
+
+    // True if any current OUTPUT device is not a built-in speaker/earpiece — i.e. a real external audio
+    // route (BT/wired/USB/dock/etc.) is present. getDevices(GET_DEVICES_OUTPUTS) is never empty (the
+    // built-in speaker is always listed), so we test for a NON-built-in type rather than an empty list.
+    private fun hasExternalAudioOutput(): Boolean =
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { device ->
+            when (device.type) {
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> false
+                else -> !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    && device.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER_SAFE)
+            }
+        }
+
+    // We are "post-disconnect" only when there is neither an external audio route NOR an AA connection.
+    // Composing both inputs here (rather than writing the flag separately per signal) prevents the
+    // AudioDeviceCallback from falsely flagging post-disconnect while AA is connected but presenting no
+    // audio-output device. Runs on the application looper (all three callers do).
+    private fun recomputeRouteState() {
+        state.isPostDisconnect = !(isAndroidAutoConnected || hasExternalAudioOutput())
     }
 
     private val app by inject<App>()
@@ -213,7 +254,10 @@ class PlayerService : MediaLibraryService() {
             // still fire, and all standard controllers (AA, notification, lockscreen) extrapolate
             // position between them, so the seek bar is unaffected. Our own UI reads player position
             // directly on a 500ms ticker (PlayerUiListener), so it's independent of this flag.
-            .setPeriodicPositionUpdateEnabled(false)
+            // A/B TEST (temporary — revert to false if the #2192 scroll-reset returns): re-enabling periodic
+            // updates to confirm (a) AA now-playing card refreshes on a phone-side extension switch, and
+            // (b) whether the queue-scroll-reset bug actually comes back given later July queue fixes.
+            .setPeriodicPositionUpdateEnabled(true)
             .build()
 
         player.addListener(
@@ -245,6 +289,14 @@ class PlayerService : MediaLibraryService() {
         audioFocusListener = AudioFocusListener(this, player)
         carConnection = CarConnection(this)
         carConnection.type.observeForever(carConnectionObserver)
+        // Phantom-PLAY route tracking: observe live BT/wired/USB audio-route changes, and SEED the flag
+        // now from the current output set. The seed is the cold-open fix — after a long disconnect the
+        // service is killed (START_NOT_STICKY) and this in-memory flag resets, so on recreation we must
+        // re-derive it: no external output present => start post-disconnect, which is exactly the state
+        // after a BT/car/AA disconnect. The CarConnection observer's initial emission recomputes again
+        // once AA state is known.
+        audioManager.registerAudioDeviceCallback(audioDeviceCallback, Handler(Looper.getMainLooper()))
+        recomputeRouteState()
         player.addListener(audioFocusListener)
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -450,6 +502,7 @@ class PlayerService : MediaLibraryService() {
 
     override fun onDestroy() {
         if (::carConnection.isInitialized) carConnection.type.removeObserver(carConnectionObserver)
+        audioManager.unregisterAudioDeviceCallback(audioDeviceCallback)
         unregisterReceiver(clearQueueReceiver)
         mediaSession?.run {
             // Flush the debounced queue save synchronously BEFORE releasing the player and cancelling

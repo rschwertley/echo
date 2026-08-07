@@ -51,6 +51,17 @@ data class PlayerState(
     // to the stale position. Main-only (same application-looper invariant as resumptionApplying above).
     var pendingRestoreSeek: Pair<String, Long>? = null
 
+    // Route-state gate for the BT/car/AA "phantom PLAY" fix. True when there is NO external audio route
+    // AND Android Auto is not connected — i.e. we are "post-disconnect". Written by PlayerService from
+    // three signals (AudioDeviceCallback add/remove, the CarConnection observer, and an onCreate
+    // getDevices probe that seeds it for the cold-open case after the service was killed), and read in
+    // PlayerCallback.onMediaButtonEvent to swallow a phantom hardware KEYCODE_MEDIA_PLAY that a head unit
+    // emits around disconnect. @Volatile: all reads/writes happen on the application looper today (the
+    // AudioDeviceCallback is registered with a Main handler, the observer runs on Main, onMediaButtonEvent
+    // is invoked on the app looper), so it is defensive insurance rather than strictly required.
+    @Volatile
+    var isPostDisconnect: Boolean = false
+
     data class Current(
         val index: Int,
         val mediaItem: MediaItem,
