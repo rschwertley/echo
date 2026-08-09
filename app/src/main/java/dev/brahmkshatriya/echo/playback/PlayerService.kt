@@ -254,10 +254,7 @@ class PlayerService : MediaLibraryService() {
             // still fire, and all standard controllers (AA, notification, lockscreen) extrapolate
             // position between them, so the seek bar is unaffected. Our own UI reads player position
             // directly on a 500ms ticker (PlayerUiListener), so it's independent of this flag.
-            // A/B TEST (temporary — revert to false if the #2192 scroll-reset returns): re-enabling periodic
-            // updates to confirm (a) AA now-playing card refreshes on a phone-side extension switch, and
-            // (b) whether the queue-scroll-reset bug actually comes back given later July queue fixes.
-            .setPeriodicPositionUpdateEnabled(true)
+            .setPeriodicPositionUpdateEnabled(false)
             .build()
 
         player.addListener(

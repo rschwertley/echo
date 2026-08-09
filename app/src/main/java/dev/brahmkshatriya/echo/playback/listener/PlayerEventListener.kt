@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.playback.listener
 
 import android.content.Context
+import android.os.Bundle
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
@@ -193,6 +194,28 @@ class PlayerEventListener(
         session.setCustomLayout(commandButtons)
     }
 
+    // Forces AA's now-playing MediaMetadataCompat to re-sync to the live current after an advance whose
+    // transition Media3 dropped on the session dispatch (see ShufflePlayer.pendingAaResync, consumed at
+    // STATE_READY above). Bumps a benign, ignored extra ("aaResyncNonce") so the replaceMediaItem is NOT
+    // deduped → fires onTimelineChanged, while keeping the URI/localConfiguration and ALL index fields
+    // (retries/serverIndex/sourceIndex/backgroundIndex/subtitleIndex) unchanged so
+    // StreamableMediaSource.canUpdateMediaItem keeps it IN-PLACE (no re-prepare, no seek reset, no audio
+    // glitch). The onTimelineChanged then runs the legacy stub's (diffed) updateMetadataIfChanged, which
+    // sees the live current != AA's stale last-pushed track and calls setMetadata → AA re-syncs. AA-only in
+    // effect: the phone's onEvents/updateCurrentFlow re-reads the same live current (no visible change).
+    // Pairing intact — the touched item keeps its own mediaId/extensionId/state; only the new key changes.
+    private fun resyncAaNowPlaying() {
+        val index = player.currentMediaItemIndex
+        val current = player.currentMediaItem ?: return
+        val extras = Bundle(current.mediaMetadata.extras ?: Bundle()).apply {
+            putInt("aaResyncNonce", getInt("aaResyncNonce", 0) + 1)
+        }
+        val touched = current.buildUpon()
+            .setMediaMetadata(current.mediaMetadata.buildUpon().setExtras(extras).build())
+            .build()
+        player.replaceMediaItem(index, touched)
+    }
+
     private fun updateCurrentFlow() {
         val item = player.currentMediaItem
         if (item != null) {
@@ -314,6 +337,19 @@ class PlayerEventListener(
                     && player.currentPosition < RESTORE_SEEK_BELT_MS
                 ) player.seekTo(pos)
             }
+            // AA now-playing re-sync: after advancing OFF a hung/unresolved track (or an involuntary skip),
+            // Media3 can drop the good track's transition on the session dispatch, freezing AA on the pre-
+            // failure track while the phone stays correct (onEvents + live currentMediaItem read). If armed
+            // (ShufflePlayer.pendingAaResync), force a metadata-touch on the now-resolved current so a fresh
+            // onTimelineChanged runs the legacy stub's updateMetadataIfChanged and re-syncs AA. STATE_READY
+            // guarantees a fresh PlayerWrapper snapshot AND a resolved actualSource (in-place updateMediaItem,
+            // no re-prepare). mediaId-guarded so a newer advance supersedes; fires once (latch cleared).
+            (player as? ShufflePlayer)?.let { sp ->
+                sp.pendingAaResync?.let { targetId ->
+                    sp.pendingAaResync = null
+                    if (player.currentMediaItem?.mediaId == targetId) resyncAaNowPlaying()
+                }
+            }
         }
     }
 
@@ -393,6 +429,10 @@ class PlayerEventListener(
                         player.pause()
                         delay(50)
                     }
+                    // Cross-cancel the error-driven skip so the two skip triggers can't both advance this
+                    // one stuck track (this watchdog IS the bufferingWatchdog job; launchInvoluntarySkip
+                    // cancels it in the reverse direction).
+                    involuntarySkipJob?.cancel()
                     internalSeek { player.seekTo(0) }
                     skipInvoluntarily()
                     player.prepare()
@@ -493,6 +533,18 @@ class PlayerEventListener(
     private var serverErrorNotified = false
 
     private var bufferingWatchdog: Job? = null
+    // Serializes the involuntary auto-skip coroutine (error-driven skip-to-next). A 403 cascade fires an
+    // auto-skip per failed track; without this guard those pause->delay->skip->prepare->play coroutines
+    // could stack and over-skip. launchInvoluntarySkip() cancels any prior in-flight skip AND the
+    // buffering watchdog (the other skip trigger) so at most one involuntary skip is pending. Cancel only
+    // lands at the delay(50) suspension — everything after it is synchronous on Main — so a cancelled
+    // coroutine never advanced, hence no over-skip and no dropped skip (the latest trigger always skips).
+    private var involuntarySkipJob: Job? = null
+    private fun launchInvoluntarySkip(body: suspend CoroutineScope.() -> Unit) {
+        bufferingWatchdog?.cancel(); bufferingWatchdog = null
+        involuntarySkipJob?.cancel()
+        involuntarySkipJob = scope.launch(Dispatchers.Main, block = body)
+    }
     // Cold-resolution grace timer, keyed to the current item: restarts when the current mediaId
     // changes (a new buffering episode) and persists across watchdog re-arms of the same item.
     // Keyed by mediaId rather than reset via player callbacks, so it survives the
@@ -681,14 +733,12 @@ class PlayerEventListener(
                     return
                 }
                 if (isAndroidAutoConnected()) {
-                    scope.launch {
-                        withContext(Dispatchers.Main) {
-                            player.pause()
-                            delay(50)
-                            skipInvoluntarily()
-                            player.prepare()
-                            player.play()
-                        }
+                    launchInvoluntarySkip {
+                        player.pause()
+                        delay(50)
+                        skipInvoluntarily()
+                        player.prepare()
+                        player.play()
                     }
                 } else {
                     skipInvoluntarily()
@@ -745,14 +795,12 @@ class PlayerEventListener(
                 return
             }
             if (isAndroidAutoConnected()) {
-                scope.launch {
-                    withContext(Dispatchers.Main) {
-                        player.pause()
-                        delay(50)
-                        skipInvoluntarily()
-                        player.prepare()
-                        player.play()
-                    }
+                launchInvoluntarySkip {
+                    player.pause()
+                    delay(50)
+                    skipInvoluntarily()
+                    player.prepare()
+                    player.play()
                 }
             } else {
                 skipInvoluntarily()
@@ -827,14 +875,12 @@ class PlayerEventListener(
                 return
             }
             if (isAndroidAutoConnected()) {
-                scope.launch {
-                    withContext(Dispatchers.Main) {
-                        player.pause()
-                        delay(50)
-                        skipInvoluntarily()
-                        player.prepare()
-                        player.play()
-                    }
+                launchInvoluntarySkip {
+                    player.pause()
+                    delay(50)
+                    skipInvoluntarily()
+                    player.prepare()
+                    player.play()
                 }
             } else {
                 skipInvoluntarily()
@@ -873,15 +919,13 @@ class PlayerEventListener(
                 return
             }
             if (isAndroidAutoConnected()) {
-                scope.launch {
-                    withContext(Dispatchers.Main) {
-                        player.pause()
-                        delay(50)
-                        player.seekTo(player.currentMediaItemIndex, 0)
-                        skipInvoluntarily()
-                        player.prepare()
-                        player.play()
-                    }
+                launchInvoluntarySkip {
+                    player.pause()
+                    delay(50)
+                    player.seekTo(player.currentMediaItemIndex, 0)
+                    skipInvoluntarily()
+                    player.prepare()
+                    player.play()
                 }
             } else {
                 player.seekTo(player.currentMediaItemIndex, 0)

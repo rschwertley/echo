@@ -10,6 +10,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ShuffleOrder
+import dev.brahmkshatriya.echo.playback.MediaItemUtils.isLoaded
 
 @Suppress("unused")
 @OptIn(UnstableApi::class)
@@ -55,6 +56,16 @@ class ShufflePlayer(
     // seekToNextMediaItem(). advanceForward consumes it and removes the departing track WITHOUT
     // pushing it to the back-stack, so Previous never replays a dead/skipped-past track.
     internal var suppressPushOnNextAdvance = false
+
+    // AA now-playing re-sync latch. Armed in advanceForward when we advance OFF a hung/unresolved track
+    // (departing.isLoaded == false) OR via an involuntary skip (suppressPushOnNextAdvance) — the two paths
+    // whose transition Media3 can drop on the session dispatch (same-UID via removeByMediaId + stale
+    // PlayerWrapper snapshot), leaving AA frozen on the pre-failure track while the phone (onEvents +
+    // live currentMediaItem read) stays correct. Holds the NEW current's mediaId; consumed once at that
+    // track's first STATE_READY (fresh snapshot + resolved source) by PlayerEventListener, which fires a
+    // metadata-touch to force a non-suppressed onTimelineChanged so AA re-syncs. mediaId-guarded so a
+    // newer advance supersedes. Written on the application looper (advanceForward), read/cleared there too.
+    internal var pendingAaResync: String? = null
 
     // Auto-advance trim runs SYNCHRONOUSLY in onInnerMediaItemTransition (mirroring advanceForward). The
     // departed track is BEFORE current, so its removal only shifts indices — current-item identity is
@@ -526,6 +537,12 @@ class ShufflePlayer(
             if (departing != null && nowCurrent?.mediaId != departing.mediaId) {
                 if (skipHistory) removeByMediaId(departing.mediaId)   // involuntary: remove, don't push
                 else pushAndRemove(departing)
+                // Arm the AA now-playing re-sync when we advance OFF a hung/unresolved track (isLoaded==false)
+                // or via an involuntary skip (skipHistory) — the cases whose transition Media3 can drop on the
+                // session dispatch, freezing AA on the pre-failure track. Consumed once at nowCurrent's first
+                // STATE_READY (see PlayerEventListener). Clean manual Next off a resolved track arms neither.
+                if (departing.isLoaded == false || skipHistory)
+                    pendingAaResync = nowCurrent?.mediaId
             }
             lastCurrentItem = player.currentMediaItem
             maybeReconstituteForRepeatAll()   // Seam 4
