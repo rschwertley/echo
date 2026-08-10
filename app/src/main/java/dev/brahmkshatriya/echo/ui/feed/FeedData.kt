@@ -4,6 +4,7 @@ import android.os.Parcelable
 import androidx.paging.cachedIn
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.ExtensionType
 import dev.brahmkshatriya.echo.common.models.Feed
@@ -323,6 +324,7 @@ data class FeedData(
                     cachedState.value = null
                     loadedState.value = null
                     extensionLoader.current.value ?: return@collectLatest
+                    CrashKeys.onFeedLoad()   // feed_load_count (debounced 100ms + collectLatest — not hot)
                     cachedState.value = runCatching { cached(extensionLoader) }
                     loadedState.value = runCatching { load(extensionLoader) }
                 }

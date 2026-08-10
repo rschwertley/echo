@@ -74,6 +74,7 @@ import dev.brahmkshatriya.echo.playback.source.StreamableMediaSource
 import dev.brahmkshatriya.echo.ui.player.PlayerViewModel.Companion.KEEP_QUEUE
 import kotlinx.coroutines.async
 import dev.brahmkshatriya.echo.utils.ContextUtils.listenFuture
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.utils.HealthMonitor
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -122,6 +123,7 @@ class PlayerService : MediaLibraryService() {
             || connectionType == CarConnection.CONNECTION_TYPE_NATIVE
         val wasConnected = isAndroidAutoConnected
         isAndroidAutoConnected = isConnected
+        CrashKeys.onAndroidAutoState(isConnected)   // per AA route change (not hot)
         // AA is the authoritative connect/disconnect signal for the phantom-PLAY route-state, because AA
         // projection does NOT reliably present as an audio-output device to AudioDeviceCallback — so an
         // AA disconnect may never fire onAudioDevicesRemoved. Recompute on every AA transition (connect
@@ -232,6 +234,7 @@ class PlayerService : MediaLibraryService() {
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
+        CrashKeys.onServiceCreate()   // process_age_s + heap sample at service create (once per create)
         startForegroundCompat()
         setListener(MediaSessionServiceListener(this, getPendingIntent(this)))
 
@@ -304,6 +307,8 @@ class PlayerService : MediaLibraryService() {
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 app.crashExtensionId = mediaItem?.extensionId ?: "none"
+                // Reuse the already-decoded id (no second state round-trip); once per track transition.
+                CrashKeys.onPlayingExtension(app.crashExtensionId)
             }
         })
         app.settings.registerOnSharedPreferenceChangeListener(listener)

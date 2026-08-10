@@ -57,6 +57,7 @@ import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtensionOrThrow
 import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.playback.MediaItemUtils
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.playback.ResumptionUtils.recoverCurrentId
 import dev.brahmkshatriya.echo.playback.ResumptionUtils.recoverIndex
@@ -141,6 +142,7 @@ class PlayerCallback(
     override fun onConnect(
         session: MediaSession, controller: MediaSession.ControllerInfo,
     ): MediaSession.ConnectionResult {
+        CrashKeys.onControllerConnected()
         val sessionCommands = with(PlayerCommands) {
             MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(likeCommand).add(unlikeCommand).add(repeatCommand).add(repeatOffCommand)
@@ -167,6 +169,11 @@ class PlayerCallback(
                 }
             )
             .build()
+    }
+
+    override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
+        CrashKeys.onControllerDisconnected()
+        super.onDisconnected(session, controller)
     }
 
     override fun onCustomCommand(

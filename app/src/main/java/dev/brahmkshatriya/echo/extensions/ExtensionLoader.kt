@@ -27,6 +27,7 @@ import dev.brahmkshatriya.echo.common.providers.NetworkConnectionProvider
 import dev.brahmkshatriya.echo.common.providers.TrackerExtensionsProvider
 import dev.brahmkshatriya.echo.common.providers.WebViewClientProvider
 import dev.brahmkshatriya.echo.di.App
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.get
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getOrThrow
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.inject
@@ -133,6 +134,7 @@ class ExtensionLoader(
 
     fun setupMusicExtension(extension: MusicExtension, manual: Boolean) {
         if (manual) settings.edit { putString(LAST_EXTENSION_KEY, extension.id) }
+        CrashKeys.onExtensionSwitch(extension.id)   // switch counter + current_extension_id (once per switch)
         current.value = extension
         scope.launch {
             extension.get { onExtensionSelected() }.getOrThrow(app.throwFlow)

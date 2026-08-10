@@ -13,9 +13,10 @@ import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.history.db.toSlim
 import dev.brahmkshatriya.echo.history.db.toSlimContext
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.context
-import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
+import dev.brahmkshatriya.echo.playback.MediaItemUtils.state
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.utils.HealthMonitor
 import dev.brahmkshatriya.echo.utils.Serializer.json
 import dev.brahmkshatriya.echo.utils.Serializer.toJson
@@ -148,7 +149,13 @@ object ResumptionUtils {
         // and, crucially, PRESERVE Radio context extras (toSlimContext keeps them for a Radio), so the
         // recent radio work's re-resolution + "<title> Radio" header survive restore. This shrinks the file
         // ~10× (fixing the readText/decode OOM) and shrinks the build-time re-serialization in toMetaData.
-        val entries = list.map { QueueEntry(it.track.toSlim(), it.extensionId) }
+        // Decode the serialized state ONCE per item, then read both fields off the object. `it.track` and
+        // `it.extensionId` each route through the MediaItem accessor → getSerialized("state"), so the prior
+        // form deserialized the whole MediaState<Track> graph TWICE per entry — N-fold on a large queue, on
+        // every debounced save. Hoisting to one `it.state` decode halves it. (Zero decodes would require
+        // carrying the MediaState as an in-process object on the item rather than serialized in extras — a
+        // separate, larger change.)
+        val entries = list.map { it.state.let { s -> QueueEntry(s.item.toSlim(), s.extensionId) } }
         if (saveToQueue(QUEUE_ENTRIES, entries).isSuccess) {
             if (saveToQueue(CONTEXTS, list.map { it.context?.toSlimContext() }).isFailure)
                 deleteQueueKey(CONTEXTS)
@@ -176,6 +183,7 @@ object ResumptionUtils {
 
     suspend fun saveQueue(context: Context, player: Player) = withContext(Dispatchers.Main) {
         val list = player.mediaItems()
+        CrashKeys.onQueueSize(list.size)   // player_media_item_count (debounced 300ms save — not hot)
         Log.d("GladixPlayback", "saveQueue: itemCount=${list.size}")
         if (list.isEmpty()) {
             Log.d("GladixPlayback", "saveQueue: empty — stack: ${Thread.currentThread().stackTrace.take(10).joinToString(" < ") { it.methodName }}")
@@ -311,6 +319,7 @@ object ResumptionUtils {
         }
         val end = (current + 1 + QUEUE_CAP_UPCOMING).coerceAtMost(tracks.size)
         val window = tracks.subList(current, end)   // current at window index 0; before-current dropped
+        CrashKeys.onQueueBuild(window.size)   // restore_build_count + heap sample BEFORE the OOM-prone build
 
         // Skip-and-continue: build each saved item independently so ONE unbuildable entry (a partial/older-
         // format save, a mistyped item, a null field on a Track) can't throw out of the whole restore and

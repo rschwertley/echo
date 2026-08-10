@@ -25,6 +25,7 @@ import dev.brahmkshatriya.echo.di.DI
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.utils.AppShortcuts.configureAppShortcuts
 import dev.brahmkshatriya.echo.utils.CoroutineUtils
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -61,6 +62,9 @@ class MainApplication : Application(), KoinStartup, SingletonImageLoader.Factory
 
     override fun onCreate() {
         super.onCreate()
+        // First thing on process birth: record the monotonic start time for the process_age_s crash key.
+        // No DI / settings / Firebase touched here, so it's safe even on a pre-unlock Direct-Boot spawn.
+        CrashKeys.markProcessStart()
         CoroutineUtils.setDebug()
         // Firebase's directBootAware providers can spawn this process PRE-UNLOCK, where the (non-
         // directBootAware) androidx.startup InitializationProvider is skipped — so Koin isn't started AND

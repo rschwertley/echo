@@ -218,7 +218,12 @@ object MediaItemUtils {
                         .mapNotNull { it.download.finalFile }
                 putInt(
                     "serverIndex",
-                    serverIndex ?: selectServerIndex(app, extensionId, servers, downloaded)
+                    // Read extensionId off the MediaState receiver directly. Bare `extensionId` here binds to
+                    // the nearest implicit receiver — this `apply` Bundle — resolving to `Bundle?.extensionId`,
+                    // which deserializes the whole `state` JSON just written above only to read one String
+                    // (N redundant full-state decodes per window/queue build). `this@toMetaData.extensionId`
+                    // is the same String (plain @Serializable member; byte-identical) with no decode.
+                    serverIndex ?: selectServerIndex(app, this@toMetaData.extensionId, servers, downloaded)
                 )
                 putSerialized("downloaded", downloaded)
             })
