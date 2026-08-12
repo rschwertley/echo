@@ -52,6 +52,7 @@ import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.extensions.builtin.offline.OfflineExtension
 import dev.brahmkshatriya.echo.extensions.builtin.unified.UnifiedExtension
+import dev.brahmkshatriya.echo.extensions.exceptions.AppException.Companion.toAppException
 import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
 import dev.brahmkshatriya.echo.utils.CacheUtils.saveToCache
 import dev.brahmkshatriya.echo.utils.CoroutineUtils.await
@@ -582,7 +583,13 @@ abstract class AndroidAutoCallback(
                 }
                 is CancellationException -> throw it
                 else -> {
-                    throwableFlow?.emit(it)
+                    // Wrap for ATTRIBUTION only: this path calls loadSearchFeed directly (:555-564) rather
+                    // than through ExtensionUtils.get, so without this the throwable reaches App.throwFlow
+                    // unwrapped and throwing_extension_id records "none" for every AA search failure.
+                    // Emitting the wrapped form does not change what this function returns, nor the AA tile
+                    // text. Safe re CancellationException: toAppException rethrows it (AppException.kt:65),
+                    // but both cancellation cases are already handled above.
+                    throwableFlow?.emit(it.toAppException(ext))
                     Log.d("GladixAuto", "performSearch: error for query='$query' ext=${ext.id}: ${it::class.simpleName}: ${it.message}")
                     emptyList()
                 }
@@ -956,7 +963,14 @@ abstract class AndroidAutoCallback(
             )
         }.getOrElse {
             if (it is CancellationException) throw it
-            throwableFlow?.emit(it)
+            // Wrap for ATTRIBUTION only: client.block() (:952) is a direct extension call, not routed
+            // through ExtensionUtils.get, so unwrapped throwables make throwing_extension_id read "none"
+            // for the whole AA browse path. Deliberately wraps ONLY the emit — the SessionError below
+            // still reads the RAW `it.message`, so the AA tile text is byte-identical to before (the
+            // wrapped form would differ for NotSupported/Other; that's a separate cosmetic call, not
+            // this change). Safe re CancellationException: rethrown on the line above, before
+            // toAppException's own rethrow (AppException.kt:65) could fire.
+            throwableFlow?.emit(it.toAppException(this))
             it.printStackTrace()
             LibraryResult.ofError(
                 SessionError(SessionError.ERROR_IO, it.message ?: context.getString(R.string.auto_error_loading))

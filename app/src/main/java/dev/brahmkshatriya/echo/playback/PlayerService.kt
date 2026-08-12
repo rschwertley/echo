@@ -260,6 +260,17 @@ class PlayerService : MediaLibraryService() {
             // position between them, so the seek bar is unaffected. Our own UI reads player position
             // directly on a 500ms ticker (PlayerUiListener), so it's independent of this flag.
             .setPeriodicPositionUpdateEnabled(false)
+            // Behaviourally a no-op — NON_FATAL is already Media3's default (MediaLibraryService:465).
+            // Stated explicitly because the default is load-bearing and its loss would be SILENT: under
+            // FATAL, a library error replicated from ANY onGetChildren node takes the isFatal branch in
+            // MediaSessionLegacyStub.createPlaybackStateCompat (:1843-1861) and publishes STATE_ERROR with
+            // setActions(0) — over live playback of a DIFFERENT extension, since the platform session is
+            // shared. That is the stuck-error-over-playback class we spent Aug 9-11 diagnosing. NON_FATAL
+            // instead attaches only setErrorMessage + extras and leaves state/position/actions intact.
+            // No compile error and no test would catch a change here, so do not "simplify" this line away.
+            .setLibraryErrorReplicationMode(
+                MediaLibrarySession.LIBRARY_ERROR_REPLICATION_MODE_NON_FATAL
+            )
             .build()
 
         player.addListener(

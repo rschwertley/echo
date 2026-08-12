@@ -95,7 +95,23 @@ data class App(
                 // plugin jar — not guessed.
                 @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants")
                 if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) FirebaseCrashlytics.getInstance().apply {
+                    // extension_id is the PLAYING extension (crashExtensionId, written at
+                    // PlayerService:322 on media-item transition) — NOT the thrower. Most browse/feed
+                    // errors come from a non-playing extension, so this systematically mis-attributes
+                    // them. Kept unchanged for historical comparability with existing issues, and
+                    // duplicated by playing_extension_id. Read throwing_extension_id for attribution.
                     setCustomKey("extension_id", crashExtensionId)
+                    // The extension that actually threw, walked off the AppException in the chain
+                    // (ExtensionUtils.get:30 wraps every extension call, so one is present for any
+                    // error routed through that helper). ALWAYS written — Crashlytics keys are sticky
+                    // on the singleton, so omitting it would leave the previous report's value
+                    // attached to a host-side error. "none" now means a genuine HOST-side failure —
+                    // the two AndroidAutoCallback sites that bypass ExtensionUtils.get (performSearch
+                    // and getList) wrap explicitly, so the AA browse/search path attributes correctly.
+                    // AndroidAutoCallback:294 stays deliberately unwrapped: Job.join() does not rethrow
+                    // the joined job's failure, so the only throwable reaching it is from Media3's
+                    // notifySearchResultChanged — host-side, and "none" is the right answer there.
+                    setCustomKey("throwing_extension_id", it.throwingExtensionId() ?: "none")
                     setCustomKey("player_state", crashPlayerState)
                     setCustomKey("is_playing", crashIsPlaying)
                     recordException(it)
@@ -140,6 +156,20 @@ data class App(
     // True if this throwable (or anything in its cause chain) is a login-required signal. Matches BOTH
     // ClientException.LoginRequired (raw form the AA getList path emits) and AppException.LoginRequired (the
     // wrapped form the player/getOrThrow paths emit) — Unauthorized is a subclass of each, so it's covered.
+    // Id of the extension that threw: the first AppException in the cause chain. Same walk shape as
+    // isLoginRequired below. Uses Metadata.id (not .name) so values line up with extension_id /
+    // playing_extension_id and stay filterable. First-found is correct even through Unified —
+    // toAppException returns an existing AppException as-is (AppException.kt:60), so the chain holds
+    // exactly one, carrying the SUB-extension's metadata rather than "unified".
+    private fun Throwable.throwingExtensionId(): String? {
+        var t: Throwable? = this
+        while (t != null) {
+            (t as? AppException)?.let { return it.extension.id }
+            t = t.cause
+        }
+        return null
+    }
+
     private fun Throwable.isLoginRequired(): Boolean {
         var t: Throwable? = this
         while (t != null) {
