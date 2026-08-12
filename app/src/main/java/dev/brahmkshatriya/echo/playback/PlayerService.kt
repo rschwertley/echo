@@ -234,7 +234,9 @@ class PlayerService : MediaLibraryService() {
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
-        CrashKeys.onServiceCreate()   // process_age_s + heap sample at service create (once per create)
+        // age_s_svc + service_create_count + heap sample. service_create_count > 1 means this process has
+        // destroyed and recreated the service — the kill/rebind loop that makes heap_used_mb_svc a LATE sample.
+        CrashKeys.onServiceCreate()
         startForegroundCompat()
         setListener(MediaSessionServiceListener(this, getPendingIntent(this)))
 

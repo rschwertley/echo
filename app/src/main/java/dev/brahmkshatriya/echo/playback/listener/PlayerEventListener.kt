@@ -1,7 +1,6 @@
 package dev.brahmkshatriya.echo.playback.listener
 
 import android.content.Context
-import android.os.Bundle
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
@@ -18,6 +17,7 @@ import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.models.Message
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
+import dev.brahmkshatriya.echo.extensions.exceptions.AppException
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionNotFoundException
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtension
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.isClient
@@ -194,28 +194,6 @@ class PlayerEventListener(
         session.setCustomLayout(commandButtons)
     }
 
-    // Forces AA's now-playing MediaMetadataCompat to re-sync to the live current after an advance whose
-    // transition Media3 dropped on the session dispatch (see ShufflePlayer.pendingAaResync, consumed at
-    // STATE_READY above). Bumps a benign, ignored extra ("aaResyncNonce") so the replaceMediaItem is NOT
-    // deduped → fires onTimelineChanged, while keeping the URI/localConfiguration and ALL index fields
-    // (retries/serverIndex/sourceIndex/backgroundIndex/subtitleIndex) unchanged so
-    // StreamableMediaSource.canUpdateMediaItem keeps it IN-PLACE (no re-prepare, no seek reset, no audio
-    // glitch). The onTimelineChanged then runs the legacy stub's (diffed) updateMetadataIfChanged, which
-    // sees the live current != AA's stale last-pushed track and calls setMetadata → AA re-syncs. AA-only in
-    // effect: the phone's onEvents/updateCurrentFlow re-reads the same live current (no visible change).
-    // Pairing intact — the touched item keeps its own mediaId/extensionId/state; only the new key changes.
-    private fun resyncAaNowPlaying() {
-        val index = player.currentMediaItemIndex
-        val current = player.currentMediaItem ?: return
-        val extras = Bundle(current.mediaMetadata.extras ?: Bundle()).apply {
-            putInt("aaResyncNonce", getInt("aaResyncNonce", 0) + 1)
-        }
-        val touched = current.buildUpon()
-            .setMediaMetadata(current.mediaMetadata.buildUpon().setExtras(extras).build())
-            .build()
-        player.replaceMediaItem(index, touched)
-    }
-
     private fun updateCurrentFlow() {
         val item = player.currentMediaItem
         if (item != null) {
@@ -337,19 +315,6 @@ class PlayerEventListener(
                     && player.currentPosition < RESTORE_SEEK_BELT_MS
                 ) player.seekTo(pos)
             }
-            // AA now-playing re-sync: after advancing OFF a hung/unresolved track (or an involuntary skip),
-            // Media3 can drop the good track's transition on the session dispatch, freezing AA on the pre-
-            // failure track while the phone stays correct (onEvents + live currentMediaItem read). If armed
-            // (ShufflePlayer.pendingAaResync), force a metadata-touch on the now-resolved current so a fresh
-            // onTimelineChanged runs the legacy stub's updateMetadataIfChanged and re-syncs AA. STATE_READY
-            // guarantees a fresh PlayerWrapper snapshot AND a resolved actualSource (in-place updateMediaItem,
-            // no re-prepare). mediaId-guarded so a newer advance supersedes; fires once (latch cleared).
-            (player as? ShufflePlayer)?.let { sp ->
-                sp.pendingAaResync?.let { targetId ->
-                    sp.pendingAaResync = null
-                    if (player.currentMediaItem?.mediaId == targetId) resyncAaNowPlaying()
-                }
-            }
         }
     }
 
@@ -415,7 +380,7 @@ class PlayerEventListener(
                     Log.d("GladixPlayback", "Buffering watchdog fired: skipping ${player.currentMediaItem?.mediaId}")
                     recordSkip(null)
                     if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
-                        reportAndResetConsecutiveSkips(player.currentMediaItem?.extensionId)
+                        reportAndResetConsecutiveSkips(player.currentMediaItem?.extensionId, "pause")
                         player.pause()
                         return@withContext
                     }
@@ -505,6 +470,9 @@ class PlayerEventListener(
         // ever joined, so lastCauses stays ~a few hundred chars regardless of how nested a message is.
         private const val MAX_MSG_LEN = 80
         private const val MAX_CAUSE_LEN = 140
+        // Extension display names are author-declared and unbounded; cap independently so a long one can't
+        // eat the MAX_CAUSE_LEN budget the errorCodeName/type/message actually need.
+        private const val MAX_EXT_NAME_LEN = 24
     }
 
     private val maxRetries = 3
@@ -578,17 +546,43 @@ class PlayerEventListener(
     // it stored only the class simpleName, hiding the real reason). Now carries, most-diagnostic first:
     //   • the Media3 PlaybackException errorCodeName (ERROR_CODE_IO_BAD_HTTP_STATUS / _PARSING_ / etc.) —
     //     the true IO-vs-parse-vs-source discriminator, previously not captured at all;
+    //   • the OWNING extension's name (ext:<name>), walked off the AppException in the chain;
     //   • the exception type + HTTP responseCode (401/403/404 = token/auth vs missing);
     //   • the DEEPEST cause's message, URL-STRIPPED and length-capped.
     // Message handling is the security-sensitive part: Media3 embeds the signed CDN URL (token/hmac) in the
     // raw message, so any URL is replaced with <url> and the whole thing is hard-capped — never emitted raw.
     // Bounded by construction (MAX_CAUSE_LEN per cause × 3 causes) so a nested message can't spiral.
+    //
+    // ext:<name> closes the Unified attribution blind spot. ConsecutiveSkipException's extensionId comes from
+    // the MediaItem, which for a Unified-browsed track is "unified" — while the actual failure came from a
+    // SUB-extension. UnifiedExtension.client wraps with the sub-extension's Metadata and toAppException
+    // returns an existing AppException as-is, so the sub-extension's identity IS in the chain; it was simply
+    // never read. deepestSafeMessage() can't recover it either: it walks to the DEEPEST message (the raw
+    // "Error 403"), skipping AppException.Other's "Error 403 error in Spotify". Placed early so it survives
+    // the MAX_CAUSE_LEN truncation — attribution is the part that was missing entirely.
+    // Same scrub/cap treatment as the message: the name is an author-declared third-party string, so it is
+    // never emitted raw, and its own cap keeps it from eating the budget the real diagnosis needs.
     private fun safeCause(cause: Throwable?, playbackError: PlaybackException? = null): String {
         val code = playbackError?.errorCodeName
+        val ext = playbackError?.appExtensionName()?.let { "ext:$it" }
         val cls = cause?.let { it::class.simpleName ?: "Unknown" } ?: "StuckBuffering"
         val http = (cause as? HttpDataSource.InvalidResponseCodeException)?.let { "HTTP ${it.responseCode}" }
         val msg = cause?.deepestSafeMessage()
-        return listOfNotNull(code, cls, http, msg).joinToString(" ").take(MAX_CAUSE_LEN)
+        return listOfNotNull(code, ext, cls, http, msg).joinToString(" ").take(MAX_CAUSE_LEN)
+    }
+
+    // Name of the extension that OWNS this failure: the first AppException in the chain (ExtensionUtils.get
+    // wraps every extension call, so one is present for any extension-sourced error). Walked from the full
+    // PlaybackException, not from rootCause — rootCause is the DEEPEST node and the AppException sits above
+    // it. Null when no extension was involved (pure Media3 data-source failure, or the buffering watchdog's
+    // recordSkip(null)), in which case the emitted string is byte-identical to before this field existed.
+    private fun Throwable.appExtensionName(): String? {
+        var t: Throwable? = this
+        while (t != null) {
+            (t as? AppException)?.let { return it.extension.name.scrubbed(MAX_EXT_NAME_LEN) }
+            t = t.cause
+        }
+        return null
     }
 
     // Deepest non-null message in the cause chain, URL-stripped (signed-CDN-token guard) and capped. Returns
@@ -600,10 +594,28 @@ class PlayerEventListener(
             t.message?.let { last = it }
             t = t.cause
         }
-        return last?.replace(Regex("https?://\\S+"), "<url>")?.trim()?.take(MAX_MSG_LEN)
+        return last?.scrubbed(MAX_MSG_LEN)
     }
 
-    private fun reportAndResetConsecutiveSkips(extensionId: String?) {
+    // The shared guard for any third-party string that reaches Crashlytics: strip URLs (signed CDN tokens
+    // live in them) and hard-cap. Extracted so the extension name gets exactly the same treatment as the
+    // message rather than a second, drifting copy of the rule.
+    private fun String.scrubbed(max: Int) =
+        replace(Regex("https?://\\S+"), "<url>").trim().take(max)
+
+    // Single convergence point for EVERY breaker trip, so one log line here covers all call sites. `outcome`
+    // is the caller's intent ("stop" for the error paths, "pause" for the buffering watchdog) — the two end
+    // in different player states and therefore different session/notification behaviour, and the log is the
+    // only way to tell them apart after the fact. It cannot be derived here: player.playbackState at this
+    // moment is the PRE-action state (already IDLE from the error), not the resulting one.
+    // Logged BEFORE resetConsecutiveSkips(), which zeroes both the count and the causes.
+    private fun reportAndResetConsecutiveSkips(extensionId: String?, outcome: String) {
+        Log.d(
+            "GladixPlayback",
+            "Consecutive-skip breaker TRIPPED after $consecutiveUnavailableSkips skips " +
+                "(ext=${extensionId ?: "unknown"}, outcome=$outcome): " +
+                recentSkipCauses.joinToString(" | ")
+        )
         healthMonitor?.report(
             HealthMonitor.ConsecutiveSkipException(
                 consecutiveUnavailableSkips, extensionId ?: "unknown", recentSkipCauses.joinToString(",")
@@ -653,7 +665,7 @@ class PlayerEventListener(
                 Log.d("GladixPlayback", "onPlayerError: 404 retry failed for $currentMediaId, skipping")
                 recordSkip(rootCause, error)
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
-                    reportAndResetConsecutiveSkips(mediaItem?.extensionId)
+                    reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                     player.stop()
                     return
                 }
@@ -723,7 +735,7 @@ class PlayerEventListener(
                 Log.d("GladixPlayback", "onPlayerError: SocketException retry failed for $currentMediaId, skipping")
                 recordSkip(rootCause, error)
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
-                    reportAndResetConsecutiveSkips(mediaItem?.extensionId)
+                    reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                     player.stop()
                     return
                 }
@@ -783,7 +795,7 @@ class PlayerEventListener(
         if (rootCause is TrackUnavailableException || rootCause.message?.contains("not available", ignoreCase = true) == true) {
             recordSkip(rootCause, error)
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
-                reportAndResetConsecutiveSkips(mediaItem?.extensionId)
+                reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                 player.stop()
                 val isRetryExhausted = rootCause.message?.contains("not available after retries", ignoreCase = true) == true
                 if (!isRetryExhausted) scope.launch { throwableFlow.emit(PlayerException(mediaItem, rootCause)) }
@@ -853,7 +865,7 @@ class PlayerEventListener(
             if (!isExtensionRemoved) {
                 recordSkip(rootCause, error)
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
-                    reportAndResetConsecutiveSkips(mediaItem?.extensionId)
+                    reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                     player.stop()
                     return
                 }
@@ -906,10 +918,15 @@ class PlayerEventListener(
         if (currentRetries >= maxRetries) {
             currentRetries = 0
             last = null
-            Log.d("GladixPlayback", "onPlayerError: maxRetries exhausted for ${mediaItem.mediaId}, skipping")
+            // Split from the old single "…, skipping" line: that fired BEFORE the breaker check below, so it
+            // claimed a skip on the very run that stopped instead — which is why a trip was invisible in a
+            // logcat capture. This line states only the fact (retries are done); the outcome is logged by
+            // whichever branch actually runs (the breaker's own line inside reportAndResetConsecutiveSkips,
+            // or the "skipping" line below).
+            Log.d("GladixPlayback", "onPlayerError: maxRetries exhausted for ${mediaItem.mediaId}")
             recordSkip(rootCause, error)
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
-                reportAndResetConsecutiveSkips(mediaItem.extensionId)
+                reportAndResetConsecutiveSkips(mediaItem.extensionId, "stop")
                 player.stop()
                 return
             }
@@ -918,6 +935,7 @@ class PlayerEventListener(
                 player.stop()
                 return
             }
+            Log.d("GladixPlayback", "onPlayerError: skipping ${mediaItem.mediaId}")
             if (isAndroidAutoConnected()) {
                 launchInvoluntarySkip {
                     player.pause()
@@ -936,6 +954,22 @@ class PlayerEventListener(
             return
         }
         if (retries >= maxSingleItemRetries) {
+            // Per-item retries are exhausted, so this IS a skip and must advance the breaker like every other
+            // skip site — see recordSkip's contract above ("called at every skip site"), which this violated.
+            // The omission is why a 3-strike breaker needed SIX tracks to trip: only the currentRetries >=
+            // maxRetries path counted, and it zeroes currentRetries each time it fires, so the alternating
+            // per-item skips were invisible to the breaker. Now 3 tracks, matching the documented intent.
+            // Ordering mirrors every other counted site exactly (recordSkip -> breaker -> end-of-queue ->
+            // skip). The breaker check belongs HERE rather than being left to the next site that happens to
+            // check: incrementing without deciding is precisely the count/decision drift recordSkip guards
+            // against, and it would defer the trip by an unbounded number of tracks.
+            Log.d("GladixPlayback", "onPlayerError: item retries exhausted for ${mediaItem.mediaId}")
+            recordSkip(rootCause, error)
+            if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
+                reportAndResetConsecutiveSkips(mediaItem.extensionId, "stop")
+                player.stop()
+                return
+            }
             val hasMore = player.hasNextMediaItem()
             if (!hasMore) {
                 player.stop()

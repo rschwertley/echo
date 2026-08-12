@@ -654,14 +654,23 @@ class PlayerFragment : Fragment() {
         var last: Drawable? = null
         // Colors/dynamic-theming still derive from the attached page drawable; only the Ken Burns background
         // was moved to identity-based loading (loadCurrentBackground).
+        // Captured once at setup (onViewCreated, provably attached) rather than per-invocation. This
+        // listener is NOT lifecycle-gated: PlayerTrackAdapter.applyDrawable() invokes it from the
+        // ViewHolder's async cover-load callback, which can land after onDestroyView (activity recreation),
+        // and requireContext() would throw there. isDynamic()/getColorsFrom() only need a Context, not an
+        // attached one. Same fix as PlayerTvFragment.configureColors — the phone site has the identical
+        // shape and simply hasn't been the one to crash yet.
+        val listenerContext = requireContext()
         adapter.currentDrawableListener = { drawable ->
             if (last != drawable) {
-                last = drawable
-                val context = requireContext()
                 uiViewModel.playerDrawable.value = drawable
-                val colors =
-                    if (context.isDynamic()) context.getColorsFrom(drawable?.toBitmap()) else null
+                val colors = if (listenerContext.isDynamic())
+                    listenerContext.getColorsFrom(drawable?.toBitmap()) else null
                 uiViewModel.playerColors.value = colors
+                // After the work, for the same reason as PlayerTvFragment's lastDrawable: an early exit
+                // must not leave the cache claiming this drawable was applied. Wholly synchronous here, so
+                // moving it is free.
+                last = drawable
             }
         }
         val bufferView =
@@ -671,12 +680,21 @@ class PlayerFragment : Fragment() {
             if (context.isPlayerColor() && context.isDynamic()) {
                 val newAccent = it?.accent
                 if (uiViewModel.lastPlayerAccentColor != newAccent) {
-                    uiViewModel.lastPlayerAccentColor = newAccent
+                    // See PlayerTvFragment.configureColors for the full reasoning: written only where the
+                    // recreate actually runs, and inside the withResumed block so no cancellation point
+                    // separates the recreate from the flag recording it. Pre-assigning left the deferred
+                    // branch able to drop the recreate while claiming it happened — and since the accent is
+                    // seeded into the theme only by MainActivity.applyUiChanges at activity creation, that
+                    // stales the theme until an unrelated recreate, with no retry (the guard blocks it).
                     if (requireActivity().lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                         requireActivity().recreate()
+                        uiViewModel.lastPlayerAccentColor = newAccent
                     } else {
                         lifecycleScope.launch {
-                            lifecycle.withResumed { requireActivity().recreate() }
+                            lifecycle.withResumed {
+                                requireActivity().recreate()
+                                uiViewModel.lastPlayerAccentColor = newAccent
+                            }
                         }
                     }
                     return@observe

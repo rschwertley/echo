@@ -283,15 +283,29 @@ class PlayerTvFragment : Fragment() {
             val cover = current.track.cover
             val albumArt = binding?.tvAlbumArt ?: return@observe
             cover.toMaxRes().loadRoundedInto(albumArt, 24f, R.drawable.ic_music)
+            // Context captured HERE, synchronously in the observe body while the fragment is provably
+            // attached — not re-fetched after the suspend below. The old code called requireContext() again
+            // on resumption, which threw "not attached to a context" whenever an activity recreation (the
+            // accent path below calls recreate() itself; night-mode/settings changes do too) detached the
+            // fragment mid-load. Nothing in the tail needs a *fresh* context: getSettings() is
+            // SharedPreferences and getColorsFrom() is Palette + a config read, both fine on the context the
+            // load started with — and semantically that IS the right one, since these colours belong to the
+            // load that was kicked off then.
+            val ctx = requireContext()
             lifecycleScope.launch {
-                val drawable = cover.loadDrawable(requireContext())
+                val drawable = cover.loadDrawable(ctx)
                 if (lastDrawable !== drawable) {
-                    lastDrawable = drawable
-                    val ctx = requireContext()
                     uiViewModel.playerDrawable.value = drawable
                     val dynamic = ctx.getSettings().getBoolean(DYNAMIC_PLAYER, true)
                     val colors = if (dynamic) ctx.getColorsFrom(drawable?.toBitmap()) else null
                     uiViewModel.playerColors.value = colors
+                    // Assigned AFTER the work, not before. Pre-assigning meant any early exit from the tail
+                    // left the cache claiming this drawable had been applied when its colours never were —
+                    // and since the guard is identity-based, the same drawable would then short-circuit
+                    // forever and the player would keep stale colours. Safe to move: loadDrawable above is
+                    // the only suspension point, so everything from the check to here is synchronous on
+                    // Main and no other coroutine can interleave between them.
+                    lastDrawable = drawable
                 }
             }
         }
@@ -304,11 +318,27 @@ class PlayerTvFragment : Fragment() {
             if (playerColor && dynamic) {
                 val newAccent = it?.accent
                 if (uiViewModel.lastPlayerAccentColor != newAccent) {
-                    uiViewModel.lastPlayerAccentColor = newAccent
+                    // The bookkeeping is written only where the recreate actually happens. It used to be
+                    // assigned up front, which broke the DEFERRED branch: withResumed resumes its caller
+                    // through a dispatch, and that dispatch is a cancellation point — so the coroutine could
+                    // be cancelled after recreate() was requested but before an assignment placed *after*
+                    // withResumed, leaving the flag stale and the accent retrying on every emission forever.
+                    // lastPlayerAccentColor lives on UiViewModel, which SURVIVES recreate(), so the write
+                    // persists across the teardown it just triggered. Nothing else re-applies the accent —
+                    // MainActivity.applyUiChanges seeds the theme from playerColors at activity creation
+                    // only — so a dropped recreate does not self-heal, which is why this ordering matters.
                     if (requireActivity().lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                         requireActivity().recreate()
+                        uiViewModel.lastPlayerAccentColor = newAccent
                     } else {
-                        lifecycleScope.launch { lifecycle.withResumed { requireActivity().recreate() } }
+                        lifecycleScope.launch {
+                            lifecycle.withResumed {
+                                // No suspension point between these two, so cancellation cannot land
+                                // between the recreate and the flag that records it.
+                                requireActivity().recreate()
+                                uiViewModel.lastPlayerAccentColor = newAccent
+                            }
+                        }
                     }
                     return@observe
                 }

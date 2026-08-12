@@ -21,6 +21,7 @@ import coil3.request.transformations
 import coil3.transform.CircleCropTransformation
 import coil3.transform.Transformation
 import dev.brahmkshatriya.echo.common.models.ImageHolder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 
 object ImageUtils {
@@ -34,9 +35,29 @@ object ImageUtils {
         }
     }
 
+    // CancellationException MUST propagate. Swallowing it (the old `catch (e: Throwable)` alone) breaks
+    // structured concurrency: the suspension point returns null *normally* in an already-cancelled
+    // coroutine, so the caller's tail keeps running after its scope died. That is exactly how
+    // PlayerTvFragment.configureColors reached requireContext() on a fragment whose lifecycleScope had
+    // already been cancelled by activity recreation (Fragment.performDestroy → DESTROYED → scope cancel
+    // precedes performDetach → mHost = null, so the throw proves the resume happened post-cancellation).
+    //
+    // It also makes null MEANINGFUL again: callers can now treat null as "no image / load failed" — the
+    // case that legitimately paints a default — without conflating it with "we were cancelled", which
+    // previously let a dying fragment write nulls into activity-scoped state (uiViewModel.playerColors)
+    // that outlives it.
+    //
+    // Secondary benefit: the old path also ran e.printStackTrace() on every cancellation (print defaults
+    // to true and neither caller overrides it), so routine cancellations — feed scrolling, flow transforms
+    // — spammed System.err with JobCancellationException lines carrying no stack (kotlinx sets an empty
+    // stack unless kotlinx.coroutines.debug is on). That noise goes away.
+    //
+    // Deliberately NOT applied to the non-suspend tryWith above: no coroutine, nothing to cancel.
     private suspend fun <T> tryWithSuspend(print: Boolean = true, block: suspend () -> T): T? {
         return try {
             block()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             if (print) e.printStackTrace()
             null

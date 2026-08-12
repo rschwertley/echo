@@ -142,7 +142,7 @@ class PlayerCallback(
     override fun onConnect(
         session: MediaSession, controller: MediaSession.ControllerInfo,
     ): MediaSession.ConnectionResult {
-        CrashKeys.onControllerConnected()
+        CrashKeys.onControllerConnected(controller.packageName)
         val sessionCommands = with(PlayerCommands) {
             MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(likeCommand).add(unlikeCommand).add(repeatCommand).add(repeatOffCommand)
@@ -172,7 +172,7 @@ class PlayerCallback(
     }
 
     override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
-        CrashKeys.onControllerDisconnected()
+        CrashKeys.onControllerDisconnected(controller.packageName)
         super.onDisconnected(session, controller)
     }
 

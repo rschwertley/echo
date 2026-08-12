@@ -10,7 +10,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ShuffleOrder
-import dev.brahmkshatriya.echo.playback.MediaItemUtils.isLoaded
 
 @Suppress("unused")
 @OptIn(UnstableApi::class)
@@ -56,16 +55,6 @@ class ShufflePlayer(
     // seekToNextMediaItem(). advanceForward consumes it and removes the departing track WITHOUT
     // pushing it to the back-stack, so Previous never replays a dead/skipped-past track.
     internal var suppressPushOnNextAdvance = false
-
-    // AA now-playing re-sync latch. Armed in advanceForward when we advance OFF a hung/unresolved track
-    // (departing.isLoaded == false) OR via an involuntary skip (suppressPushOnNextAdvance) — the two paths
-    // whose transition Media3 can drop on the session dispatch (same-UID via removeByMediaId + stale
-    // PlayerWrapper snapshot), leaving AA frozen on the pre-failure track while the phone (onEvents +
-    // live currentMediaItem read) stays correct. Holds the NEW current's mediaId; consumed once at that
-    // track's first STATE_READY (fresh snapshot + resolved source) by PlayerEventListener, which fires a
-    // metadata-touch to force a non-suppressed onTimelineChanged so AA re-syncs. mediaId-guarded so a
-    // newer advance supersedes. Written on the application looper (advanceForward), read/cleared there too.
-    internal var pendingAaResync: String? = null
 
     // Auto-advance trim runs SYNCHRONOUSLY in onInnerMediaItemTransition (mirroring advanceForward). The
     // departed track is BEFORE current, so its removal only shifts indices — current-item identity is
@@ -265,12 +254,45 @@ class ShufflePlayer(
         player.replaceMediaItems(fromIndex, toIndex, mediaItems)
     }
 
+    // Error-state sequencing for the media session (Android Auto). A queue replace while the inner player
+    // still holds a live playbackError publishes the NEW track's MediaMetadataCompat under a
+    // PlaybackStateCompat that STILL reads STATE_ERROR: Media3's legacy stub runs onTimelineChanged /
+    // onMediaItemTransition synchronously inside setMediaItems (updatePlaybackInfo ends in
+    // listeners.flushEvents), so its setMetadata is already out by the time the caller's prepare() clears
+    // the error. AA is handed now-playing data while the session reads as errored, and nothing can
+    // re-assert it afterwards — the stub's updateMetadataIfChanged diff cache (lastMediaId/lastMetadata/
+    // lastMediaUri/lastDurationMs) has already advanced to the new track, so every later push early-returns.
+    //
+    // prepare() is the ONLY thing that clears ExoPlayer's playbackError — stop() preserves it
+    // (ExoPlayerImplInternal.stopInternal passes resetError=false) — so it has to run BEFORE the replace,
+    // in the SAME main-thread message. It cannot be done at the call sites: PlayerViewModel.setQueue reaches
+    // us as two separate MediaController binder calls (setMediaItems then prepare), i.e. two looper messages
+    // with a dispatch gap between them. Hence the funnel — every set/replace entry point calls this first.
+    //
+    // Inert in the normal case: guarded on a live error, and prepare() itself early-returns unless the inner
+    // player is STATE_IDLE. Cold-start restore (applyRestoreIfCold, gated on mediaItemCount == 0) and
+    // onPlaybackResumption always arrive on an empty, never-played player, so no error can exist; and on an
+    // empty timeline prepare() masks to STATE_ENDED and starts no load at all.
+    //
+    // Cost when it does fire: the dead queue is re-armed for one main-thread tick, which may start a
+    // StreamableMediaSource resolution that the ensuing replace discards. That load's accounting is balanced
+    // — activeLoadCount's increment has no suspension point before its try/finally, and the cancellation is
+    // swallowed by the load's own runCatching — so the buffering watchdog's cold-resolution suppression
+    // (which reads activeLoadCount) is unaffected. No error can interleave either: playback-thread errors
+    // reach Player.Listener only via a posted message, which cannot dispatch while this call is still on the
+    // stack. Reads the INNER player's error deliberately, not our getPlayerError() override, to skip the
+    // AA error mapper — only nullness matters here.
+    private fun clearErrorBeforeQueueReplace() {
+        if (player.playerError != null) player.prepare()
+    }
+
     // Seam 3: setMediaItem(s)/clearMediaItems establish a NEW context (new play, cold-start restore,
     // clear-queue), so the play-history back-stack must be wiped — otherwise Previous could pop a
     // track from a prior session's queue. Any pending REPEAT_ALL reconstitution is CANCELLED here for the
     // same reason: it re-adds back-stack items that belong to the OLD queue. These are the only new-context
     // entry points; advance, jump, changeQueue, and reconstitution all use add/remove/move, never set/clear.
     override fun setMediaItem(mediaItem: MediaItem) {
+        clearErrorBeforeQueueReplace()
         original = listOf(mediaItem)
         backStack.clear()
         cancelPendingReconstitution()
@@ -278,6 +300,7 @@ class ShufflePlayer(
     }
 
     override fun setMediaItem(mediaItem: MediaItem, resetPosition: Boolean) {
+        clearErrorBeforeQueueReplace()
         original = listOf(mediaItem)
         backStack.clear()
         cancelPendingReconstitution()
@@ -285,6 +308,7 @@ class ShufflePlayer(
     }
 
     override fun setMediaItem(mediaItem: MediaItem, startPositionMs: Long) {
+        clearErrorBeforeQueueReplace()
         original = listOf(mediaItem)
         backStack.clear()
         cancelPendingReconstitution()
@@ -292,6 +316,7 @@ class ShufflePlayer(
     }
 
     override fun setMediaItems(mediaItems: MutableList<MediaItem>) {
+        clearErrorBeforeQueueReplace()
         original = mediaItems
         backStack.clear()
         cancelPendingReconstitution()
@@ -299,6 +324,7 @@ class ShufflePlayer(
     }
 
     override fun setMediaItems(mediaItems: MutableList<MediaItem>, resetPosition: Boolean) {
+        clearErrorBeforeQueueReplace()
         original = mediaItems
         backStack.clear()
         cancelPendingReconstitution()
@@ -310,6 +336,7 @@ class ShufflePlayer(
         startIndex: Int,
         startPositionMs: Long
     ) {
+        clearErrorBeforeQueueReplace()
         val tileOriginal = pendingShuffleTileOriginal
         pendingShuffleTileOriginal = null
         original = tileOriginal ?: mediaItems
@@ -537,12 +564,6 @@ class ShufflePlayer(
             if (departing != null && nowCurrent?.mediaId != departing.mediaId) {
                 if (skipHistory) removeByMediaId(departing.mediaId)   // involuntary: remove, don't push
                 else pushAndRemove(departing)
-                // Arm the AA now-playing re-sync when we advance OFF a hung/unresolved track (isLoaded==false)
-                // or via an involuntary skip (skipHistory) — the cases whose transition Media3 can drop on the
-                // session dispatch, freezing AA on the pre-failure track. Consumed once at nowCurrent's first
-                // STATE_READY (see PlayerEventListener). Clean manual Next off a resolved track arms neither.
-                if (departing.isLoaded == false || skipHistory)
-                    pendingAaResync = nowCurrent?.mediaId
             }
             lastCurrentItem = player.currentMediaItem
             maybeReconstituteForRepeatAll()   // Seam 4
