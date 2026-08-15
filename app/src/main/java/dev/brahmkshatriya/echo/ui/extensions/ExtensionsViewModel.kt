@@ -14,6 +14,7 @@ import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtensionOrThrow
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getOrThrow
+import dev.brahmkshatriya.echo.extensions.InstallationUtils.ensureCanInstallPackages
 import dev.brahmkshatriya.echo.extensions.InstallationUtils.installApp
 import dev.brahmkshatriya.echo.extensions.InstallationUtils.installFile
 import dev.brahmkshatriya.echo.extensions.InstallationUtils.uninstallApp
@@ -101,15 +102,34 @@ class ExtensionsViewModel(
         app.context.saveToCache("last_update_check", System.currentTimeMillis())
         activity.cleanupTempApks()
         message(app.context.getString(R.string.checking_for_extension_updates))
-        val appApk = updateApp(app)
+        // The install-permission prompt is threaded in as a lambda rather than checked here, so it
+        // only ever fires once an update actually exists (updateApp calls it after resolving the
+        // URL, before downloading). Declining returns null, which falls through to the extension
+        // branch below exactly as "no app update" already does.
+        val appApk = updateApp(app) { activity.ensureCanInstallPackages() }
         runCatching {
             if (appApk != null) {
-                app.context.saveToCache("last_update_check", 0)
+                // 0L, not 0: saveToCache picks its folder from T::class.java.simpleName, so an Int
+                // literal wrote to the "int" folder while shouldCheckForExtensionUpdates reads
+                // getFromCache<Long> out of "long". This reset has therefore never taken effect.
+                app.context.saveToCache("last_update_check", 0L)
                 awaitInstallation(appApk).getOrThrow()
             } else {
                 var anyUpdateFound = false
-                extensionLoader.all.value.forEach { if (updateExt(it)) anyUpdateFound = true }
-                if (!anyUpdateFound)
+                var anyFailed = false
+                extensionLoader.all.value.forEach {
+                    when (updateExt(it)) {
+                        ExtUpdate.Updated -> anyUpdateFound = true
+                        ExtUpdate.Failed -> anyFailed = true
+                        ExtUpdate.UpToDate -> Unit
+                    }
+                }
+                // Only claim "up to date" when we actually found out. A failed check or download
+                // used to land here too, so a transient GitHub error reassured the user that
+                // everything was current. On failure we stay silent rather than adding a second
+                // message — the failure already produced its own snackbar via throwFlow.
+                if (anyFailed) app.context.saveToCache("last_update_check", 0L)
+                else if (!anyUpdateFound)
                     message(app.context.getString(R.string.all_extensions_up_to_date))
             }
         }.getOrElse { if (it is CancellationException) throw it; app.throwFlow.emit(it) }
@@ -145,21 +165,28 @@ class ExtensionsViewModel(
         promptResultFlow.emit(PromptResult(file, install, type, id, supportedLinks))
     }
 
-    private suspend fun updateExt(ext: Extension<*>, show: Boolean = false): Boolean {
-        val file = getExtensionUpdate(ext, show) ?: return false
+    // Tri-state. A plain Boolean conflated "no update available" with "we never found out", which
+    // is what let update() report "all extensions up to date" straight after a failed check or a
+    // failed download. Failed also covers a failed INSTALL, which previously returned `true` — it
+    // suppressed the up-to-date message correctly but for the wrong reason, and reported nothing.
+    private enum class ExtUpdate { Updated, UpToDate, Failed }
+
+    private suspend fun updateExt(ext: Extension<*>, show: Boolean = false): ExtUpdate {
+        val file = getExtensionUpdate(ext, show).getOrElse { return ExtUpdate.Failed }
+            ?: return ExtUpdate.UpToDate
         val type = ext.metadata.importType
         if (type == ImportType.File) {
             installPromptFlow.emit(file)
             val result = promptResultFlow.first { it.file == file }
-            if (!result.accepted) return true
+            if (!result.accepted) return ExtUpdate.Updated
         }
         install(ext.id, type, file).onFailure {
             if (it is CancellationException) throw it
             app.throwFlow.emit(it)
-            return true
+            return ExtUpdate.Failed
         }
         message(app.context.getString(R.string.extension_updated_successfully, ext.name))
-        return true
+        return ExtUpdate.Updated
     }
 
     fun update(extension: Extension<*>) = viewModelScope.launch { updateExt(extension, true) }
@@ -225,24 +252,27 @@ class ExtensionsViewModel(
     }
 
     private val client = OkHttpClient()
+    // Result<File?> rather than File?, so the caller can tell the two null cases apart:
+    // success(null) = nothing to update, failure = we never found out. Both already emit to
+    // throwFlow; only the return value was lossy.
     private suspend fun getExtensionUpdate(
         extension: Extension<*>,
         show: Boolean = false
-    ): File? {
+    ): Result<File?> {
         val currentVersion = extension.version
-        val updateUrl = extension.metadata.updateUrl ?: return null
+        val updateUrl = extension.metadata.updateUrl ?: return Result.success(null)
         val url = runCatching {
             getUpdateFileUrl(currentVersion, updateUrl, client).getOrThrow()
         }.getOrElse {
             if (it is CancellationException) throw it
             app.throwFlow.emit(it)
-            return null
+            return Result.failure(it)
         }
         if (url == null) {
             if (show) message(
                 app.context.getString(R.string.no_update_available_for_x, extension.name)
             )
-            return null
+            return Result.success(null)
         }
         message(app.context.getString(R.string.downloading_update_for_x, extension.name))
         val file = runCatching {
@@ -250,9 +280,9 @@ class ExtensionsViewModel(
         }.getOrElse {
             if (it is CancellationException) throw it
             app.throwFlow.emit(it)
-            return null
+            return Result.failure(it)
         }
-        return file
+        return Result.success(file)
     }
 
 }

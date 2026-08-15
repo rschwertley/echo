@@ -5,8 +5,11 @@ import android.util.Log
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.net.toUri
 import androidx.fragment.app.FragmentActivity
 import dev.brahmkshatriya.echo.extensions.repo.ExtensionParser.Companion.PACKAGE_FLAGS
@@ -34,10 +37,63 @@ object InstallationUtils {
             putExtra(Intent.EXTRA_RETURN_RESULT, true)
             data = contentUri
         }
-        val it = activity.waitForResult(installIntent)
-        if (it.resultCode == Activity.RESULT_OK) return
-        val result = it.data?.extras?.getInt("android.intent.extra.INSTALL_RESULT")
-        throw Exception("Please uninstall the existing extension first. Error Code: $result")
+        val result = activity.waitForResult(installIntent)
+        if (result.resultCode == Activity.RESULT_OK) return
+
+        // resultCode / EXTRA_RETURN_RESULT are only contractual for the deprecated
+        // ACTION_INSTALL_PACKAGE. On ACTION_VIEW many installers return RESULT_CANCELED even after a
+        // SUCCESSFUL install, so a non-OK code must not be treated as failure. Ask the PackageManager
+        // what is actually installed instead of branching on a value we know we cannot trust.
+        // (On an app SELF-update we never reach this line at all — installing over ourselves kills
+        // the process — so everything below is effectively the extension path.)
+        val apk = activity.packageManager.getPackageArchiveInfo(file.path, 0)
+        val pkg = apk?.packageName
+        val installed = pkg?.let {
+            runCatching { activity.packageManager.getPackageInfo(it, 0) }.getOrNull()
+        }
+        if (apk != null && installed != null &&
+            PackageInfoCompat.getLongVersionCode(installed) >=
+            PackageInfoCompat.getLongVersionCode(apk)
+        ) return
+
+        // Backing out of the system dialog is not an error. Signal it exactly as uninstallApp below
+        // already does, so a decline stops producing a snackbar and a Crashlytics non-fatal.
+        if (result.resultCode == Activity.RESULT_CANCELED)
+            throw CancellationException("Install cancelled by user")
+
+        val status = result.data?.extras
+            ?.getInt("android.intent.extra.INSTALL_RESULT", Int.MIN_VALUE)
+            ?.takeIf { it != Int.MIN_VALUE }
+        // The old text ("Please uninstall the existing extension first") was a decent hint for the
+        // common signature-mismatch case but wrong for every other one, and wrong for the app. Key
+        // it on the CONDITION rather than on the caller: the hint only applies when a copy is
+        // already installed and did not advance, which is caller-agnostic and needs no flag.
+        throw Exception(
+            if (installed != null)
+                "Install failed — you may need to uninstall the existing version first " +
+                    "(resultCode=${result.resultCode}" + (status?.let { ", status=$it" } ?: "") + ")"
+            else "Install failed (resultCode=${result.resultCode}" +
+                (status?.let { ", status=$it" } ?: "") + ")"
+        )
+    }
+
+    // True when this app is allowed to install APKs. Since API 26 the grant is per-source, and
+    // nothing here requested it — so the user met the system's cold "not allowed to install unknown
+    // apps" dialog with no explanation from us. Ask first instead. Below API 26 the setting is
+    // global and there is nothing to request.
+    // Used for the APP update only; extension installs keep their existing behaviour.
+    suspend fun FragmentActivity.ensureCanInstallPackages(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        if (packageManager.canRequestPackageInstalls()) return true
+        val intent = Intent(
+            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()
+        )
+        // Not every device ships a handler for this screen; a missing one must degrade to "no app
+        // update", never crash the update pass.
+        runCatching { waitForResult(intent) }.getOrElse { return false }
+        // The settings screen returns RESULT_CANCELED whether or not the toggle was flipped, so
+        // re-query rather than reading its resultCode.
+        return packageManager.canRequestPackageInstalls()
     }
 
     suspend fun installFile(

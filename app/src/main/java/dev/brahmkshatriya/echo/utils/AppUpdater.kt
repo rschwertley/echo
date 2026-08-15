@@ -12,6 +12,7 @@ import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.utils.ContextUtils.appVersion
 import dev.brahmkshatriya.echo.utils.ContextUtils.getTempFile
 import dev.brahmkshatriya.echo.utils.Serializer.toData
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -19,14 +20,66 @@ import kotlinx.serialization.Serializable
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.io.IOException
 import java.util.zip.ZipFile
 
 object AppUpdater {
 
     private val client = OkHttpClient()
 
+    // Package names of stores that own updates for anything they installed. If we were installed by
+    // one of these, self-update MUST NOT run: the user updates through that store, and handing them
+    // a sideloaded APK over a store install is wrong for them and, for Play, a policy problem.
+    private val STORE_INSTALLERS = setOf(
+        "com.android.vending",              // Google Play
+        "com.google.android.feedback",      // legacy Play installer id, still present on old installs
+        "com.amazon.venezia",               // Amazon Appstore
+        "com.sec.android.app.samsungapps",  // Samsung Galaxy Store
+        "com.huawei.appmarket",             // Huawei AppGallery
+        "org.fdroid.fdroid",                // F-Droid
+    )
+
+    // True when this copy was installed by a store that manages its own updates.
+    //
+    // FAILS CLOSED: any exception returns true (= skip the self-update). "Never offer a store user
+    // an APK" is a hard requirement, and the asymmetry is stark — a false skip costs a sideloader
+    // one missed update, a false allow puts a sideloaded APK over a Play install.
+    //
+    // A NULL installer is the one case treated as "not a store", deliberately: it is the normal
+    // answer for `adb install` and for manual installs where no installing package was recorded,
+    // and it is also what remains if the installing package was itself later uninstalled. Both of
+    // those are sideloads. (A device whose Play Store has been removed would self-update — correct:
+    // there is no longer a store to update through.)
+    //
+    // API 30+ exposes both names. initiatingPackageName is verified by the system, while
+    // installingPackageName can be reassigned by the installer via setInstallerPackageName, so a
+    // match on EITHER counts. Below 30 only the legacy single value exists.
+    private fun App.isStoreInstall(): Boolean = runCatching {
+        val pm = context.packageManager
+        val names = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val info = pm.getInstallSourceInfo(context.packageName)
+            listOfNotNull(info.initiatingPackageName, info.installingPackageName)
+        } else {
+            @Suppress("DEPRECATION")
+            listOfNotNull(pm.getInstallerPackageName(context.packageName))
+        }
+        names.any { it in STORE_INSTALLERS }
+    }.getOrDefault(true)
+
     @Suppress("KotlinConstantConditions")
-    suspend fun updateApp(app: App): File? {
+    suspend fun updateApp(
+        app: App,
+        ensureInstallPermission: suspend () -> Boolean = { true }
+    ): File? {
+        // Install-source gate. This is the ONLY thing standing between a Play user and a sideloaded
+        // APK, and it must run before any network work. It sits ALONGSIDE the build-type check
+        // below, it does not replace it: they answer different questions. Build type answers "is
+        // this a channel that publishes releases at all" (debug/release have no tag scheme or
+        // assets); install source answers "did this copy come from a store". A stable build can be
+        // distributed both ways, which is exactly why the build type cannot decide this.
+        // Scoped to the APP update only — updateApp has no extension callers, so extension updates
+        // (including for Play users, which is intended) are untouched.
+        if (app.isStoreInstall()) return null
         val messageFlow = app.messageFlow
         val githubRepo = app.context.getString(R.string.app_github_repo)
         val appType = BuildConfig.BUILD_TYPE
@@ -49,8 +102,25 @@ object AppUpdater {
                 else -> return null
             }
         }.getOrElse {
+            if (it is CancellationException) throw it
+            // REPORT, then keep the existing "return null" contract for the caller. Until this line
+            // the app-update CHECK was the only network path in the app that could fail with no
+            // signal anywhere: no snackbar, no Crashlytics non-fatal, and the caller silently falls
+            // through to the extension branch. A user could sit on a months-stale build indefinitely
+            // and it was invisible to them AND to us — so an absence of app-update failures in
+            // Crashlytics was never evidence they weren't happening; this path structurally could
+            // not report one. Emitting to throwFlow also yields a snackbar, which matches what the
+            // extension path already does on the same failure (ExtensionsViewModel.getExtensionUpdate),
+            // and SnackBarHandler collapses the duplicate when both fail for one reason (e.g. offline).
+            app.throwFlow.emit(it)
             return null
         }
+
+        // Ask for the install permission HERE — after we know an update exists, before we pull the
+        // APK. Gating at the call site instead would prompt every user every 24h even when nothing
+        // is available; gating after the download would spend ~40MB on a user who then declines.
+        // The default no-op keeps this a pure addition for any caller that doesn't pass one.
+        if (!ensureInstallPermission()) return null
 
         messageFlow.emit(
             Message(
@@ -63,6 +133,13 @@ object AppUpdater {
             val download = downloadUpdate(app.context, url, client).getOrThrow()
             if (appType == "stable") download else unzipApk(download)
         }.getOrElse {
+            if (it is CancellationException) throw it
+            // Same reasoning as the check above, and this is the likelier half to fail: the APK
+            // transfer is a long-lived stream, and a reset during BODY transfer happens after
+            // newCall().await() has returned, so OkHttp's retryOnConnectionFailure cannot recover
+            // it. Note the user has already been told "downloading update" by the emit above, so
+            // staying silent here left them watching a download that never resolved.
+            app.throwFlow.emit(it)
             return null
         }
     }
@@ -148,9 +225,21 @@ object AppUpdater {
         client: OkHttpClient
     ) = runIOCatching {
         val request = Request.Builder().url(url).build()
-        val res = client.newCall(request).await().body.byteStream()
+        val response = client.newCall(request).await()
+        val expected = response.body.contentLength()
         val file = context.getTempFile()
-        res.use { input -> file.outputStream().use { output -> input.copyTo(output) } }
+        response.body.byteStream()
+            .use { input -> file.outputStream().use { output -> input.copyTo(output) } }
+        // Length check. Note OkHttp already throws on a short FIXED-LENGTH body, so this is not the
+        // primary guard and will rarely fire — its value is that when it does, the failure is a
+        // readable "incomplete download" instead of an opaque installer parse error, and the
+        // truncated file is removed rather than left for the next cleanupTempApks pass. -1 means a
+        // chunked/compressed response with no declared length: nothing to compare, accept as before.
+        val actual = file.length()
+        if (expected >= 0 && actual != expected) {
+            file.delete()
+            throw IOException("Incomplete download: got $actual of $expected bytes")
+        }
         file
     }
 
