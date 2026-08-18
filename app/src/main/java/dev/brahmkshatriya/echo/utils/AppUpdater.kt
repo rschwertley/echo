@@ -63,6 +63,13 @@ object AppUpdater {
             @Suppress("DEPRECATION")
             listOfNotNull(pm.getInstallerPackageName(context.packageName))
         }
+        // NO recorded installer at all -> UNKNOWN, and unknown resolves to "skip", same fail-closed
+        // reasoning as the catch below. This previously returned false (allow), which silently turned
+        // "the platform told us nothing" into "not a store" — the wrong default for an absolute
+        // requirement. Known cost, accepted: `adb install` records no installer, so developer builds
+        // no longer self-update. Browser and file-manager sideloads DO record one (the initiating app),
+        // so GitHub distribution is unaffected.
+        if (names.isEmpty()) return@runCatching true
         names.any { it in STORE_INSTALLERS }
     }.getOrDefault(true)
 
@@ -154,8 +161,14 @@ object AppUpdater {
         updateUrl: String,
         client: OkHttpClient
     ) = run {
+        // Every message below names the repo. This function has TWO callers — updateApp (the APP
+        // update, repo = app_github_repo) and getUpdateFileUrl (the EXTENSION update, repo = that
+        // extension's) — and their failures were previously worded identically, so a user-facing
+        // report could not be attributed to either path. The repo is a plain string, so it survives
+        // R8 obfuscation and shows up in the in-app trace view where class names do not.
+        // Diagnostics only: no control flow or exception type changes.
         val (user, repo) = githubRegex.find(updateUrl)?.destructured
-            ?: throw Exception("Invalid Github URL")
+            ?: throw Exception("Invalid Github URL: $updateUrl")
         val url = "https://api.github.com/repos/$user/$repo/releases/latest"
         val request = Request.Builder().url(url).build()
         val res = runCatching {
@@ -163,14 +176,14 @@ object AppUpdater {
                 it.body.string().toData<GithubReleaseResponse>()
             }.getOrThrow()
         }.getOrElse {
-            throw Exception("Failed to fetch latest release", it)
+            throw Exception("Failed to fetch latest release for $user/$repo", it)
         }
         if (res.tagName != currentVersion) {
             res.assets.sortedByDescending {
                 it.name.contains(Build.SUPPORTED_ABIS.first())
             }.firstOrNull {
                 it.name.endsWith("apk")
-            }?.browserDownloadUrl ?: throw Exception("No EApk assets found")
+            }?.browserDownloadUrl ?: throw Exception("No EApk assets found for $user/$repo")
         } else {
             null
         }
@@ -287,8 +300,16 @@ object AppUpdater {
         runCatching { runCatching { block() }.getOrElse { throw UpdateException(it) } }
     }
 
-    class UpdateException(override val cause: Throwable) : Exception(cause) {
+    class UpdateException(
+        override val cause: Throwable,
+        // WHAT was being updated: an extension name, or null for the app itself. runIOCatching has no
+        // identity to supply, so it leaves this null and the caller re-tags (see
+        // ExtensionsViewModel.named). Without it every update failure rendered as a bare
+        // "Error while updating", which made an extension failure indistinguishable from an app one
+        // in a user report — the ambiguity that cost a full round of investigation on 2026-08-17.
+        val name: String? = null
+    ) : Exception(cause) {
         override val message: String
-            get() = "Update failed: ${cause.message}"
+            get() = "Update failed${name?.let { " for $it" } ?: ""}: ${cause.message}"
     }
 }

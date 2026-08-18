@@ -23,6 +23,7 @@ import dev.brahmkshatriya.echo.extensions.db.models.ExtensionEntity
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException.Companion.toAppException
 import dev.brahmkshatriya.echo.ui.extensions.ExtensionInstallerBottomSheet.Companion.createLinksDialog
 import dev.brahmkshatriya.echo.ui.extensions.list.ExtensionListViewModel
+import dev.brahmkshatriya.echo.utils.AppUpdater
 import dev.brahmkshatriya.echo.utils.AppUpdater.downloadUpdate
 import dev.brahmkshatriya.echo.utils.AppUpdater.getUpdateFileUrl
 import dev.brahmkshatriya.echo.utils.AppUpdater.updateApp
@@ -83,7 +84,12 @@ class ExtensionsViewModel(
         flow.value = list
     }
 
-    private val updateTime = 1000 * 60 * 60 * 24 // Check every 24hrs
+    // 2 HOURS is the intended value. a5c0059f (2026-06-12) deliberately set it to 2h; b00018c3
+    // (2026-06-14) put it back to 24h inside a commit about cover spacing and dimens — a stray
+    // one-line revert, not a decision, and it went unnoticed for two months. Restored 2026-08-17.
+    // This constant has been clobbered by an unrelated change once already: if you change it, do it
+    // deliberately and record why here.
+    private val updateTime = 1000 * 60 * 60 * 2 // Check every 2hrs
     private fun shouldCheckForExtensionUpdates(): Boolean {
         val check = app.settings.getBoolean("check_for_updates", true)
         if (!check) return false
@@ -265,8 +271,9 @@ class ExtensionsViewModel(
             getUpdateFileUrl(currentVersion, updateUrl, client).getOrThrow()
         }.getOrElse {
             if (it is CancellationException) throw it
-            app.throwFlow.emit(it)
-            return Result.failure(it)
+            val e = it.named(extension.name)
+            app.throwFlow.emit(e)
+            return Result.failure(e)
         }
         if (url == null) {
             if (show) message(
@@ -279,10 +286,19 @@ class ExtensionsViewModel(
             downloadUpdate(app.context, url, client).getOrThrow()
         }.getOrElse {
             if (it is CancellationException) throw it
-            app.throwFlow.emit(it)
-            return Result.failure(it)
+            val e = it.named(extension.name)
+            app.throwFlow.emit(e)
+            return Result.failure(e)
         }
         return Result.success(file)
     }
+
+    // getUpdateFileUrl/downloadUpdate wrap failures as UpdateException, which carries no identity, so
+    // an extension update error rendered as a bare "Error while updating" — indistinguishable from an
+    // app-update failure in a user report. Re-tag with the extension name. The cause chain is carried
+    // over unchanged and anything that isn't an UpdateException passes straight through, so the
+    // Result contract and control flow are identical to before.
+    private fun Throwable.named(name: String): Throwable =
+        (this as? AppUpdater.UpdateException)?.let { AppUpdater.UpdateException(it.cause, name) } ?: this
 
 }

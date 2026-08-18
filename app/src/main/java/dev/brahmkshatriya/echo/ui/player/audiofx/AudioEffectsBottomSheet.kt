@@ -21,6 +21,8 @@ import dev.brahmkshatriya.echo.common.models.Message
 import dev.brahmkshatriya.echo.databinding.DialogPlayerAudioFxBinding
 import dev.brahmkshatriya.echo.databinding.FragmentAudioFxBinding
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION
+import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION_MAX
+import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION_MIN
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_ENABLED
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.SKIP_FADE_ON_ALBUMS
 import dev.brahmkshatriya.echo.playback.listener.EffectsListener.Companion.BASS_BOOST
@@ -133,7 +135,8 @@ class AudioEffectsBottomSheet : BottomSheetDialogFragment() {
 
             crossfadeSwitch.isChecked = appSettings.getBoolean(CROSSFADE_ENABLED, false)
             crossfadeDurationSlider.isEnabled = crossfadeSwitch.isChecked
-            val durationValue = appSettings.getInt(CROSSFADE_DURATION, 2).coerceIn(1, 5)
+            val durationValue = appSettings.getInt(CROSSFADE_DURATION, 2)
+                .coerceIn(CROSSFADE_DURATION_MIN, CROSSFADE_DURATION_MAX)
             crossfadeDurationSlider.value = durationValue.toFloat()
             crossfadeDurationValue.text = "${durationValue}s"
             skipFadeOnAlbums.isVisible = crossfadeSwitch.isChecked

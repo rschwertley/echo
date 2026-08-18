@@ -13,6 +13,8 @@ import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toResourceIma
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CACHE_SIZE
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CLOSE_PLAYER
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION
+import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION_MAX
+import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_DURATION_MIN
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.CROSSFADE_ENABLED
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.SKIP_FADE_ON_ALBUMS
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.SKIP_SILENCE
@@ -149,10 +151,15 @@ class SettingsPlayerFragment : BaseSettingsFragment() {
                     addPreference(this)
                 }
 
-                MaterialSliderPreference(context, 1, 5).apply {
+                MaterialSliderPreference(
+                    context, CROSSFADE_DURATION_MIN, CROSSFADE_DURATION_MAX
+                ).apply {
                     key = CROSSFADE_DURATION
                     title = getString(R.string.crossfade_duration)
-                    summary = getString(R.string.crossfade_duration_summary)
+                    summary = getString(
+                        R.string.crossfade_duration_summary,
+                        CROSSFADE_DURATION_MIN, CROSSFADE_DURATION_MAX
+                    )
                     isIconSpaceReserved = false
                     setDefaultValue(2)
                     addPreference(this)

@@ -92,7 +92,11 @@ object ExceptionUtils {
         }
 
         is InvalidExtensionListException -> getString(R.string.invalid_extension_list)
-        is AppUpdater.UpdateException -> getString(R.string.error_updating_extension)
+        // Named = an extension update; unnamed = the app's own. Falling back to the old generic
+        // string keeps every un-tagged call site (AddViewModel, the app path) rendering as before.
+        is AppUpdater.UpdateException -> throwable.name
+            ?.let { getString(R.string.error_updating_x, it) }
+            ?: getString(R.string.error_updating_extension)
 
         is PlayerException -> "${throwable.mediaItem?.track?.title}: ${getFinalTitle(throwable.cause)}"
 

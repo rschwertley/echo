@@ -329,7 +329,19 @@ abstract class AndroidAutoCallback(
         params: MediaLibraryService.LibraryParams?
     ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> = scope.futureCatching {
         val extensions = if (parentId == ROOT) {
-            withTimeoutOrNull(10_000L) { extensionList.first { it.isNotEmpty() } }
+            // Raised from 10s, and no longer a hard cliff. Until the CombinedRepository sentinel fix
+            // this predicate was satisfied within milliseconds by the built-ins, so the timeout never
+            // realistically fired; it now genuinely waits for the ImportType.App package scan.
+            // NOTE: degrading to a "built-ins only" list is NOT available here — during the scan
+            // `music` is empty (ExtensionLoader.injected maps the null sentinel to emptyList), and the
+            // built-ins live privately inside CombinedRepository rather than being published
+            // separately. So the only safe degradations are to wait longer and to re-read the value
+            // once on expiry (which catches the narrow race where it lands as the timeout fires).
+            // The scan is one-time, bounded and off the main thread; the headroom exists for budget
+            // eMMC hardware. Expiring still yields the explicit "timed out" tile rather than an empty
+            // root, because an empty root reads to the user as "this app has nothing in it".
+            withTimeoutOrNull(30_000L) { extensionList.first { it.isNotEmpty() } }
+                ?: extensionList.value.takeIf { it.isNotEmpty() }
                 ?: return@futureCatching LibraryResult.ofError(
                     SessionError(SessionError.ERROR_IO, context.getString(R.string.auto_timed_out))
                 )

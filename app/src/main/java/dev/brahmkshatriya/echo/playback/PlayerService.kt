@@ -182,7 +182,12 @@ class PlayerService : MediaLibraryService() {
                 }
             }
             crossfadeEnabled = app.settings.getBoolean(CROSSFADE_ENABLED, false)
-            crossfadeDurationMs = app.settings.getInt(CROSSFADE_DURATION, 2) * 1000
+            // Clamp on READ. The sliders only clamp what they DISPLAY — neither persists the
+            // corrected value (the programmatic `value =` assignment happens before the change
+            // listener is attached), so anyone who stored 6-12 while that was the allowed range
+            // still has it, and without this they get a 12-second fade while both UIs show 5.
+            crossfadeDurationMs = app.settings.getInt(CROSSFADE_DURATION, 2)
+                .coerceIn(CROSSFADE_DURATION_MIN, CROSSFADE_DURATION_MAX) * 1000
             normalizationEnabled = app.settings.getBoolean(LOUDNESS_NORMALIZATION, false)
         }
     }
@@ -200,7 +205,8 @@ class PlayerService : MediaLibraryService() {
                 effects.updateCrossfadeSettings()
             }
             CROSSFADE_DURATION -> {
-                audioEffectsProcessor.crossfadeDurationMs = prefs.getInt(key, 2) * 1000
+                audioEffectsProcessor.crossfadeDurationMs = prefs.getInt(key, 2)
+                    .coerceIn(CROSSFADE_DURATION_MIN, CROSSFADE_DURATION_MAX) * 1000
                 effects.updateCrossfadeSettings()
             }
         }
@@ -606,6 +612,16 @@ class PlayerService : MediaLibraryService() {
         const val LOUDNESS_NORMALIZATION = "loudness_normalization"
         const val CROSSFADE_ENABLED = "crossfade_enabled"
         const val CROSSFADE_DURATION = "crossfade_duration"
+
+        // Single source of truth for the fade range. It was previously written out separately in the
+        // settings slider, the audio-fx sheet's coerceIn, the audio-fx layout XML and the summary
+        // string; when the range was retuned from 1-12 to 1-5 (530681cf, 2026-08-02) the string was
+        // missed, so the label advertised a range the widgets had stopped allowing. The summary is
+        // now formatted from these, so it cannot drift again. The layout XML still hardcodes 1..5 —
+        // resource attributes can't reference these, so that one file remains a manual match.
+        const val CROSSFADE_DURATION_MIN = 1
+        const val CROSSFADE_DURATION_MAX = 5
+
         const val SKIP_FADE_ON_ALBUMS = "skip_fade_on_albums"
 
         const val CACHE_SIZE = "cache_size"
