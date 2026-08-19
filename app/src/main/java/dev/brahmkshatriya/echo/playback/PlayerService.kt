@@ -576,7 +576,15 @@ class PlayerService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(handleAudioBecomingNoisy)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setAudioAttributes(musicAudioAttributes, false)
-            .setReleaseTimeoutMs(150)
+            // 500 ms = Media3's own default, restored deliberately. The 150 ms here came from 464d4d3f
+            // (2026-06-06), the same commit that made onDestroy call mediaSession.release() then
+            // player.release() — the latter is SYNCHRONOUS ON THE MAIN THREAD, and the tight budget was
+            // an ANR guard. That intent is preserved: 500 ms is still two orders of magnitude below any
+            // service-destroy ANR threshold, so the guard costs at most 350 ms more in the worst case.
+            // 150 ms was demonstrably too tight — it fired on a Pixel 10 / Android 17 (build 1036),
+            // where the budget bounds renderer/codec teardown, not media-source teardown, so it does NOT
+            // scale with queue size. Do not re-tighten without a concrete ANR attributable to this line.
+            .setReleaseTimeoutMs(500)
             .build()
             .also {
                 it.trackSelectionParameters = it.trackSelectionParameters

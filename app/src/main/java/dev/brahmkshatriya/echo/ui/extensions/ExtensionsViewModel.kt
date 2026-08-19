@@ -84,12 +84,12 @@ class ExtensionsViewModel(
         flow.value = list
     }
 
-    // 2 HOURS is the intended value. a5c0059f (2026-06-12) deliberately set it to 2h; b00018c3
-    // (2026-06-14) put it back to 24h inside a commit about cover spacing and dimens — a stray
-    // one-line revert, not a decision, and it went unnoticed for two months. Restored 2026-08-17.
-    // This constant has been clobbered by an unrelated change once already: if you change it, do it
-    // deliberately and record why here.
-    private val updateTime = 1000 * 60 * 60 * 2 // Check every 2hrs
+    // 24 HOURS IS INTENTIONAL — it matches Google Play's own daily auto-update check cadence.
+    // b00018c3 (2026-06-14) setting this back to 24h was a DELIBERATE decision, not a stray revert.
+    // ⚠️ The 2026-06-13 session note describing 24h as "unintentional scope creep" is WRONG. Do not
+    // "restore" 2h on the strength of that note. If this value ever changes, it should be for a
+    // reason recorded right here.
+    private val updateTime = 1000 * 60 * 60 * 24 // Check every 24hrs
     private fun shouldCheckForExtensionUpdates(): Boolean {
         val check = app.settings.getBoolean("check_for_updates", true)
         if (!check) return false
@@ -107,7 +107,14 @@ class ExtensionsViewModel(
         if (!force && !shouldCheckForExtensionUpdates()) return@launch
         app.context.saveToCache("last_update_check", System.currentTimeMillis())
         activity.cleanupTempApks()
-        message(app.context.getString(R.string.checking_for_extension_updates))
+        // Automatic (force = false) is an UNPROMPTED background check and must stay silent unless
+        // something actually happens — Play doesn't announce that it looked, and F-Droid removed even
+        // its index-progress notification. `force` is the correct discriminator: it is false only at
+        // configureExtensionsUpdater's startup call, and true at all three user-initiated entry
+        // points (ManageExtensionsFragment, SettingsBottomSheet, SettingsOtherFragment). Progress
+        // messages further down ("downloading update for X") are deliberately NOT gated — those fire
+        // only when work is genuinely under way, which is worth telling the user about either way.
+        if (force) message(app.context.getString(R.string.checking_for_extension_updates))
         // The install-permission prompt is threaded in as a lambda rather than checked here, so it
         // only ever fires once an update actually exists (updateApp calls it after resolving the
         // URL, before downloading). Declining returns null, which falls through to the extension
@@ -130,12 +137,16 @@ class ExtensionsViewModel(
                         ExtUpdate.UpToDate -> Unit
                     }
                 }
-                // Only claim "up to date" when we actually found out. A failed check or download
-                // used to land here too, so a transient GitHub error reassured the user that
-                // everything was current. On failure we stay silent rather than adding a second
-                // message — the failure already produced its own snackbar via throwFlow.
+                // Only claim "up to date" when we actually found out AND the user asked. Two
+                // separate gates:
+                //  - anyFailed: a failed check or download used to land here too, so a transient
+                //    GitHub error reassured the user that everything was current. On failure we stay
+                //    silent rather than adding a second message — the failure already produced its
+                //    own snackbar via throwFlow.
+                //  - force: an unprompted background check that finds nothing says NOTHING. A manual
+                //    check still confirms the result, because the user asked and deserves an answer.
                 if (anyFailed) app.context.saveToCache("last_update_check", 0L)
-                else if (!anyUpdateFound)
+                else if (!anyUpdateFound && force)
                     message(app.context.getString(R.string.all_extensions_up_to_date))
             }
         }.getOrElse { if (it is CancellationException) throw it; app.throwFlow.emit(it) }

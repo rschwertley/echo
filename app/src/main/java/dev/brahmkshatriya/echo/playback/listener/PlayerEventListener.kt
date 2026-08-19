@@ -12,6 +12,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.ExoTimeoutException
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.LikeClient
@@ -901,6 +902,21 @@ class PlayerEventListener(
             }
             return
         }
+
+        // Media3's own RELEASE diagnostic, not a playback failure. ExoPlayerImpl.release() emits this
+        // through EVENT_PLAYER_ERROR when a renderer misses the releaseTimeoutMs budget, then finishes
+        // teardown unconditionally and sets playerReleased = true — so the player IS released, there is
+        // no playback left to recover, and the report names nothing we can act on. It reached the
+        // generic tail below and was recorded as a PlayerException (build 1036, Pixel 10).
+        // Scoped to TIMEOUT_OPERATION_RELEASE ONLY: Media3 raises two other operations
+        // (SET_FOREGROUND_MODE, DETACH_SURFACE) on a LIVE player, and those are genuine faults that
+        // must keep reporting. Returning here also skips the retry bookkeeping below, which is correct
+        // — nothing should be retried on a player that is being torn down.
+        val releaseTimeout = generateSequence(cause) { it.cause }
+            .filterIsInstance<ExoTimeoutException>()
+            .firstOrNull()
+            ?.timeoutOperation == ExoTimeoutException.TIMEOUT_OPERATION_RELEASE
+        if (releaseTimeout) return
 
         scope.launch { throwableFlow.emit(PlayerException(mediaItem, cause)) }
 

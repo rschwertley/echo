@@ -65,6 +65,10 @@ class MainApplication : Application(), KoinStartup, SingletonImageLoader.Factory
         // First thing on process birth: record the monotonic start time for the process_age_s crash key.
         // No DI / settings / Firebase touched here, so it's safe even on a pre-unlock Direct-Boot spawn.
         CrashKeys.markProcessStart()
+        // Static for the process and needed on EVERY report, so record it here rather than recomputing.
+        // Its absence cost a full triage round: a Pixel 10 report could not be tied to a Play install
+        // without it, and a wrong theory about how the binary was installed took a round to disprove.
+        CrashKeys.recordInstallSource(this)
         CoroutineUtils.setDebug()
         // Firebase's directBootAware providers can spawn this process PRE-UNLOCK, where the (non-
         // directBootAware) androidx.startup InitializationProvider is skipped — so Koin isn't started AND

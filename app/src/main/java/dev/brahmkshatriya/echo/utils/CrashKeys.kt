@@ -1,5 +1,7 @@
 package dev.brahmkshatriya.echo.utils
 
+import android.content.Context
+import android.os.Build
 import android.os.SystemClock
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import dev.brahmkshatriya.echo.BuildConfig
@@ -80,6 +82,41 @@ object CrashKeys {
         processStartElapsedMs = SystemClock.elapsedRealtime()
     }
 
+    /**
+     * Install source, recorded ONCE at process birth. It cannot change during a process, so this is
+     * set-and-forget rather than a per-report computation.
+     *
+     * Records PACKAGE NAMES, not a boolean: "com.android.vending" vs a browser package vs "none" is what
+     * makes a report triageable, where true/false could not tell a Play install from a sideload.
+     *
+     * BOTH names are recorded because AppUpdater.isStoreInstall() matches on EITHER, so storing one would
+     * leave the gate's own input half-visible. initiatingPackageName is system-verified and is the primary
+     * triage value; installingPackageName is reassignable by the installer via setInstallerPackageName, but
+     * is the only value available below API 30.
+     *
+     * Cost: one PackageManager binder call, same class as the getPackageInfo calls made elsewhere. Runs on
+     * the main thread at onCreate so it is attached to crashes from startup onward; doing it off-thread
+     * would race the very reports it exists to label.
+     *
+     * Direct Boot caveat: on a pre-unlock spawn Crashlytics may not be ready, in which case the guarded
+     * writes are swallowed and the key is simply absent for that (rare) process.
+     */
+    fun recordInstallSource(context: Context) {
+        runCatching {
+            val pm = context.packageManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val info = pm.getInstallSourceInfo(context.packageName)
+                set("install_source", info.initiatingPackageName ?: "none")
+                set("install_source_installer", info.installingPackageName ?: "none")
+            } else {
+                @Suppress("DEPRECATION")
+                val installer = pm.getInstallerPackageName(context.packageName)
+                set("install_source", "api<30")
+                set("install_source_installer", installer ?: "none")
+            }
+        }
+    }
+
     private fun ageS(): Int {
         val start = processStartElapsedMs
         return if (start == 0L) -1 else ((SystemClock.elapsedRealtime() - start) / 1000L).toInt()
@@ -119,6 +156,32 @@ object CrashKeys {
         stampAge("age_s_svc")
         set("service_create_count", serviceCreates.incrementAndGet())
         sampleHeap("heap_used_mb_svc", "heap_headroom_mb_svc")
+    }
+
+    // Sampled immediately AFTER AndroidAutoCallback.clearCaches(). heap_used_mb_conn is taken in
+    // onConnect, which Media3 invokes BEFORE onGetLibraryRoot — so conn measures the retained graph the
+    // last session left, and this measures what survives the clear. The difference is the browse caches.
+    fun onAutoCachesCleared() {
+        stampAge("age_s_auto_clear")
+        sampleHeap("heap_used_mb_auto_clear", "heap_headroom_mb_auto_clear")
+    }
+
+    /**
+     * The app-update install-source gate LET US PROCEED. Deliberately means exactly that — not "we
+     * checked", and not "we made a network call" — so it is set immediately after
+     * AppUpdater.isStoreInstall() returns false, before the build-type branch.
+     *
+     * This is the verification half of an absolute requirement: Play users must never be offered an
+     * app update. Enforcement alone was only half-observable — a FAILED app update reported itself
+     * (and, since the repo now appears in getGithubUpdateUrl's messages, was attributable to the app
+     * path), but a SUCCESSFUL bypass produced nothing at all. With this key, any report carrying
+     * install_source = com.android.vending AND app_update_attempted = true is a visible violation.
+     *
+     * Sticky for the process by design: once the gate passes it rides on every later report.
+     */
+    fun onAppUpdateGatePassed() {
+        stampAge("age_s_app_update_gate")
+        set("app_update_attempted", true)
     }
 
     fun onQueueBuild(itemCount: Int) {

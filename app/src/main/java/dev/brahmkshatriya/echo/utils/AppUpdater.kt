@@ -87,6 +87,13 @@ object AppUpdater {
         // Scoped to the APP update only — updateApp has no extension callers, so extension updates
         // (including for Play users, which is intended) are untouched.
         if (app.isStoreInstall()) return null
+        // Gate PASSED — record it. Placed here, after the isStoreInstall() return and before the
+        // build-type branch below, so the key means "the gate let us proceed" rather than "we checked".
+        // That is the reading that makes the requirement verifiable: install_source = com.android.vending
+        // together with app_update_attempted = true is a violation, and nothing else can set this key
+        // (updateApp has no extension callers). It can be true while no network call follows — a debug
+        // or plain release build returns null at the `else` branch — which is correct for this question.
+        CrashKeys.onAppUpdateGatePassed()
         val messageFlow = app.messageFlow
         val githubRepo = app.context.getString(R.string.app_github_repo)
         val appType = BuildConfig.BUILD_TYPE

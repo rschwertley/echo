@@ -53,6 +53,7 @@ import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.extensions.builtin.offline.OfflineExtension
 import dev.brahmkshatriya.echo.extensions.builtin.unified.UnifiedExtension
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException.Companion.toAppException
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
 import dev.brahmkshatriya.echo.utils.CacheUtils.saveToCache
 import dev.brahmkshatriya.echo.utils.CoroutineUtils.await
@@ -239,6 +240,13 @@ abstract class AndroidAutoCallback(
             cacheMutex.withLock {
                 clearCaches()
                 searchResults.clear()
+                // Pairs with heap_used_mb_conn, which is sampled in PlayerCallback.onConnect — i.e.
+                // BEFORE this clear, and before onGetLibraryRoot even runs. Without a post-clear sample
+                // every conn number in the OOM investigation measures the graph the PREVIOUS session
+                // left behind, not what the connect allocates. conn → root drop implicates these caches;
+                // no drop moves suspicion to root-build allocation (which force-instantiates every
+                // enabled extension via isClient<…>). One sampleHeap, same style as the six existing.
+                CrashKeys.onAutoCachesCleared()
             }
             extensionList.collect { extensions ->
                 Log.d("GladixAuto", "extensionWatcher: collected ${extensions.size} extensions: ${extensions.map { it.id }}")
