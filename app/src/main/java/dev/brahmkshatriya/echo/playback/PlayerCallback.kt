@@ -560,8 +560,19 @@ class PlayerCallback(
         SessionResult(RESULT_SUCCESS)
     }
 
+    // Player receiver: for a reference ALREADY resolved on the application thread. Every caller of this
+    // overload receives one as a `player: Player` parameter (getImage, resume, radio, playItem, …), so
+    // the accessor has already run safely. Kept as-is.
     private suspend fun <T> Player.with(block: suspend Player.() -> T): T =
         withContext(Dispatchers.Main) { block() }
+
+    // Session receiver: resolves session.player INSIDE the main dispatch. Use this whenever you hold
+    // only the session. The Player overload above cannot be used for that, because a receiver is
+    // evaluated at the CALL SITE — so `session.player.with { … }` from a scope.future on Dispatchers.IO
+    // reads the accessor on IO and, from Media3 1.11.0, throws IllegalStateException before the block is
+    // ever posted to Main. It looks protected and is not; that trap is why this overload exists.
+    private suspend fun <T> MediaSession.with(block: suspend Player.() -> T): T =
+        withContext(Dispatchers.Main) { player.block() }
 
     private suspend fun <T : Any> PagedData<T>.load(
         pages: Int = 5,
@@ -684,7 +695,7 @@ class PlayerCallback(
     ): ListenableFuture<SessionResult> {
         return if (rating !is ThumbRating) super.onSetRating(session, controller, rating)
         else scope.future {
-            val item = session.player.with { currentMediaItem }
+            val item = session.with { currentMediaItem }
                 ?: return@future SessionResult(SessionError.ERROR_UNKNOWN)
             val track = item.track
             runCatching {
@@ -705,7 +716,7 @@ class PlayerCallback(
                     mediaMetadata.buildUpon().setUserRating(ThumbRating(liked)).build()
                 )
             }.build()
-            session.player.with {
+            session.with {
                 // Current index so the like replaces the CURRENT track. replaceMediaItem keys the
                 // original-list update off this index too.
                 val fullIndex = currentMediaItemIndex

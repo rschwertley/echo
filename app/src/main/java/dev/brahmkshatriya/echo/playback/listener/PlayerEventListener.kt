@@ -89,7 +89,18 @@ class PlayerEventListener(
     private val healthMonitor: HealthMonitor? = null,
 ) : Player.Listener {
 
-    private val player get() = session.player
+    // CACHED at construction, deliberately not `get() = session.player`.
+    // MediaSession.getPlayer() -> MediaSessionImpl.getPlayerWrapper() calls verifyApplicationThread()
+    // and throws IllegalStateException off the application looper (Media3 1.11.0; 1.10.1 had NO check,
+    // so off-main reads silently returned torn state — that is what the AA metadata desync fixed in
+    // 2ee949c6 looked like). Several uses below run inside scope.launch on Dispatchers.IO, so a
+    // per-use accessor was already wrong today and would become fatal on 1.11.0.
+    // This listener is constructed in PlayerService.onCreate on the MAIN thread, which is the player's
+    // application looper, so the single read happens on the app thread and every use is then a plain
+    // field access with no dispatch cost.
+    // SAFE because MediaSession.setPlayer() is never called anywhere in the app (verified by grep) —
+    // the reference cannot go stale. If that ever changes, this must become a withContext(Main) read.
+    private val player = session.player
 
     // True only while an INTERNAL seek is in flight — a buffering-watchdog re-prepare OR an onPlayerError
     // retry (both stop→seek→prepare the current track). onPositionDiscontinuity's
@@ -179,7 +190,7 @@ class PlayerEventListener(
         pendingSaveQueue?.cancel()
         pendingSaveQueue = scope.launch {
             delay(300)
-            if ((session.player as? ShufflePlayer)?.isRearranging == true) return@launch
+            if ((player as? ShufflePlayer)?.isRearranging == true) return@launch
             ResumptionUtils.saveQueue(context, player)
         }
     }
@@ -252,7 +263,7 @@ class PlayerEventListener(
         // couldn't include) reaches the connected controller instead of being lost in the connect race.
         // updateCustomLayout no-ops when currentMediaItem is null, so an empty timeline here is safe.
         if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) updateCustomLayout()
-        if ((session.player as? ShufflePlayer)?.isRearranging != true) {
+        if ((player as? ShufflePlayer)?.isRearranging != true) {
             scheduleSaveQueue()
             if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
                 bufferingWatchdog?.cancel()

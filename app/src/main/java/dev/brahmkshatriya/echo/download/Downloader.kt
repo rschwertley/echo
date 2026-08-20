@@ -27,6 +27,8 @@ import dev.brahmkshatriya.echo.extensions.builtin.unified.UnifiedExtension.Compa
 import dev.brahmkshatriya.echo.extensions.builtin.unified.UnifiedExtension.Companion.withExtensionId
 import dev.brahmkshatriya.echo.utils.Serializer.toData
 import dev.brahmkshatriya.echo.utils.Serializer.toJson
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,7 +56,26 @@ class Downloader(
         .find { it.isClient<DownloadClient>() && it.isEnabled }
         ?: throw DownloaderExtensionNotFoundException()
 
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("Downloader"))
+    // Safety net for UNCAUGHT exceptions on this scope — the pattern App.scope, ExtensionLoader.scope and
+    // PlayerService.scope all carry. This scope is the highest-exposure of the set: long-lived, on IO, and
+    // it runs THIRD-PARTY extension code (DownloadClient) whose failures we do not control. Without a
+    // handler an uncaught throw reaches the default uncaught handler and CRASHES — SupervisorJob only
+    // prevents siblings being cancelled, it does not absorb the exception.
+    // Routes to app.throwFlow so it degrades to the same non-fatal path as every other reported error.
+    // CancellationException is never delivered to a CoroutineExceptionHandler (normal cancellation) — the
+    // guard is defensive. runCatching so a failure to record can never re-crash or loop.
+    // The `: CoroutineExceptionHandler` annotation is LOAD-BEARING, not style. Without it the property's
+    // type must be inferred from the initializer, whose lambda body references `scope`, whose type is
+    // inferred from an expression containing this handler — a cycle the compiler reports as "Type checking
+    // has run into a recursive problem". Declaring the type lets it resolve `scope` without analysing this
+    // body first. App.exceptionHandler and ExtensionLoader.exceptionHandler carry it for the same reason.
+    private val exceptionHandler: CoroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        if (throwable is CancellationException) return@CoroutineExceptionHandler
+        runCatching { scope.launch { app.throwFlow.emit(throwable) } }
+    }
+    val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineName("Downloader") + exceptionHandler
+    )
 
     val dao = database.downloadDao()
     val downloadFlow = dao.getDownloadsFlow()

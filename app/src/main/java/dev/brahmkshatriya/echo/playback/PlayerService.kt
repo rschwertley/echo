@@ -76,6 +76,8 @@ import kotlinx.coroutines.async
 import dev.brahmkshatriya.echo.utils.ContextUtils.listenFuture
 import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.utils.HealthMonitor
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -169,7 +171,28 @@ class PlayerService : MediaLibraryService() {
     private val healthMonitor by inject<HealthMonitor>()
     private val state by inject<PlayerState>()
     private val fullQueueFlow by inject<MutableStateFlow<List<MediaItem>>>()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("PlayerService"))
+    // Safety net for UNCAUGHT exceptions on this scope — the same pattern App.scope and
+    // ExtensionLoader.scope already carry, missing here until now. This is the reason an
+    // off-application-thread session.player read was FATAL rather than a reported non-fatal: an uncaught
+    // throw in a scope.launch child reaches the default uncaught handler and crashes the process, because
+    // SupervisorJob only stops siblings being cancelled — it does not absorb the exception.
+    // Routes to app.throwFlow so it degrades to the same non-fatal path as every other reported error
+    // (printStackTrace + Crashlytics recordException, plus the snackbar collector).
+    // CancellationException is never delivered to a CoroutineExceptionHandler (normal cancellation) — the
+    // guard is defensive so it can never be reported. runCatching so a failure to record cannot re-crash
+    // or loop; SupervisorJob keeps the scope alive after a child fails, so the launch is safe.
+    // The `: CoroutineExceptionHandler` annotation is LOAD-BEARING, not style. Without it the property's
+    // type must be inferred from the initializer, whose lambda body references `scope`, whose type is
+    // inferred from an expression containing this handler — a cycle the compiler reports as "Type checking
+    // has run into a recursive problem". Declaring the type lets it resolve `scope` without analysing this
+    // body first. App.exceptionHandler and ExtensionLoader.exceptionHandler carry it for the same reason.
+    private val exceptionHandler: CoroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        if (throwable is CancellationException) return@CoroutineExceptionHandler
+        runCatching { scope.launch { app.throwFlow.emit(throwable) } }
+    }
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineName("PlayerService") + exceptionHandler
+    )
 
     private val audioEffectsProcessor by lazy {
         AudioEffectsProcessor().apply {

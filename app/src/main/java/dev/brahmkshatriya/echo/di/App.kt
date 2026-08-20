@@ -42,6 +42,11 @@ data class App(
     // guard is defensive so it can never be reported. We bridge the non-suspend handler to the suspending emit via
     // scope.launch (safe: SupervisorJob keeps `scope` alive after a child fails), wrapped in runCatching so a
     // failure to record can never re-crash or loop. We only emit — the existing collectors do the handling.
+    // The `: CoroutineExceptionHandler` annotation is LOAD-BEARING, not style. Without it the property's
+    // type must be inferred from the initializer, whose lambda body references `scope`, whose type is
+    // inferred from an expression containing this handler — a cycle the compiler reports as "Type checking
+    // has run into a recursive problem", pointing at the SCOPE line rather than the annotation that was
+    // removed. All four handlers (App, ExtensionLoader, PlayerService, Downloader) carry this note.
     private val exceptionHandler: CoroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
         if (throwable is CancellationException) return@CoroutineExceptionHandler
         runCatching { scope.launch { throwFlow.emit(throwable) } }

@@ -68,6 +68,11 @@ class ExtensionLoader(
     // degrade to the standard non-fatal instead of crashing. CancellationException never reaches the handler
     // (guarded anyway); scope.launch bridges to the suspend emit (SupervisorJob keeps the scope alive after a
     // child fails); runCatching keeps a recording failure from re-crashing. See App.exceptionHandler.
+    // The `: CoroutineExceptionHandler` annotation is LOAD-BEARING, not style. Without it the property's
+    // type must be inferred from the initializer, whose lambda body references `scope`, whose type is
+    // inferred from an expression containing this handler — a cycle the compiler reports as "Type checking
+    // has run into a recursive problem", pointing at the SCOPE line rather than the annotation that was
+    // removed. All four handlers (App, ExtensionLoader, PlayerService, Downloader) carry this note.
     private val exceptionHandler: CoroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
         if (throwable is CancellationException) return@CoroutineExceptionHandler
         runCatching { scope.launch { app.throwFlow.emit(throwable) } }

@@ -138,11 +138,17 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
                 )
             )
             var resolved: Streamable? = null
+            // Last attempt's cause, CHAINED into the throw below. Control flow is unchanged — the loop still
+            // swallows per-attempt failures and still retries — this only stops the reason being discarded.
+            // Without it every failure mode collapses to one string: the 2026-08-19 breaker trip showed three
+            // distinct track ids all reporting "Track not available after retries" with no transport error,
+            // and token/session staleness, an account-level limit and a server outage were indistinguishable.
+            var lastError: Throwable? = null
             for (attempt in 0..1) {
                 if (attempt > 0) delay(2000L)
-                // Deliberate best-effort retry: the per-attempt cause is logged above; the loop retries and
-                // ends in the "not available after retries" throw. Rethrowing/chaining would change that
-                // retry control flow. Suppressing Detekt SwallowedException here.
+                // Best-effort retry: the loop continues past a failed attempt and ends in the throw below.
+                // The caught exception IS used now (captured as lastError and chained), but the annotation
+                // stays because the catch still does not rethrow on the non-final attempt.
                 @Suppress("SwallowedException")
                 try {
                     resolved = createStreamableForQuality(newTrack, quality)
@@ -150,12 +156,13 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // Retry on next attempt; log the real per-attempt cause so it isn't lost behind the
-                    // generic "not available after retries" throw below (token/stream-resolution path).
+                    lastError = e
+                    // Kept alongside the chaining, not made redundant by it: only the LAST attempt's cause is
+                    // chained, so attempt 0's reason exists nowhere else. The two are complementary.
                     println("GladixDeezer loadStreamableMedia attempt $attempt failed id=$trackId q=$quality: ${e.message}")
                 }
             }
-            resolved ?: throw Exception("Track not available after retries: $trackId")
+            resolved ?: throw Exception("Track not available after retries: $trackId", lastError)
         } else {
             streamable
         }
