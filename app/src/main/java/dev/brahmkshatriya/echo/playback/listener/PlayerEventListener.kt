@@ -50,6 +50,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.FileNotFoundException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -527,6 +529,17 @@ class PlayerEventListener(
     private var retriedSocketMediaId: String? = null
     private var retriedNetworkMediaId: String? = null
 
+    // Chain-walk, NOT rootCause. `rootCause` (Serializer.kt:35) is the DEEPEST node, and Android's real
+    // network chains bottom out in PLATFORM types: UnknownHostException -> android.system.GaiException,
+    // and ConnectException -> android.system.ErrnoException. So `rootCause is UnknownHostException` and
+    // `rootCause is SocketException` were BOTH always false, and the DNS-hold and socket-retry branches
+    // in onPlayerError have never fired since they were written. Build 1037 proved it: the recorded skip
+    // causes read "GaiException android_getaddrinfo failed: EAI_NODATA" and "ErrnoException isConnected
+    // failed: ECONNREFUSED" — exactly the nodes rootCause resolves to.
+    // ⚠️ PATTERN: never type-check a wrapped exception against a non-chain-walking accessor.
+    private fun Throwable.anyCause(predicate: (Throwable) -> Boolean): Boolean =
+        generateSequence(this) { it.cause }.any(predicate)
+
     // The ONLY way to advance the breaker: increments the counter and records this skip's cause together,
     // so they cannot drift. Called at every skip site; never at the exempt (5xx / removed-extension) sites,
     // which do not skip. cause == null for the buffering watchdog (a stuck resolve, no error object).
@@ -718,7 +731,19 @@ class PlayerEventListener(
             return
         }
 
-        val isTransientServerError = rootCause is SocketException
+        // Computed HERE, above the socket branch, because ConnectException IS a SocketException: without
+        // this precedence ECONNREFUSED would take the retry-then-SKIP path below and advance the breaker,
+        // which is exactly the build-1037 outcome we are removing. A network-level failure is never a
+        // per-track fault, so it must reach the hold branch instead. Consumed again at the hold branch.
+        val isNetworkDown = error.anyCause {
+            it is UnknownHostException || it is UnresolvedAddressException ||
+                it is ConnectException || it is NoRouteToHostException
+        }
+
+        // A mid-stream SocketException (connection reset) stays here deliberately: it IS a per-track
+        // transient, so retry-once-then-skip remains right. Only the connection-level subtypes above
+        // are diverted.
+        val isTransientServerError = !isNetworkDown && error.anyCause { it is SocketException }
         if (isTransientServerError) {
             val currentMediaId = mediaItem?.mediaId
             if (retriedSocketMediaId == null || retriedSocketMediaId != currentMediaId) {
@@ -772,7 +797,7 @@ class PlayerEventListener(
         // holds again (one attempt per tap); it resets in the STATE_READY block on recovery and
         // auto-invalidates when the mediaId changes. Scoped to these two exceptions only, so
         // genuinely-unavailable tracks still skip via the branches above/below.
-        val isNetworkDown = rootCause is UnknownHostException || rootCause is UnresolvedAddressException
+        // isNetworkDown is computed above the socket branch (see there for why the ordering matters).
         if (isNetworkDown) {
             val currentMediaId = mediaItem?.mediaId
             if (retriedNetworkMediaId == null || retriedNetworkMediaId != currentMediaId) {

@@ -1,6 +1,8 @@
 package dev.brahmkshatriya.echo.ui.common
 
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.UnknownHostException
 import java.nio.channels.UnresolvedAddressException
 
@@ -37,7 +39,14 @@ enum class ErrorCategory { Network, LoginOrAuth, Generic }
 
 tailrec fun classify(throwable: Throwable?): ErrorCategory = when (throwable) {
     null -> ErrorCategory.Generic
-    is UnknownHostException, is UnresolvedAddressException -> ErrorCategory.Network
+    // ConnectException / NoRouteToHostException added 2026-08-19: build 1037 showed ECONNREFUSED
+    // (ConnectException -> ErrnoException) classifying as Generic, so roughly half of real network
+    // failures produced a generic AA tile and a generic snackbar. Deliberately NOT all SocketException:
+    // a mid-stream connection reset is a per-track transient, not "no internet", and must stay Generic
+    // so PlayerEventListener's retry-then-skip branch keeps its meaning. getTitle carries the same two
+    // additions — these must move together (see ErrorCategoryTest).
+    is UnknownHostException, is UnresolvedAddressException,
+    is ConnectException, is NoRouteToHostException -> ErrorCategory.Network
     is AppException.LoginRequired -> ErrorCategory.LoginOrAuth // Unauthorized is a LoginRequired subclass
     else -> classify(throwable.cause)
 }

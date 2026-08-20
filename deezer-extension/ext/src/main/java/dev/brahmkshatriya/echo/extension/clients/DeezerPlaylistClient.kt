@@ -22,6 +22,11 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
     // the feed pipeline treats it as "no section" and renders nothing. An empty but non-null
     // Feed is interpreted as "a section that loaded empty" and engages the empty-state
     // placeholder (EmptyAdapter), which shows a spinner/illustration we don't want here.
+    // `playlist` is unused BY DESIGN — the answer is null regardless of which playlist is asked about.
+    // Kept rather than removed: this is the sole delegate for DeezerExtension.loadFeed(playlist), which
+    // overrides PlaylistClient.loadFeed(playlist) in :common, and it mirrors the sibling
+    // DeezerArtistClient.getShelves(artist) which DOES use its argument. Dropping it would desync both.
+    @Suppress("UNUSED_PARAMETER")
     fun getShelves(playlist: Playlist): Feed<Shelf>? = null
 
     suspend fun loadPlaylist(playlist: Playlist): Playlist {
@@ -58,7 +63,7 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
         // FALLBACK exists, take the DISPLAY fields (artists/album/cover) from it while keeping the top-level
         // SNG_ID as the track id for STREAMING (top-level is the confirmed-playable one). No FALLBACK →
         // top-level is already correct, use as-is. (Verified on Piper/Baby Beluga/Dora; fb=no unchanged.)
-        val baseTracks = dataArray.mapNotNull { it as? JsonObject }.map { entry ->
+        val baseTracks = dataArray.filterIsInstance<JsonObject>().map { entry ->
             parser.run {
                 val d = entry.unwrap()
                 val top = d.toTrack()

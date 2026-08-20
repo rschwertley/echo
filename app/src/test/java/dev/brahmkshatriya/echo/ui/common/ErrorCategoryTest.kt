@@ -7,6 +7,8 @@ import dev.brahmkshatriya.echo.extensions.exceptions.AppException
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketException
 import java.net.UnknownHostException
 
 /**
@@ -39,6 +41,22 @@ class ErrorCategoryTest {
     @Test
     fun `bare UnknownHost is Network`() {
         assertEquals(ErrorCategory.Network, classify(UnknownHostException("www.deezer.com")))
+    }
+
+    // getTitle: ConnectException joins the no_internet line (added 2026-08-19). The REAL Android shape
+    // bottoms out in android.system.ErrnoException, which a rootCause check would see instead — the
+    // build-1037 defect. Modelled here with a plain cause since ErrnoException needs an Android runtime.
+    @Test
+    fun `wrapped ConnectException is Network`() {
+        val chain = IOException(ConnectException("failed to connect to /1.2.3.4:443"))
+        assertEquals(ErrorCategory.Network, classify(chain))
+    }
+
+    // Deliberate NON-match: a mid-stream SocketException is a per-track transient, not "no internet".
+    // It must stay Generic so PlayerEventListener's retry-then-skip branch keeps its meaning.
+    @Test
+    fun `plain SocketException stays Generic`() {
+        assertEquals(ErrorCategory.Generic, classify(SocketException("Connection reset")))
     }
 
     // getTitle lines 57/61: `is AppException -> is AppException.LoginRequired -> x_login_required`.

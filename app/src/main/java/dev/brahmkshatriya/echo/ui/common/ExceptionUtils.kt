@@ -37,6 +37,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.koin.androidx.viewmodel.ext.android.viewModel
+import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.UnknownHostException
 import java.nio.channels.UnresolvedAddressException
 
@@ -56,7 +58,10 @@ object ExceptionUtils {
         is LinkageError, is ReflectiveOperationException ->
             getString(R.string.extension_incompatible_version)
 
-        is UnknownHostException, is UnresolvedAddressException -> getString(R.string.no_internet)
+        // Kept in lockstep with ErrorCategory.classify (ErrorCategoryTest guards the drift). Connection-
+        // level failures only — a mid-stream SocketException is not "no internet".
+        is UnknownHostException, is UnresolvedAddressException,
+        is ConnectException, is NoRouteToHostException -> getString(R.string.no_internet)
 
         // Deferred class-load/instantiate failure carrying extension identity (see ExtensionParser).
         // Root-cause unwrapped so a constructor failure wrapped in InvocationTargetException shows the
