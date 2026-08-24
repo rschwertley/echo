@@ -153,8 +153,18 @@ class PlayerCallback(
                 .add(seekToFullCommand).add(syncShuffleFlagCommand)
                 .build()
         }
-        return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+        return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
             .setAvailableSessionCommands(sessionCommands)
+            // Preserves pre-1.11.0 behaviour DELIBERATELY. The old single-arg builder always seeded
+            // DEFAULT_PLAYER_COMMANDS; the two-arg one seeds them only for a trusted controller and gives
+            // an untrusted one DEFAULT_UNTRUSTED_PLAYER_COMMANDS (read-only). This is the line to delete
+            // if the tighter default is ever wanted — deleting it costs untrusted controllers all 28
+            // write commands, including play/pause, prepare, stop, seek, skip, shuffle and repeat, i.e.
+            // a head unit that can display but not control. Untrusted is a REAL population here, not
+            // theoretical: legacy browsers get their trust from the platform's
+            // MediaSessionManager.isTrustedForMediaControl (MediaSessionServiceLegacyStub:130), whose
+            // answer varies by device and by whether a notification listener is granted.
+            .setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
             // Seed the AA custom-action layout at connect (display-only). Shuffle + repeat read
             // synchronously from player state, so they show on the FIRST auto-played track instead of only
             // after track 2. No current item is needed, so this is safe before the queue is restored
