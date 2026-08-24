@@ -8,6 +8,8 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
+import android.hardware.display.DisplayManager
+import android.view.Display
 import android.view.KeyEvent
 import android.graphics.Outline
 import android.graphics.drawable.Animatable
@@ -405,15 +407,33 @@ class PlayerFragment : Fragment() {
                 val index = capturedIndex ?: return@submitList
                 val viewPager = binding?.viewPager ?: return@submitList
                 val current = viewPager.currentItem
-                // Only smooth-scroll when the view is actually on-screen (STARTED). A smooth scroll is driven by
+                // Only smooth-scroll when the display is actually on. A smooth scroll is driven by
                 // Choreographer frames, which are paused while the screen is off — so a screen-off auto-advance's
                 // smoothScrollToPosition stalls and desyncs ViewPager2's logical mCurrentItem from the rendered
                 // page (the one-behind bug). A NON-smooth setCurrentItem commits via the LayoutManager's pending
                 // scroll (scrollToPosition when laid out, mPendingCurrentItem when not), applied on the next
                 // layout pass at screen-on — no frames needed — so the correct page renders with no stale frame.
                 // On-screen advances keep the animated ±1 behavior.
-                val started = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-                val smooth = started && !isInitialLoad && abs(index - current) <= 1
+                // Gate on the DISPLAY, not on lifecycle state. The question this needs to answer is "will
+                // Choreographer deliver frames", and Lifecycle.STARTED is only a proxy for it: STARTED
+                // includes a window where the display has gone off but the Activity has not yet been
+                // stopped. A POWER-BUTTON press collapses that window (both happen together, started
+                // goes false, we take the instant path and it works). A NATURAL DISPLAY TIMEOUT does not
+                // — the display dims and stops producing frames while the Activity can still report
+                // STARTED — so the old check said "smooth" for the one case that cannot animate. That is
+                // why this bug only ever reproduced on a timeout and never on a manual screen-off.
+                // Display.STATE_ON is the direct signal: DOZE, DOZE_SUSPEND and OFF all correctly read as
+                // "no frames". DisplayManager (not Context.getDisplay, which is API 30+ and we ship 24).
+                // Do NOT "simplify" this back to a lifecycle check.
+                // Asymmetry that justifies erring conservative: smooth=false is ALWAYS correct — the
+                // non-smooth setCurrentItem commits via the LayoutManager's pending scroll and needs no
+                // frames — so a false negative costs an animation, while a false positive leaves the page
+                // stale until the user interacts. This flag is the ONLY thing changed; the writers of the
+                // page position are untouched, which is what the reverted 2026-07-30 pre-draw re-commit
+                // got wrong (it added a third writer and produced a permanent one-behind).
+                val displayOn = requireContext().getSystemService(DisplayManager::class.java)
+                    ?.getDisplay(Display.DEFAULT_DISPLAY)?.state == Display.STATE_ON
+                val smooth = displayOn && !isInitialLoad && abs(index - current) <= 1
                 isInitialLoad = false
                 if (!viewPager.isLaidOut) viewPager.setCurrentItem(index, smooth)
                 else {

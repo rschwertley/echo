@@ -58,6 +58,7 @@ import dev.brahmkshatriya.echo.extensions.ExtensionUtils.extensionPrefId
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.prefs
 import dev.brahmkshatriya.echo.history.HistoryRepository
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
+import dev.brahmkshatriya.echo.playback.ResumptionUtils
 import dev.brahmkshatriya.echo.playback.ResumptionUtils.recoverPlaylist
 import dev.brahmkshatriya.echo.playback.ResumptionUtils.recoverRepeat
 import dev.brahmkshatriya.echo.playback.ResumptionUtils.recoverShuffle
@@ -387,15 +388,28 @@ class PlayerService : MediaLibraryService() {
         // race is gone at the root. with(this@PlayerService) supplies the Context receiver the recover*
         // extensions need inside the coroutine.
         state.restoreDeferred = scope.async(Dispatchers.IO) {
+            // Reuse the previous service instance's built items when the queue on disk has not changed
+            // (see PlayerState.restoreCache for why this is a generation cache and not "once per
+            // process"). The apply below is unaffected — only the disk read and the MediaItem
+            // construction are skipped, so a recreated service still gets its queue.
+            val generation = ResumptionUtils.queueGeneration
+            state.restoreCache?.takeIf { it.first == generation }?.let {
+                Log.d("GladixPlayback", "restore read: reused cache gen=$generation")
+                return@async it.second
+            }
             with(this@PlayerService) {
                 val (items, index, pos) = recoverPlaylist(app, downloadFlow.value, healthMonitor)
                 Log.d("GladixPlayback", "restore read: items=${items.size}")
-                if (items.isEmpty()) null
+                val data = if (items.isEmpty()) null
                 else RestoreData(
                     items, index, pos,
                     recoverShuffle() ?: false,
                     recoverRepeat() ?: Player.REPEAT_MODE_OFF
                 )
+                // Key on the generation captured BEFORE the read: a write that lands mid-read bumps it,
+                // so the next instance misses this entry and re-reads rather than serving a torn build.
+                state.restoreCache = generation to data
+                data
             }
         }
         // App-open apply: the sole restorer for a controller-driven cold start. Main-atomic, gated on an
@@ -732,16 +746,26 @@ class PlayerService : MediaLibraryService() {
                 ?: first()
         }
 
+        // Takes App rather than Application so a FAILED connection has somewhere to go. It previously
+        // did `printStackTrace()` and nothing else: a controller that never connected left no trace in
+        // Crashlytics, no snackbar, and no state change — which is why a service/controller churn loop
+        // was invisible until it OOM'd the process (build 1039, 2026-08-23). Routing to app.throwFlow
+        // gives it the same non-fatal path as every other reported error.
         fun getController(
-            context: Application,
+            app: App,
             block: (MediaController) -> Unit,
         ): () -> Unit {
+            val context = app.context
             val sessionToken =
                 SessionToken(context, ComponentName(context, PlayerService::class.java))
             val playerFuture = MediaController.Builder(context, sessionToken).buildAsync()
             context.listenFuture(playerFuture) { result ->
                 val controller = result.getOrElse {
-                    return@listenFuture it.printStackTrace()
+                    it.printStackTrace()
+                    // scope.launch bridges the non-suspend callback to the suspending emit; runCatching so
+                    // a failure to record can never re-crash the caller (often a BroadcastReceiver).
+                    runCatching { app.scope.launch { app.throwFlow.emit(it) } }
+                    return@listenFuture
                 }
                 block(controller)
             }

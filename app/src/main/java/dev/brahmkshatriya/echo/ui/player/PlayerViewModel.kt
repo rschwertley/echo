@@ -100,7 +100,7 @@ class PlayerViewModel(
     }
 
     private val context = app.context
-    val controllerFutureRelease = getController(context) { player ->
+    val controllerFutureRelease = getController(app) { player ->
         browser.value = player
         player.addListener(PlayerUiListener(player, this))
         // At-rest position seed (display half of the cold-start position fix). The controller reports

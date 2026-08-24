@@ -29,7 +29,9 @@ import dev.brahmkshatriya.echo.ui.extensions.ExtensionsViewModel
 import dev.brahmkshatriya.echo.ui.extensions.WebViewUtils.onWebViewIntent
 import dev.brahmkshatriya.echo.ui.media.MediaFragment
 import dev.brahmkshatriya.echo.ui.settings.TvPairingFragment
+import dev.brahmkshatriya.echo.di.App
 import org.koin.androidx.viewmodel.ext.android.viewModel
+import org.koin.android.ext.android.get
 
 object FragmentUtils {
     inline fun <reified T : Fragment> Fragment.openFragment(
@@ -114,7 +116,7 @@ object FragmentUtils {
             if (playerSheetState.value == STATE_HIDDEN) {
                 // Existence only (decides whether to send resumeCommand) — cheap stat, not a main-thread decode.
                 if (hasSavedQueue(this@onIntent)) {
-                    PlayerService.getController(application) { controller ->
+                    PlayerService.getController(get<App>()) { controller ->
                         controller.sendCustomCommand(
                             PlayerCommands.resumeCommand,
                             Bundle.EMPTY

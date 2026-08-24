@@ -31,6 +31,28 @@ data class PlayerState(
     // and races another. A null payload means the disk was empty.
     var restoreDeferred: Deferred<RestoreData?>? = null
 
+    // Cache of the last built restore, keyed on ResumptionUtils.queueGeneration. Survives PlayerService
+    // death because this class is a Koin singleton, while the service (and its ExoPlayer) is not.
+    //
+    // WHY THIS EXISTS — it is NOT "restore once per process". Media3's MediaSessionService.onStartCommand
+    // has a stale-start-intent branch ("Terminating service that was started by a stale start intent")
+    // that STOPS an instance it has already created, and onCreate has fully run by then. So the service
+    // can be created and destroyed in a tight loop, and every creation re-ran recoverPlaylist. On build
+    // 1039 that was ~1050 creations in ~60s x 81 items = ~85,000 MediaItem builds, which took the heap
+    // from ~20MB to 255MB and OOM'd the process — the loop caused the OOM, not the reverse.
+    //
+    // The APPLY still happens on every creation: a new service means a new ExoPlayer with an empty
+    // timeline, so the queue must be re-applied or playback cannot resume. Only the disk read and the
+    // item construction are skipped. That turns the loop from fatal into merely wasteful, which is the
+    // failure mode we can observe (service_create_count + age_s_svc_first) instead of dying blind.
+    //
+    // Accepted staleness: build() bakes in download state, the show-background setting and the
+    // quality-derived serverIndex. All three are user actions that cannot meaningfully occur inside a
+    // sub-minute service-recreation storm, and any real queue write bumps the generation and evicts this.
+    // NOTHING time-sensitive or credentialed is cached — stream URLs are resolved later, at playback.
+    @Volatile
+    var restoreCache: Pair<Long, RestoreData?>? = null
+
     // Set true SYNCHRONOUSLY when onPlaybackResumption is invoked (media-button / system resume) so the
     // app-open applyRestoreIfCold defers while the framework is about to apply the same queue — a second
     // setMediaItems tears the timeline down and re-prepares. Plain var, NOT AtomicBoolean: read and

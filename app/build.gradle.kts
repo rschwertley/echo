@@ -165,24 +165,40 @@ tasks.register("verifyExtensionAbi") {
     // List<String>). The doLast action below captures ONLY these + File I/O — no layout/logger/project
     // reference at execution time — so it is compatible with the configuration cache (the bundle build).
     val mappingRoot: File = layout.buildDirectory.dir("outputs/mapping").get().asFile
-    // One anchor per kept ABI category (see proguard-rules.pro). Each is guaranteed present in the app,
-    // so a "not self-mapped" result means R8 repackaged that whole category — the exact regression that
-    // breaks extension loading. common.** anchors + the stdlib/runtime anchors.
+    // ── INVARIANT: EVERY `-keep class <pkg>.** { *; }` IN proguard-rules.pro NEEDS AN ANCHOR HERE. ──
+    // The keep rules are a SWEEP of the whole link-but-don't-bundle ABI surface; this list is what proves
+    // the sweep held. An unanchored keep rule is unverified — R8 could repackage that whole package and
+    // this task would still print "ABI intact". That is not hypothetical: okio.** and
+    // com.google.protobuf.** were kept but UNANCHORED from this task's creation (2026-08-01) until
+    // 2026-08-24, while the failure message below already claimed to cover them.
+    // Anchors are chosen to be (a) guaranteed present — the blanket keep stops R8 shrinking them, so the
+    // only way one leaves mapping.txt is repackaging, which is exactly what we are testing for; (b) stable
+    // across library versions — root interfaces/types, never anything marked experimental.
+    // ⚠️ Do NOT add anchors one-at-a-time in response to a crash. Add one when you add a keep rule.
     val critical = listOf(
-        // our ABI (dev.brahmkshatriya.echo.common.**)
+        // our ABI — dev.brahmkshatriya.echo.common.** (rule 1)
         "dev.brahmkshatriya.echo.common.clients.ExtensionClient",
         "dev.brahmkshatriya.echo.common.clients.TrackClient",
         "dev.brahmkshatriya.echo.common.clients.AlbumClient",
         "dev.brahmkshatriya.echo.common.clients.RadioClient",
         "dev.brahmkshatriya.echo.common.models.Track",
         "dev.brahmkshatriya.echo.common.models.EchoMediaItem",
-        // stdlib / runtime ABI (one anchor per kept package)
-        "kotlin.jvm.functions.Function0",       // kotlin.** — function types
+        // kotlin.** (rule 2)
+        "kotlin.jvm.functions.Function0",        // function types
         "kotlin.jvm.functions.Function1",
-        "kotlin.coroutines.Continuation",        // kotlin.** — suspend machinery
-        "kotlinx.coroutines.flow.Flow",          // kotlinx.coroutines.**
-        "kotlinx.serialization.KSerializer",     // kotlinx.serialization.**
-        "okhttp3.OkHttpClient",                  // okhttp3.**
+        "kotlin.coroutines.Continuation",        // suspend machinery
+        // kotlinx.coroutines.** / kotlinx.serialization.** (rule 3)
+        "kotlinx.coroutines.flow.Flow",
+        "kotlinx.serialization.KSerializer",
+        // okhttp3.** / okio.** / com.google.protobuf.** (rule 4)
+        "okhttp3.OkHttpClient",
+        // okio: ByteString is core to okio and referenced pervasively by okhttp — it cannot be absent
+        // while okhttp is on the classpath. Anchor added 2026-08-24 (rule 4 was previously unverified).
+        "okio.ByteString",
+        // protobuf: MessageLite is the root interface every generated message implements, unchanged
+        // across 2.x→4.x. Deliberately NOT an experimental type (v36.0 removed the experimental
+        // FieldOrder enum). Anchor added 2026-08-24 (rule 4 was previously unverified).
+        "com.google.protobuf.MessageLite",
     )
     doLast {
         val mappingFiles: List<File> = (mappingRoot.listFiles()?.toList().orEmpty())

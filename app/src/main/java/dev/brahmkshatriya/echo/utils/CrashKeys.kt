@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.SystemClock
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import dev.brahmkshatriya.echo.BuildConfig
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -50,6 +51,14 @@ import java.util.concurrent.atomic.AtomicInteger
  *    carried another exception's attribution until 2026-08-20). Test before adding a key: if this write is
  *    skipped, is the value left behind still true? Accumulator -> yes, omit freely. Snapshot -> no, ALWAYS
  *    write, with an explicit "none" where there is nothing to say.
+ *
+ * 5. LAST-WRITE CANNOT DISTINGUISH ONE LATE EVENT FROM A STORM. Every checkpoint key is last-write, so a
+ *    checkpoint that fires 1000 times reports occurrence 1000 and nothing else. Build 1039 (2026-08-23)
+ *    had service_create_count ~1050 in ~60s, and age_s_svc / age_s_conn / age_s_build / process_age_s all
+ *    read equal to the process age — not because they fired together, but because each fired LAST at the
+ *    moment of death. Every heap sample was likewise a dying-end reading. Each checkpoint now also writes
+ *    a CAS-guarded <key>_first (and <heapKey>_first), so first + existing count + last reads as a rate.
+ *    READ _first WHEN ATTRIBUTING; read the bare key only as "state at the end".
  *
  * Note on hotness: onControllerConnected is NOT rate-limited and, under the connect storm this instrumentation
  * exists to diagnose, can fire several times a second. Its writes are a handful of map puts with no allocation
@@ -132,20 +141,42 @@ object CrashKeys {
         return if (start == 0L) -1 else ((SystemClock.elapsedRealtime() - start) / 1000L).toInt()
     }
 
-    // Writes the checkpoint's OWN age key plus the shared "age at last checkpoint of any kind". Both are
-    // needed: the per-checkpoint key attributes, the shared one still answers "how old was the process".
+    // Keys whose FIRST value has already been written. A checkpoint that fires N times leaves its
+    // last-write key showing occurrence N; the _first companion pins occurrence 1, and the existing
+    // counters give N — so first + count + last is readable as a RATE. Without the first-write, a
+    // storm is indistinguishable from a single late event (see doc note 5).
+    private val firstStamped = ConcurrentHashMap.newKeySet<String>()
+    private val processAgeStamped = AtomicBoolean(false)
+
+    // Writes THREE things per checkpoint:
+    //  • <key>        — last write, name unchanged so existing Crashlytics issues stay comparable;
+    //  • <key>_first  — CAS-guarded first occurrence, the one that attributes;
+    //  • process_age_s — ONCE, at the first checkpoint of any kind.
+    // process_age_s used to be re-stamped by every checkpoint, so under a storm it reported the age at
+    // the LAST one — i.e. the moment of death — while reading like "how old was the process". That
+    // silently misled the build-1039 OOM triage. It is now first-write and means what it says.
     private fun stampAge(checkpointKey: String) {
         val age = ageS()
         set(checkpointKey, age)
-        set("process_age_s", age)
+        if (firstStamped.add(checkpointKey)) set("${checkpointKey}_first", age)
+        if (processAgeStamped.compareAndSet(false, true)) set("process_age_s", age)
     }
 
     private fun sampleHeap(usedKey: String, headroomKey: String) {
         val rt = Runtime.getRuntime()
         val used = rt.totalMemory() - rt.freeMemory()
         val usedMb = (used / (1024 * 1024)).toInt()
+        val headroomMb = ((rt.maxMemory() - used) / (1024 * 1024)).toInt()
         set(usedKey, usedMb)
-        set(headroomKey, ((rt.maxMemory() - used) / (1024 * 1024)).toInt())
+        set(headroomKey, headroomMb)
+        // Per-checkpoint FIRST sample, same reasoning as stampAge: a repeatedly-fired checkpoint's
+        // last-write heap value is the dying-end reading, not the reading at the event you are
+        // attributing to. heap_used_mb_conn on the build-1036 AA report was the LAST connect of the
+        // session, not the first — which is exactly the misreading these companions prevent.
+        if (firstStamped.add(usedKey)) {
+            set("${usedKey}_first", usedMb)
+            set("${headroomKey}_first", headroomMb)
+        }
         // First-ever sample: pins the STARTING point of the trajectory, which no last-write key can. CAS so
         // the first sampler wins even if two checkpoints race.
         if (heapFirstRecorded.compareAndSet(false, true)) {

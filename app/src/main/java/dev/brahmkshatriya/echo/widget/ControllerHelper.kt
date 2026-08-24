@@ -43,7 +43,7 @@ object ControllerHelper {
             lastKnownItem = tracks?.getOrNull(index)?.first ?: tracks?.firstOrNull()?.first
             withContext(Dispatchers.Main) { updateWidgets() }
         } else null
-        if (callback == null) callback = getController(app.context) {
+        if (callback == null) callback = getController(app) {
             controller = it
             val playerListener = WidgetPlayerListener { img ->
                 image = img

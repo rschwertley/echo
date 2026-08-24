@@ -78,6 +78,7 @@ object ResumptionUtils {
         File(context.filesDir, "context/queue").apply { mkdirs() }
 
     fun clearQueue(context: Context) {
+        queueGeneration++
         queueDir(context).listFiles()?.forEach { it.delete() }
         // Also wipe the pre-7b3ad34b cacheDir location, so a stale legacy queue there can't resurrect
         // via the cacheDir fallback in recoverTracks after the user clears the queue (or after the
@@ -85,7 +86,18 @@ object ResumptionUtils {
         File(context.cacheDir, "context/queue").listFiles()?.forEach { it.delete() }
     }
 
+    // Bumped by EVERY queue write and by clearQueue, so PlayerState.restoreCache can tell "the queue on
+    // disk is the one I already built items for" from "it changed". In-memory and exact: the cache is only
+    // ever read by a SECOND-or-later PlayerService instance in the SAME process, and this app is
+    // single-process, so nothing can change these files without passing through here first. Deliberately
+    // NOT File.lastModified(): that is second-granular on some filesystems, and scheduleSaveQueue is
+    // debounced at 300ms, so two saves inside one second would collide and serve a stale cache.
+    @Volatile
+    var queueGeneration: Long = 0L
+        private set
+
     private inline fun <reified T> Context.saveToQueue(id: String, data: T?) = runCatching {
+        queueGeneration++
         val dir = queueDir(this)
         val target = File(dir, id.hashCode().toString())
         val tmp = File(dir, "${id.hashCode()}.tmp")
