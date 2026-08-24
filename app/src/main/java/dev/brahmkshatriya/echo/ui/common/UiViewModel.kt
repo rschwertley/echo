@@ -36,6 +36,7 @@ import dev.brahmkshatriya.echo.MainActivity
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.playback.PlayerState
+import dev.brahmkshatriya.echo.playback.ResumptionUtils.hasSavedQueue
 import dev.brahmkshatriya.echo.ui.main.MainFragment
 import dev.brahmkshatriya.echo.ui.player.PlayerColors
 import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
@@ -177,8 +178,42 @@ class UiViewModel(
     // here made collapsePlayer() (called on every drill-down via openFragment) drive the sheet
     // HIDDEN→COLLAPSED→HIDDEN — a ~1–2s double settle during which updateVisibility() hid the mini bar
     // (its "sheetHidden" gate went false then true). Rest HIDDEN on TV so drill-down is a no-op for the sheet.
+    // Captured deliberately: getState() is a member function, and a primary-constructor parameter
+    // without `val` is in scope only for property initialisers / init blocks — which is why every other
+    // member here (setPlayerInsets, setSystemInsets, …) takes its own `context` param. Declared ABOVE
+    // playerSheetState because that property's initialiser calls getState(), and Kotlin runs property
+    // initialisers in declaration order. Koin binds Context to the Application, so this is leak-free.
+    private val appContext = context
+
+    // COLLAPSED means "there is something to show in the mini bar".
+    //
+    // ORDER IS LOAD-BEARING, not cosmetic: `||` short-circuits, so the file stats in hasSavedQueue run
+    // ONLY while current is null. getState() is not just a cold-start call — collapsePlayer() runs it on
+    // every drill-down via openFragment (FragmentUtils:50, MediaDetailsFragment, PlayerFragment), and
+    // applyPlayerBehaviorState runs it whenever a transient state must be coerced. Once anything has
+    // played, current stays non-null for the process and no file is ever touched.
+    //
+    // WHY the queue is consulted at all: PlayerState.current is an in-memory Koin singleton — fresh-null
+    // in every new process — and it is written only by the SERVICE (PlayerEventListener.updateCurrentFlow,
+    // from onEvents). On a cold start this ViewModel is constructed at MainActivity:86, BEFORE the service
+    // exists (the service is started by PlayerViewModel's MediaController connection, which happens after
+    // the Fragment is added), so current is null and this returned HIDDEN with a valid queue on disk.
+    // HIDDEN then applies PRE-layout, sets isHideable=true, and BottomSheetBehavior.onLayoutChild parks
+    // the sheet at parentHeight — fully offscreen. The queue is persistent (filesDir/context/queue/), so
+    // "is there a saved queue" is the honest question at that moment; hasSavedQueue answers it with two
+    // stat()s and no deserialization (it exists for ButtonReceiver's synchronous main-thread gate).
+    //
+    // ⚠️ This REMOVES THE WINDOW; it does NOT explain the 2026-08-23 report of a permanently missing bar.
+    // There, :456 did fire COLLAPSED and the sheet still never settled up from parentHeight — a failure
+    // inside Material's settle path that remains UNDIAGNOSED. If the bar goes missing again on a build
+    // carrying this change, the masking did not hold: look at the settle path, not here.
+    //
+    // Accepted cost: the collapsed bar is now present-but-EMPTY for the window it used to be absent for
+    // (applyCurrent binds only once current populates). Chosen deliberately — an empty bar self-corrects
+    // on a text/image bind, whereas an offscreen sheet depends on an animation completing.
     private fun getState() =
-        if (!isTv && playerState.current.value != null) STATE_COLLAPSED else STATE_HIDDEN
+        if (!isTv && (playerState.current.value != null || hasSavedQueue(appContext))) STATE_COLLAPSED
+        else STATE_HIDDEN
 
     val playerSheetState = MutableStateFlow(getState())
     // True only on the TV surface (set in setupPlayerBehavior). TV rests at STATE_HIDDEN with a separate

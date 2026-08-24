@@ -98,6 +98,15 @@ data class App(
                 // the shortName derived from SimplifyBooleanWithConstantsInspection (no explicit shortName in
                 // the Kotlin plugin's registration → class name minus "Inspection"), confirmed against the
                 // plugin jar — not guessed.
+                // ⚠️ KNOWN GAP, deliberately not fixed here (recorded 2026-08-20): this block is NOT
+                // runCatching-wrapped, unlike CrashKeys.set(), which is guarded precisely because a
+                // not-yet-initialised Crashlytics can throw (FirebaseCrashlytics.getInstance() ->
+                // FirebaseApp.getInstance() throws when the default app is absent, and getInstance()
+                // itself throws NPE if the component is missing). If anything in here throws, it
+                // propagates out of collectLatest, kills this collector for the life of the process, and
+                // every later throwFlow.emit then suspends FOREVER on the 0-buffer MutableSharedFlow —
+                // silencing both the Crashlytics non-fatals and the snackbars, with no error anywhere.
+                // A wholesale silencer waiting to happen; the fix is a runCatching around the apply.
                 @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants")
                 if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) FirebaseCrashlytics.getInstance().apply {
                     // extension_id is the PLAYING extension (crashExtensionId, written at
@@ -117,6 +126,11 @@ data class App(
                     // the joined job's failure, so the only throwable reaching it is from Media3's
                     // notifySearchResultChanged — host-side, and "none" is the right answer there.
                     setCustomKey("throwing_extension_id", it.throwingExtensionId() ?: "none")
+                    // "none" = this report came through throwFlow, NOT HealthMonitor. Written for the
+                    // same always-write reason as the keys around it: HealthMonitor.report sets
+                    // health_report_type to its exception type, and without this line that value would
+                    // stick on the singleton and mislabel the NEXT throwFlow report as a health report.
+                    setCustomKey("health_report_type", "none")
                     setCustomKey("player_state", crashPlayerState)
                     setCustomKey("is_playing", crashIsPlaying)
                     recordException(it)

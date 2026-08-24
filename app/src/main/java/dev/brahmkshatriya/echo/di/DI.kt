@@ -41,7 +41,7 @@ object DI {
 
     private val baseModule = module {
         single { androidApplication().getSettings() }
-        single { HealthMonitor(androidApplication()) }
+        single { HealthMonitor(get()) }
         singleOf(::App)
     }
 

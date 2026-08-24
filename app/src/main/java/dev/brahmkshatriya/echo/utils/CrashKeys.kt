@@ -20,7 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   (a not-yet-initialized Crashlytics can never throw).
  *
  * ── Key semantics, learned the hard way on the build-1033 OOM ────────────────────────────────────────────
- * Crashlytics keys are LAST-WRITE-WINS. Three corrections came out of that report:
+ * Crashlytics keys are LAST-WRITE-WINS. Three corrections came out of that report, plus one from the
+ * 2026-08-20 HealthMonitor attribution bug:
  *
  * 1. COUNTS ARE MONOTONIC, GAUGES ARE NOT. The old `remote_controller_count` incremented on connect and
  *    DECREMENTED on disconnect, i.e. it was a gauge, not the monotonic counter this doc used to claim. That
@@ -40,6 +41,15 @@ import java.util.concurrent.atomic.AtomicInteger
  *    once the heap is full and events keep firing — it could not distinguish "born high" from "climbed to
  *    full and stayed". A first-ever sample and a running max are now recorded alongside, giving three points
  *    (first → peak → last) instead of one.
+ *
+ * 4. WHETHER OMITTING A WRITE IS SAFE DEPENDS ON THE KEY'S KIND. Because keys are last-write-wins, skipping a
+ *    write leaves the previous value in place. That is CORRECT for a monotonic ACCUMULATOR (heap_peak_mb is
+ *    only written when the peak advances — not writing means "no new peak", and the retained value is still
+ *    true). It is a LIE for a SNAPSHOT (extension_id, player_state, throwing_extension_id describe one report;
+ *    an unwritten one silently describes a different, earlier one — this is exactly how HealthMonitor reports
+ *    carried another exception's attribution until 2026-08-20). Test before adding a key: if this write is
+ *    skipped, is the value left behind still true? Accumulator -> yes, omit freely. Snapshot -> no, ALWAYS
+ *    write, with an explicit "none" where there is nothing to say.
  *
  * Note on hotness: onControllerConnected is NOT rate-limited and, under the connect storm this instrumentation
  * exists to diagnose, can fire several times a second. Its writes are a handful of map puts with no allocation

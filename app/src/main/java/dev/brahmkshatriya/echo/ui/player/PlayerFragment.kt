@@ -442,6 +442,15 @@ class PlayerFragment : Fragment() {
         // PlayerFragment). MainActivity's current-observer does NOT participate here — it is TV-only, gated by
         // R.id.tvMiniPlayer (see MainActivity.setupTvMiniPlayer). TV uses PlayerTvFragment + tvMiniPlayer;
         // Android Auto has no Fragment at all. So changes in this block affect phone only.
+        // Verified 2026-08-23, with commit references so this is checkable rather than folklore:
+        // setupTvMiniPlayer() early-returns on `R.id.tvMiniPlayer ?: return` (that id exists only in
+        // layout-land-television), and it has done so since the method was created in 75501299
+        // (2026-05-26). The RESUMED-gated STATE_COLLAPSED transition inside it was added LATER, in
+        // d4c3b9bb (2026-06-08), whose session notes describe it as a PHONE cold-start fix ("blank Now
+        // Playing bar") — but it went into the already-TV-gated method, so it has never executed on a
+        // phone. Do not reason about phone sheet state from that guard. Approaching from the phone side
+        // and assuming otherwise cost real debugging time on 2026-08-23; the mirror of this note, written
+        // after the same mistake from the TV side, is at MainActivity:242-249.
         lifecycleScope.launch {
             viewModel.playerState.current.collectLatest {
                 uiViewModel.run {
