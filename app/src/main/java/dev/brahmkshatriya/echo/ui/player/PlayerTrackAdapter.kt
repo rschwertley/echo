@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.ui.player
 import android.graphics.Outline
 import android.graphics.drawable.Drawable
 import android.view.LayoutInflater
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -156,7 +157,10 @@ class PlayerTrackAdapter(
         fun retryLoad(item: MediaItem?) {
             if (coverDrawable != null) return
             val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
-            item?.track?.cover.loadWithThumb(binding.playerTrackCover, old) {
+            item?.track?.cover.loadWithThumb(
+                binding.playerTrackCover, old,
+                debugId = "retry:${item?.mediaId}"   // TEMPORARY (GladixArt)
+            ) {
                 val image = it
                     ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
                 setImageDrawable(image)
@@ -166,6 +170,16 @@ class PlayerTrackAdapter(
         }
 
         fun bind(item: MediaItem?) {
+            // TEMPORARY (GladixArt) — remove with the rest of this instrumentation. Presence of a bind
+            // line while the screen is dark answers whether layout runs at all with no frames; absence
+            // means any wrong art must be a page-position problem, not a binding one.
+            Log.d(
+                "GladixArt",
+                "bind pos=$bindingAdapterPosition id=${item?.mediaId} lastBound=$lastBoundMediaId " +
+                    "rebind=${item?.mediaId != lastBoundMediaId} " +
+                    "iv=${System.identityHashCode(binding.playerTrackCover)} " +
+                    "holder=${System.identityHashCode(this)}"
+            )
             binding.playerCollapsed.run {
                 collapsedTrackTitle.text = item?.track?.title
                 collapsedTrackArtist.text = item?.track?.artists?.joinToString(", ") { it.name }
@@ -174,7 +188,10 @@ class PlayerTrackAdapter(
                 lastBoundMediaId = item?.mediaId
                 coverDrawable = null
                 val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
-                item?.track?.cover.loadWithThumb(binding.playerTrackCover, old) {
+                item?.track?.cover.loadWithThumb(
+                    binding.playerTrackCover, old,
+                    debugId = "bind:${item?.mediaId}"   // TEMPORARY (GladixArt)
+                ) {
                     val image = it
                         ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
                     setImageDrawable(image)

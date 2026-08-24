@@ -1,8 +1,8 @@
 package dev.brahmkshatriya.echo.ui.player
 
 import android.content.SharedPreferences
-import android.util.Log
 import android.os.Bundle
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -86,6 +86,17 @@ class PlayerViewModel(
                 val showingPlaceholder = playerState.current.value?.isPlaceholder == true && items.isEmpty()
                 if (items.isNotEmpty() || !showingPlaceholder) {
                     queue = items
+                    // TEMPORARY (GladixArt) — the decisive line. queueFlow is MutableSharedFlow<Unit>()
+                    // with replay=0 and no buffer, and its only collector (PlayerFragment's
+                    // observe(queueFlow)) is flowWithLifecycle(STARTED), so it is CANCELLED while the
+                    // Activity is stopped. With subs=0 this emit is dropped permanently — there is no
+                    // replay at ON_START — and the reconciling submit("queue") never runs. An emit line
+                    // with subs=0 and no following `submit cb src=queue` is that drop, observed.
+                    Log.d(
+                        "GladixArt",
+                        "queueFlow emit size=${items.size} identity=${System.identityHashCode(items)} " +
+                            "subs=${queueFlow.subscriptionCount.value}"
+                    )
                     queueFlow.emit(Unit)
                 }
             }

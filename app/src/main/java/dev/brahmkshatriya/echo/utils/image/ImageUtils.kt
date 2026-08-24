@@ -2,6 +2,8 @@ package dev.brahmkshatriya.echo.utils.image
 
 import android.content.Context
 import android.graphics.drawable.Drawable
+import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.widget.ImageView
 import androidx.core.graphics.drawable.toDrawable
@@ -101,7 +103,12 @@ object ImageUtils {
 
     fun <T : View> ImageHolder?.loadWithThumb(
         view: T, thumbnail: Drawable? = null,
-        error: Int? = null, onDrawable: T.(Drawable?) -> Unit
+        error: Int? = null,
+        // TEMPORARY (GladixArt) — when non-null this single load is traced; the default leaves every
+        // other call site in the app silent and behaviourally byte-identical. Remove with the rest of
+        // the GladixArt instrumentation.
+        debugId: String? = null,
+        onDrawable: T.(Drawable?) -> Unit
     ) = tryWith(true) {
         tryWith(false) { onDrawable(view, thumbnail) }
         val request = createRequest(view.context, null, error)
@@ -110,6 +117,30 @@ object ImageUtils {
             tryWith(false) { onDrawable(view, drawable) }
         }
         request.target({}, ::setDrawable, ::setDrawable)
+        // TEMPORARY (GladixArt) — hypothesis C, the image layer. Read before interpreting the output:
+        // this load is ENQUEUED and its target is a lambda, NOT a ViewTarget. RequestService
+        // .requestDelegate therefore takes the `request.lifecycle ?: findLifecycle()` branch, and
+        // findLifecycle resolves from the request CONTEXT (view.context -> the Activity) because the
+        // target isn't a ViewTarget. RealImageLoader.execute then awaitStarted()s on that Lifecycle for
+        // every enqueued request. Net: a cover enqueued while the Activity is STOPPED (screen off) does
+        // not execute at all until ON_START. `ms=` on the start/success line measures that deferral
+        // directly — a large ms on the first line after a wake is the gate, not a slow network.
+        if (debugId != null) {
+            val t0 = SystemClock.elapsedRealtime()
+            fun ms() = SystemClock.elapsedRealtime() - t0
+            val iv = System.identityHashCode(view)
+            Log.d("GladixArt", "coil enqueue id=$debugId iv=$iv thumb=${thumbnail != null}")
+            request.listener(
+                onStart = { Log.d("GladixArt", "coil start id=$debugId iv=$iv ms=${ms()}") },
+                onCancel = { Log.d("GladixArt", "coil cancel id=$debugId iv=$iv ms=${ms()}") },
+                onError = { _, r ->
+                    Log.d("GladixArt", "coil error id=$debugId iv=$iv ms=${ms()} e=${r.throwable}")
+                },
+                onSuccess = { _, r ->
+                    Log.d("GladixArt", "coil success id=$debugId iv=$iv ms=${ms()} src=${r.dataSource}")
+                },
+            )
+        }
         view.enqueue(request)
     }
 

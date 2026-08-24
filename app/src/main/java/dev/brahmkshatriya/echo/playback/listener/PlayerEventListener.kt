@@ -175,7 +175,15 @@ class PlayerEventListener(
         pendingFullQueueUpdate?.cancel()
         pendingFullQueueUpdate = scope.launch(Dispatchers.Main) {
             delay(50)
-            fullQueueFlow.value = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
+            // TEMPORARY (GladixArt) — remove with the rest of this instrumentation. This is the write
+            // that gives viewModel.queue a NEW List instance, 50ms after the timeline change, while
+            // `current` emitted immediately. If submit() ran before this line, it indexed a stale queue.
+            val newQueue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
+            Log.d(
+                "GladixArt",
+                "emitFullQueue size=${newQueue.size} identity=${System.identityHashCode(newQueue)}"
+            )
+            fullQueueFlow.value = newQueue
         }
     }
 
@@ -223,6 +231,14 @@ class PlayerEventListener(
     }
 
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+        // TEMPORARY (GladixArt) — remove with the rest of this instrumentation. reason distinguishes the
+        // advance TYPE without hand-annotation: 0=REPEAT, 1=AUTO (natural advance), 2=SEEK (manual skip,
+        // incl. a Bluetooth/car next), 3=PLAYLIST_CHANGED.
+        Log.d(
+            "GladixArt",
+            "transition reason=$reason id=${mediaItem?.mediaId} idx=${player.currentMediaItemIndex} " +
+                "count=${player.mediaItemCount}"
+        )
         if (mediaItem == null) return  // fired on player.release() with index=0; don't overwrite saved position
         updateCustomLayout()
         // Persist the current index so cold-start restore seeks to the correct track. mediaItem is the

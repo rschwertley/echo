@@ -69,6 +69,26 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <!-- PHASE 1 A/B PROBE (temporary, GladixArt). A fragment-level cover driven by playerState
+             IDENTITY, never by a ViewPager index. Deliberately small and corner-anchored so it sits
+             BESIDE the real page cover instead of replacing it — the whole point of this phase is to
+             compare the two on a screen-off auto-advance with nothing removed.
+             clickable/focusable are false and there is no touch listener, so dispatchTouchEvent
+             returns false and the event falls through to the ViewPager beneath: swipe, tap,
+             double-tap and long-press are untouched. Do NOT give this view a background selector or
+             a click listener — that is what would eat the page gestures. -->
+        <ImageView
+            android:id="@+id/art_probe"
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="96dp"
+            android:layout_marginEnd="12dp"
+            android:clickable="false"
+            android:focusable="false"
+            android:importantForAccessibility="no"
+            android:translationZ="8dp" />
+
         <!--        <include layout="@layout/item_player_track"/>-->
 
         <com.google.android.material.appbar.MaterialToolbar
