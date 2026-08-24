@@ -14,7 +14,7 @@ room = "3.0.1"
 sqlite = "2.7.0"
 firebase-bom = "34.18.0"
 koinAndroid = "4.2.2"
-media3 = "1.10.1"
+media3 = "1.11.0"
 coil = "3.5.0"
 
 [libraries]
