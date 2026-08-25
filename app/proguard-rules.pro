@@ -14,16 +14,21 @@
 # anchor is UNVERIFIED: R8 can repackage that whole package and verifyExtensionAbi still reports "ABI
 # intact". Each rule below names its anchor(s) so a rule without one is visible at a glance. (okio and
 # protobuf were unanchored 2026-08-01 → 2026-08-24 — the gap this annotation exists to prevent.)
+#
+# EVERY rule's annotation starts with the SAME singular token `# anchor:` even when it lists several
+# classes, so `grep -n "^# anchor:"` returns one line per keep rule and a missing line is a real gap.
+# A plural `# anchors:` variant made a colon-anchored grep return five of seven and read as a two-rule
+# gap that did not exist (2026-08-24). Do not reintroduce the plural form.
 
 # 1. Our own ABI module.
 -keep class dev.brahmkshatriya.echo.common.** { *; }
-# anchors: ExtensionClient, TrackClient, AlbumClient, RadioClient, Track, EchoMediaItem
+# anchor: ExtensionClient, TrackClient, AlbumClient, RadioClient, Track, EchoMediaItem
 
 # 2. Kotlin stdlib — extensions declare it compileOnly and rely on the app at runtime. Covers function
 #    types (kotlin.jvm.functions.Function0..N), suspend machinery (kotlin.coroutines.Continuation),
 #    kotlin.Result/Unit/Pair, collections, text/regex/sequences, and @kotlin.Metadata.
 -keep class kotlin.** { *; }
-# anchors: kotlin.jvm.functions.Function0, Function1, kotlin.coroutines.Continuation
+# anchor: kotlin.jvm.functions.Function0, Function1, kotlin.coroutines.Continuation
 
 # 3. Coroutines + serialization — :common api-exposes these (Flow/StateFlow/SharedFlow in signatures,
 #    @Serializable models). Extensions compile against them transitively and do not bundle them.

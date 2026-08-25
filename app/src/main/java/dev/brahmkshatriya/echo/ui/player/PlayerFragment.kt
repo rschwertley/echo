@@ -29,8 +29,6 @@ import androidx.annotation.OptIn
 import androidx.core.view.doOnPreDraw
 import androidx.lifecycle.Lifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.lifecycle.LifecycleEventObserver
-import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.withResumed
 import androidx.appcompat.content.res.AppCompatResources
@@ -393,11 +391,6 @@ class PlayerFragment : Fragment() {
 
     private var isInitialLoad = true
     private var pendingPageScroll: Runnable? = null
-    // TEMPORARY (GladixArt). artSeq orders lines across the three log sites; lastCurrentEmitMs lets the
-    // submit cb report how long after the `current` emission it ran — the number that says whether it
-    // landed INSIDE emitFullQueue's 50ms debounce (queue still one advance stale) or after it.
-    private var artSeq = 0
-    private var lastCurrentEmitMs = 0L
     private fun configurePlayerControls() {
         val viewPager = binding!!.viewPager
         viewPager.adapter = adapter
@@ -405,53 +398,16 @@ class PlayerFragment : Fragment() {
         viewPager.registerOnUserPageChangeCallback { pos, isUser ->
             val curr = viewModel.playerState.current.value
             val index = curr?.let { c -> viewModel.queue.indexOfFirst { it.mediaId == c.mediaItem.mediaId } } ?: -1
-            Log.d("GladixArt", "pageSelected pos=$pos idx=$index isUser=$isUser willSeek=${index != pos && isUser}")
             if (index != pos && isUser) viewModel.seek(pos)
         }
 
-        // TEMPORARY (GladixArt) — remove with the rest of this instrumentation.
-        // One line per wake: does ViewPager2's LOGICAL position agree with what is RENDERED?
-        // logical = mCurrentItem (set synchronously by setCurrentItem, no frames needed);
-        // rendered = LinearLayoutManager's first visible position (only updated by a layout pass).
-        // logical == rendered  -> position is fine, any wrong art is a BINDING problem.
-        // logical != rendered  -> the pending scroll never applied; it is a POSITION problem.
-        viewLifecycleOwner.lifecycle.addObserver(LifecycleEventObserver { _, event ->
-            if (event != Lifecycle.Event.ON_START) return@LifecycleEventObserver
-            val vp = binding?.viewPager ?: return@LifecycleEventObserver
-            val rv = vp.getChildAt(0) as? RecyclerView
-            val rendered = (rv?.layoutManager as? LinearLayoutManager)?.findFirstVisibleItemPosition()
-            val curr = viewModel.playerState.current.value
-            val idx = curr?.let { c -> viewModel.queue.indexOfFirst { it.mediaId == c.mediaItem.mediaId } } ?: -1
-            Log.d("GladixArt", "wake@ON_START logical=${vp.currentItem} rendered=$rendered liveIdx=$idx " +
-                "curId=${curr?.mediaItem?.mediaId} scrollState=${vp.scrollState}")
-            // SECOND read, after the next layout. ON_START can precede the traversal that consumes
-            // LinearLayoutManager.mPendingScrollPosition, so the ON_START line above can report a stale
-            // `rendered` even on a HEALTHY wake — a false "position problem". Compare the two: if
-            // ON_START mismatches and this one agrees, the pending scroll applied normally and the
-            // mismatch was just read-too-early. If BOTH mismatch, the pending scroll never applied.
-            // Read-only: this adds no writer to the page position, so it is not the 2026-07-28 hazard
-            // (that was a pre-draw WRITER racing the posted scroll and the direct setCurrentItem).
-            vp.doOnPreDraw {
-                val rv2 = vp.getChildAt(0) as? RecyclerView
-                val rendered2 = (rv2?.layoutManager as? LinearLayoutManager)?.findFirstVisibleItemPosition()
-                val curr2 = viewModel.playerState.current.value
-                val idx2 = curr2?.let { c -> viewModel.queue.indexOfFirst { it.mediaId == c.mediaItem.mediaId } } ?: -1
-                Log.d("GladixArt", "wake@preDraw logical=${vp.currentItem} rendered=$rendered2 liveIdx=$idx2 " +
-                    "curId=${curr2?.mediaItem?.mediaId} scrollState=${vp.scrollState}")
-            }
-        })
-
-        // `src` is TEMPORARY (GladixArt): which of the three drivers called this. The drivers have
-        // DIFFERENT lifecycle gating — the `current` collector is a raw lifecycleScope.launch (runs while
-        // STOPPED), while observe(queueFlow) is flowWithLifecycle(STARTED) and is cancelled while dark —
-        // so knowing the caller is the difference between "the reconcile ran" and "it was dropped".
-        fun submit(src: String = "?") {
+        fun submit() {
             val capturedCurrent = viewModel.playerState.current.value
-            // `submitted` is the EXACT instance handed to submitList, so the index below and the list the
-            // adapter receives provably come from one generation. Behaviour-identical to reading
-            // viewModel.queue twice (same thread, no suspension between) — hoisted so the log can index
-            // the list actually submitted rather than whatever viewModel.queue holds when the async
-            // callback finally runs.
+            // `submitted` is the EXACT instance handed to submitList, so the index computed below and
+            // the list the adapter receives provably come from one generation. Do not re-read
+            // viewModel.queue inside the callback: it can advance a generation (emitFullQueue writes 50ms
+            // after a timeline change) while the adapter still holds this one, and an index from one
+            // generation applied to another is off by however many tracks were removed in between.
             val submitted = viewModel.queue
             val capturedIndex = capturedCurrent?.let { c ->
                 submitted.indexOfFirst { it.mediaId == c.mediaItem.mediaId }.takeIf { it != -1 }
@@ -467,17 +423,21 @@ class PlayerFragment : Fragment() {
                 // scroll (scrollToPosition when laid out, mPendingCurrentItem when not), applied on the next
                 // layout pass at screen-on — no frames needed — so the correct page renders with no stale frame.
                 // On-screen advances keep the animated ±1 behavior.
-                // Gate on the DISPLAY, not on lifecycle state. The question this needs to answer is "will
-                // Choreographer deliver frames", and Lifecycle.STARTED is only a proxy for it: STARTED
-                // includes a window where the display has gone off but the Activity has not yet been
-                // stopped. A POWER-BUTTON press collapses that window (both happen together, started
-                // goes false, we take the instant path and it works). A NATURAL DISPLAY TIMEOUT does not
-                // — the display dims and stops producing frames while the Activity can still report
-                // STARTED — so the old check said "smooth" for the one case that cannot animate. That is
-                // why this bug only ever reproduced on a timeout and never on a manual screen-off.
-                // Display.STATE_ON is the direct signal: DOZE, DOZE_SUSPEND and OFF all correctly read as
-                // "no frames". DisplayManager (not Context.getDisplay, which is API 30+ and we ship 24).
-                // Do NOT "simplify" this back to a lifecycle check.
+                // Gate on the DISPLAY, not on lifecycle state, because the question is "will Choreographer
+                // deliver frames" and the lifecycle only answers "is this Fragment started".
+                //
+                // ⚠️ This comment previously claimed the gate was needed because a NATURAL DISPLAY TIMEOUT
+                // leaves the Activity reporting STARTED while the display stops producing frames, and that
+                // a power-button press collapses that window. MEASURED 2026-08-24 and it is FALSE: over
+                // eight consecutive screen-off auto-advances the lifecycle read CREATED every time — the
+                // Activity is genuinely stopped on a natural timeout, so a STARTED check would have
+                // returned the same answer the display check does. The gate is not wrong, but it was
+                // justified by a mechanism that does not exist; do not cite that mechanism again.
+                //
+                // What the display check still buys is directness and the DOZE window: Display.STATE_ON is
+                // the signal actually being asked about, and DOZE / DOZE_SUSPEND / OFF all correctly read as
+                // "no frames", whereas lifecycle state only correlates. DisplayManager rather than
+                // Context.getDisplay, which is API 30+ and we ship 24.
                 // Asymmetry that justifies erring conservative: smooth=false is ALWAYS correct — the
                 // non-smooth setCurrentItem commits via the LayoutManager's pending scroll and needs no
                 // frames — so a false negative costs an animation, while a false positive leaves the page
@@ -487,30 +447,6 @@ class PlayerFragment : Fragment() {
                 val displayOn = requireContext().getSystemService(DisplayManager::class.java)
                     ?.getDisplay(Display.DEFAULT_DISPLAY)?.state == Display.STATE_ON
                 val smooth = displayOn && !isInitialLoad && abs(index - current) <= 1
-                // TEMPORARY (GladixArt). rawDisplayState distinguishes ON(2) / OFF(1) / DOZE(3) /
-                // DOZE_SUSPEND(4) so the dim window is visible as a distinct value, not just !ON.
-                val rawDisplayState = requireContext().getSystemService(DisplayManager::class.java)
-                    ?.getDisplay(Display.DEFAULT_DISPLAY)?.state
-                val liveIdxNow = viewModel.playerState.current.value?.let { c ->
-                    viewModel.queue.indexOfFirst { it.mediaId == c.mediaItem.mediaId }
-                }
-                // listIdentity: does submitList get a NEW List instance? A new one means AsyncListDiffer
-                // runs a REAL diff (async, callback deferred) and the adapter notifies, which sets
-                // ViewPager2's mDataSetChangeHappened = true and re-opens ScrollEventAdapter:157-158.
-                val sinceCurrentMs =
-                    if (lastCurrentEmitMs == 0L) -1L else SystemClock.elapsedRealtime() - lastCurrentEmitMs
-                // idAtIndex answers the question directly: the mediaId sitting at the computed index
-                // WITHIN THE LIST ACTUALLY SUBMITTED. If idAtIndex != curId, index and list came from
-                // different generations and the page is provably wrong — no inference needed.
-                Log.d("GladixArt", "submit cb #${++artSeq} src=$src sinceCurrentMs=$sinceCurrentMs " +
-                    "capturedIdx=$index idAtIndex=${submitted.getOrNull(index)?.mediaId} " +
-                    "liveIdx=$liveIdxNow " +
-                    "queueIdentity=${System.identityHashCode(viewModel.queue)} " +
-                    "listIdentity=${System.identityHashCode(adapter.currentList)} " +
-                    "curId=${viewModel.playerState.current.value?.mediaItem?.mediaId} vpCurrent=$current " +
-                    "listSize=${adapter.currentList.size} queueSize=${viewModel.queue.size} " +
-                    "displayState=$rawDisplayState displayOn=$displayOn smooth=$smooth " +
-                    "lc=${lifecycle.currentState} laidOut=${viewPager.isLaidOut} initial=$isInitialLoad")
                 isInitialLoad = false
                 if (!viewPager.isLaidOut) viewPager.setCurrentItem(index, smooth)
                 else {
@@ -520,18 +456,18 @@ class PlayerFragment : Fragment() {
                         val liveIndex = liveCurrent?.let { c ->
                             viewModel.queue.indexOfFirst { it.mediaId == c.mediaItem.mediaId }.takeIf { it != -1 }
                         } ?: index
-                        // THE GAP. `index` is consistent with `submitted`; `liveIndex` is re-derived from
-                        // viewModel.queue at POST time — a potentially LATER generation — and then applied
-                        // to the adapter's EARLIER list. While dark the reconciling submit() is dropped, so
-                        // the adapter never receives that later generation. idAtLive indexes the adapter's
-                        // real list, which is what decides the rendered page: idAtLive != curId is the
-                        // one-behind bug caught in the act.
-                        Log.d("GladixArt", "posted run src=$src liveIdx=$liveIndex smooth=$smooth " +
-                            "idAtLive=${adapter.currentList.getOrNull(liveIndex)?.mediaId} " +
-                            "curId=${liveCurrent?.mediaItem?.mediaId} " +
-                            "adapterListIdentity=${System.identityHashCode(adapter.currentList)} " +
-                            "queueIdentity=${System.identityHashCode(viewModel.queue)} " +
-                            "vpCurrentBefore=${binding?.viewPager?.currentItem}")
+                        // ⚠️ KNOWN HAZARD, left in place deliberately (measured 2026-08-24, never observed
+                        // to fire). `index` is consistent with `submitted`; `liveIndex` is re-derived here
+                        // from viewModel.queue at POST time — a potentially LATER generation — and then
+                        // applied to the adapter's EARLIER list. viewModel.queue advances 50ms after a
+                        // timeline change (emitFullQueue) while the adapter is only re-submitted by
+                        // submit(), so the two can disagree by however many tracks were removed in between.
+                        // Instrumented over eight consecutive screen-off advances: the two always agreed,
+                        // because submit() runs from the ungated `current` collector before the 50ms write
+                        // lands. This is the SAME false step as the reverted 2026-07-30 pre-draw re-commit
+                        // (60ab8d0c), which derived an index from the live queue and applied it to a stale
+                        // adapter list and produced a permanent one-behind. Do not add a third derivation
+                        // here; if this ever needs touching, take `index` and delete the re-derivation.
                         binding?.viewPager?.setCurrentItem(liveIndex, smooth)
                     }
                     pendingPageScroll = runnable
@@ -573,20 +509,17 @@ class PlayerFragment : Fragment() {
                     if (it == null) changePlayerState(STATE_HIDDEN)
                     else if (playerSheetState.value == STATE_HIDDEN) changePlayerState(STATE_COLLAPSED)
                 }
-                lastCurrentEmitMs = SystemClock.elapsedRealtime()
-                Log.d("GladixArt", "current emit id=${it?.mediaItem?.mediaId} " +
-                    "isPlaying=${it?.isPlaying} idxInState=${it?.index}")
-                submit("current")
+                submit()
                 it?.mediaItem ?: return@collectLatest
                 binding.applyCurrent(it.mediaItem)
                 loadCurrentBackground(it.mediaItem)
             }
         }
 
-        observe(viewModel.queueFlow) { submit("queue") }
+        observe(viewModel.queueFlow) { submit() }
         observe(viewModel.browser) { controller ->
             if (controller != null && viewModel.queue.isNotEmpty() && adapter.currentList.isEmpty()) {
-                submit("browser")
+                submit()
             }
         }
 
@@ -887,13 +820,7 @@ class PlayerFragment : Fragment() {
             collapsedTrackArtist.text = track.artists.joinToString(", ") { it.name }
             val thumb = collapsedTrackCover.drawable
                 ?: item.unloadedCover?.getCachedDrawable(requireContext())
-            track.cover.loadWithThumb(
-                collapsedTrackCover, thumb,
-                debugId = "mini:${item.mediaId}"   // TEMPORARY (GladixArt) — control arm: same helper,
-                // same Activity lifecycle gate, but this cover is reported CORRECT while the
-                // full-screen one is stale. If both defer to ON_START and only one ends up right,
-                // the deferral is not the discriminator.
-            ) {
+            track.cover.loadWithThumb(collapsedTrackCover, thumb) {
                 val image = it
                     ?: ResourcesCompat.getDrawable(resources, R.drawable.ic_music, context.theme)
                 setImageDrawable(image)

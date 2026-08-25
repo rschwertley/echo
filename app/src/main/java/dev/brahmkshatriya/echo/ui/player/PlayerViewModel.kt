@@ -72,6 +72,26 @@ class PlayerViewModel(
     val browser = MutableStateFlow<MediaController?>(null)
 
     var queue: List<MediaItem> = emptyList()
+
+    // ⚠️ THIS FLOW DOES NOT DELIVER WHILE THE SCREEN IS OFF. It is a replay-0, zero-buffer
+    // MutableSharedFlow, and its only collector (PlayerFragment's `observe(queueFlow)`) goes through
+    // ContextUtils.observe -> flowWithLifecycle(lifecycle), whose default minActiveState is STARTED. A
+    // stopped Activity therefore has NO subscriber, and MutableSharedFlow with no subscriber drops the
+    // emission outright — there is no buffering and no replay at ON_START, so the update is gone for
+    // good, not deferred. Measured 2026-08-24 across eight consecutive screen-off auto-advances:
+    // subscriptionCount was 0 at every emit and the collector never ran.
+    //
+    // `queue` itself IS kept current while stopped (the collector that writes it lives in
+    // viewModelScope and is not lifecycle-gated), so the damage is confined to whatever the SIGNAL
+    // drives, not the data.
+    //
+    // Album art survives this only by accident of ordering: PlayerFragment's `current` collector is a
+    // raw lifecycleScope.launch (ungated, runs while stopped) and its submit() reads the queue and the
+    // index together, committing a consistent list+index pair. It does not need the queueFlow signal.
+    // Anything ELSE added as a queueFlow observer gets no such guarantee and will silently miss every
+    // queue change that happens with the screen off. If you need reliable delivery, do not add an
+    // observer here — either give the flow replay/buffer, or drive the new work from the `current`
+    // collector alongside submit().
     val queueFlow = MutableSharedFlow<Unit>()
 
     init {
@@ -86,17 +106,6 @@ class PlayerViewModel(
                 val showingPlaceholder = playerState.current.value?.isPlaceholder == true && items.isEmpty()
                 if (items.isNotEmpty() || !showingPlaceholder) {
                     queue = items
-                    // TEMPORARY (GladixArt) — the decisive line. queueFlow is MutableSharedFlow<Unit>()
-                    // with replay=0 and no buffer, and its only collector (PlayerFragment's
-                    // observe(queueFlow)) is flowWithLifecycle(STARTED), so it is CANCELLED while the
-                    // Activity is stopped. With subs=0 this emit is dropped permanently — there is no
-                    // replay at ON_START — and the reconciling submit("queue") never runs. An emit line
-                    // with subs=0 and no following `submit cb src=queue` is that drop, observed.
-                    Log.d(
-                        "GladixArt",
-                        "queueFlow emit size=${items.size} identity=${System.identityHashCode(items)} " +
-                            "subs=${queueFlow.subscriptionCount.value}"
-                    )
                     queueFlow.emit(Unit)
                 }
             }
