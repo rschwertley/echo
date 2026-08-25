@@ -173,28 +173,57 @@ class PlayerTrackAdapter(
             }
         }
 
+        // Set ONLY by a real Coil delivery (loadWithThumb's onDelivered). This is the retry guard, so it
+        // must never be satisfied by a cached thumbnail or a placeholder: it previously took its value
+        // from the callback that also fires for the synchronous pre-set, so a disk-cached thumb marked
+        // the cover "loaded" and disarmed retryLoad for the life of the ViewHolder — defeating the one
+        // path written to recover a load that never arrived.
         private var coverDrawable: Drawable? = null
+
+        // What is currently PAINTED on the ImageView, thumbnail included. Split out from coverDrawable
+        // so the dynamic-colour listener keeps seeing every paint (its previous behaviour) while the
+        // retry guard above sees only real deliveries. Feeding it coverDrawable instead would blank the
+        // player colours on every thumb-only paint.
+        private var paintedDrawable: Drawable? = null
+
+        // Set ONLY on a terminal outcome, for the same reason. Assigning it before the async load meant a
+        // load that never delivered still marked the track bound, so no later rebind of the same track
+        // could re-enter the cover block and re-run the synchronous pre-set.
         private var lastBoundMediaId: String? = null
+
+        // The mediaId this holder is currently trying to show. A late delivery from a superseded load
+        // must not write bookkeeping for a track the holder has already moved off, or the next bind for
+        // the real track would see a mismatch and re-issue. Compared by value inside onDelivered.
+        private var pendingMediaId: String? = null
+
         fun applyDrawable() {
             val index = bindingAdapterPosition.takeIf { it != RecyclerView.NO_POSITION } ?: return
             val item = getItem(index) ?: return
             val curr = current.value?.mediaItem
             if (curr != item) return
-            val drawable = coverDrawable
+            val drawable = paintedDrawable
             currentDrawableListener?.invoke(drawable)
         }
 
         fun retryLoad(item: MediaItem?) {
             if (coverDrawable != null) return
             val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
+            val boundId = item?.mediaId
+            pendingMediaId = boundId
             item?.track?.cover.loadWithThumb(
                 binding.playerTrackCover, old,
-                debugId = "retry:${item?.mediaId}"   // TEMPORARY (GladixArt)
+                debugId = "retry:${item?.mediaId}",   // TEMPORARY (GladixArt)
+                onDelivered = { drawable ->
+                    if (pendingMediaId == boundId) {
+                        coverDrawable = drawable
+                        lastBoundMediaId = boundId
+                    }
+                }
             ) {
                 val image = it
                     ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
                 setImageDrawable(image)
-                coverDrawable = it
+                paintedDrawable = it
                 applyDrawable()
             }
         }
@@ -215,17 +244,28 @@ class PlayerTrackAdapter(
                 collapsedTrackArtist.text = item?.track?.artists?.joinToString(", ") { it.name }
             }
             if (item?.mediaId != lastBoundMediaId) {
-                lastBoundMediaId = item?.mediaId
+                // lastBoundMediaId is deliberately NOT assigned here — see its declaration. Until a
+                // terminal outcome arrives this holder stays rebindable, so a rebind of the same track
+                // re-enters and re-runs the synchronous pre-set below, which repaints the ImageView from
+                // the disk cache with no delivery required.
+                val boundId = item?.mediaId
+                pendingMediaId = boundId
                 coverDrawable = null
                 val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
                 item?.track?.cover.loadWithThumb(
                     binding.playerTrackCover, old,
-                    debugId = "bind:${item?.mediaId}"   // TEMPORARY (GladixArt)
+                    debugId = "bind:${item?.mediaId}",   // TEMPORARY (GladixArt)
+                    onDelivered = { drawable ->
+                        if (pendingMediaId == boundId) {
+                            coverDrawable = drawable
+                            lastBoundMediaId = boundId
+                        }
+                    }
                 ) {
                     val image = it
                         ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
                     setImageDrawable(image)
-                    coverDrawable = it
+                    paintedDrawable = it
                     applyDrawable()
                 }
             }

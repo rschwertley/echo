@@ -108,6 +108,17 @@ object ImageUtils {
         // other call site in the app silent and behaviourally byte-identical. Remove with the rest of
         // the GladixArt instrumentation.
         debugId: String? = null,
+        // Invoked ONLY for a real terminal outcome from Coil (success or error), never for the
+        // synchronous thumbnail pre-set below. `onDrawable` cannot tell the two apart — it fires for
+        // both — which is exactly how a caller ends up recording "this load completed" on the strength
+        // of a cached thumbnail or a placeholder. A caller that keeps completion state (PlayerTrackAdapter
+        // gates its cover block on lastBoundMediaId and its retry on coverDrawable) must key that state
+        // off THIS callback. Null for every other call site, which keeps them byte-identical.
+        // Note a cancelled request invokes NEITHER: RealImageLoader.execute passes request.target on the
+        // success and error branches but not on the CancellationException branch, so a cancelled load
+        // leaves the view untouched and no bookkeeping is recorded — which is the correct outcome, since
+        // the caller's retry path must stay armed.
+        onDelivered: (T.(Drawable?) -> Unit)? = null,
         onDrawable: T.(Drawable?) -> Unit
     ) = tryWith(true) {
         tryWith(false) { onDrawable(view, thumbnail) }
@@ -115,6 +126,7 @@ object ImageUtils {
         fun setDrawable(image: Image?) {
             val drawable = image?.asDrawable(view.resources)
             tryWith(false) { onDrawable(view, drawable) }
+            tryWith(false) { onDelivered?.invoke(view, drawable) }
         }
         request.target({}, ::setDrawable, ::setDrawable)
         // TEMPORARY (GladixArt) — hypothesis C, the image layer. Read before interpreting the output:

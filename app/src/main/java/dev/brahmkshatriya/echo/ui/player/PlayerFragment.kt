@@ -580,7 +580,6 @@ class PlayerFragment : Fragment() {
                 it?.mediaItem ?: return@collectLatest
                 binding.applyCurrent(it.mediaItem)
                 loadCurrentBackground(it.mediaItem)
-                loadArtProbe(it.mediaItem)   // PHASE 1 A/B PROBE (temporary, GladixArt)
             }
         }
 
@@ -757,38 +756,6 @@ class PlayerFragment : Fragment() {
     // left it stale + downstream of the pager. Guarded by lastBlurredItemId so re-applying on every resume is
     // a no-op when the track is unchanged.
     private var lastBlurredItemId: String? = null
-    // PHASE 1 A/B PROBE (temporary, GladixArt). The full-screen cover's twin, driven the way every
-    // surface that has NEVER had this bug is driven: from playerState identity, with no list and no
-    // index. Same shape as loadCurrentBackground below.
-    //
-    // The thumb seed is load-bearing and is here from the start, not bolted on later. Jun 11 decoupled
-    // the mini-player cover and it STILL flashed; Jun 21 fixed that with `view.drawable ?: cached`
-    // (PlayerFragment:888) plus loadWithThumb's placeholder suppression, because Coil's global
-    // crossfade(true) otherwise gives two visible transitions per load. Decoupling alone was not
-    // sufficient then and will not be sufficient here.
-    //
-    // Seeding from `drawable` is correct for THIS view and wrong for the ViewHolder: this view is a
-    // single surface that always shows the current track, so its existing drawable is the PREVIOUS
-    // current — an intentional crossfade source. A recycled ViewHolder's drawable is an unrelated
-    // track, so the same seed there would paint the wrong art. That asymmetry is why the seed belongs
-    // on the hoisted cover and not in PlayerTrackAdapter.bind().
-    private fun loadArtProbe(item: MediaItem?) {
-        val probe = binding?.artProbe ?: return
-        val context = context ?: return
-        if (item == null) {
-            probe.setImageDrawable(null)
-            return
-        }
-        val thumb = probe.drawable ?: item.unloadedCover?.getCachedDrawable(context)
-        Log.d(
-            "GladixArt",
-            "probe load id=${item.mediaId} seeded=${thumb != null} iv=${System.identityHashCode(probe)}"
-        )
-        item.track.cover.loadWithThumb(probe, thumb, debugId = "probe:${item.mediaId}") {
-            setImageDrawable(it ?: thumb)
-        }
-    }
-
     private fun loadCurrentBackground(item: MediaItem?) {
         val bg = binding?.bgImage ?: return
         val context = context ?: return

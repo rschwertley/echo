@@ -65,24 +65,6 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- (a)/(b) DISCRIMINATOR PROBE (temporary, GladixArt). visibility=gone; the Coil request
-             still runs — see layout/fragment_player.xml for why GONE does not stall it.
-             Landscape twin of the portrait probe — present in
-             BOTH configurations so the generated binding field is non-null and the Fragment needs no
-             null-dance. Same rules: no click listener, no background selector, gestures fall through
-             to the ViewPager beneath. See layout/fragment_player.xml for the full note. -->
-        <ImageView
-            android:id="@+id/art_probe"
-            android:visibility="gone"
-            android:layout_width="96dp"
-            android:layout_height="96dp"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="12dp"
-            android:layout_marginEnd="12dp"
-            android:clickable="false"
-            android:focusable="false"
-            android:importantForAccessibility="no"
-            android:translationZ="8dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
