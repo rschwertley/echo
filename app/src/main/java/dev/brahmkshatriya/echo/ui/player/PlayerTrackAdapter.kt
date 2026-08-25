@@ -88,9 +88,39 @@ class PlayerTrackAdapter(
             currentCoverHeight = cover.height.takeIf { it > 0 } ?: currentCoverHeight
             targetScale = size.toFloat() / currentCoverHeight
 
-            val (collapsedY, offset) = if (playerSheetState.value == STATE_EXPANDED)
-                systemInsets.value.top to if (isLandscape) 0f else moreSheetOffset.value
-            else -collapsedPadding to 1 - max(0f, playerSheetOffset.value)
+            // The `playerSheetOffset >= 1f` conjunct is LOAD-BEARING, not defensive. playerSheetState is a
+            // SETTLED-STATES-ONLY signal: UiViewModel gates its write with `if (!isFinalState(newState))
+            // return`, so DRAGGING/SETTLING never reach it and the value still reads EXPANDED for the whole
+            // of a collapse drag. Keying the branch on state alone therefore sent every frame of that drag
+            // into the EXPANDED arm, where `offset` comes from moreSheetOffset (0, Up Next closed) and
+            // playerSheetOffset is not read at all — a constant. updateCollapsed() still ran per frame
+            // (observe(playerSheetOffset) fires) but recomputed the SAME transform, so the cover did not
+            // morph while BottomSheetBehavior kept translating the sheet: the whole page slid instead.
+            // Expanding was unaffected because that drag starts from COLLAPSED and was already on the else
+            // arm. That directional break arrived with the state-gate in 1bff9b02 (2026-07-16); the geometry
+            // below is unchanged since 4be12e0d (2026-07-01) and was never at fault.
+            //
+            // Reading playerSheetOffset makes the test "is the player sheet ACTUALLY fully expanded" rather
+            // than "did it last settle there". Exactness is guaranteed, not hoped for: onStateChanged forces
+            // onSlide(view, if (EXPANDED) 1f else 0f) on every settle, so the resting value is exactly 1f.
+            // `>=` covers fling overshoot; max(0f, …) below still covers the negative HIDDEN direction.
+            //
+            // Up Next is NOT affected. It is a separate BottomSheetBehavior (setupPlayerMoreBehavior) whose
+            // callback writes moreSheetOffset alone. With it open the player rests expanded (offset exactly
+            // 1f, state EXPANDED), so this arm stays selected; dragging its top bar down to dismiss moves
+            // moreSheetOffset only, and that gesture tracks frame by frame exactly as before. There is no
+            // reachable case of the player sheet being dragged below expanded while Up Next is open, which
+            // is why this needs no max(moreOffset, 1 - slide) blend.
+            //
+            // Deliberately NOT fixed by un-gating playerSheetState: republishing DRAGGING/SETTLING would
+            // reach every other observer of that flow — PlayerFragment's bgImage.pause(), the
+            // emit(playerBgVisible, false) on COLLAPSED and the applyPlayer() re-run are all unguarded —
+            // and would undo 1bff9b02's setState crash fix. One consumer was wrong; one consumer is fixed.
+            val playerFullyExpanded = playerSheetOffset.value >= 1f
+            val (collapsedY, offset) =
+                if (playerSheetState.value == STATE_EXPANDED && playerFullyExpanded)
+                    systemInsets.value.top to if (isLandscape) 0f else moreSheetOffset.value
+                else -collapsedPadding to 1 - max(0f, playerSheetOffset.value)
 
             val inv = 1 - offset
             binding.playerCollapsed.root.run {

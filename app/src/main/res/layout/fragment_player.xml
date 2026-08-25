@@ -69,7 +69,17 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- PHASE 1 A/B PROBE (temporary, GladixArt). A fragment-level cover driven by playerState
+        <!-- (a)/(b) DISCRIMINATOR PROBE (temporary, GladixArt). visibility=gone, but loadArtProbe()
+             and its Coil request STILL RUN: the request's target is a lambda, not a ViewTarget, so
+             RequestService.resolveSizeResolver() returns SizeResolver.ORIGINAL rather than
+             ViewSizeResolver(view) — there is no measured-size await to stall on at 0x0 — and the
+             non-ViewTarget path also skips ViewTargetRequestDelegate.assertActive()'s
+             isAttachedToWindow check. ImageUtils.enqueue uses the view only for .context/.resources.
+             So GONE removes the pixels and keeps the load. Bug stays away => load/cache (b); bug
+             returns => invalidate/draw (a). Do NOT "clean this up" by deleting the view and keeping
+             the call: the view is what makes the request shaped like the real one.
+             Original Phase 1 note follows.
+             A fragment-level cover driven by playerState
              IDENTITY, never by a ViewPager index. Deliberately small and corner-anchored so it sits
              BESIDE the real page cover instead of replacing it — the whole point of this phase is to
              compare the two on a screen-off auto-advance with nothing removed.
@@ -79,6 +89,7 @@
              a click listener — that is what would eat the page gestures. -->
         <ImageView
             android:id="@+id/art_probe"
+            android:visibility="gone"
             android:layout_width="96dp"
             android:layout_height="96dp"
             android:layout_gravity="top|end"
