@@ -88,7 +88,7 @@
                 app:indicatorColor="?attr/colorTertiary"
                 app:indicatorTrackGapSize="0dp"
                 app:trackColor="?attr/colorOnSurface"
-                app:trackThickness="2dp" />
+                app:trackThickness="4dp" />
 
             <!-- Wavy POSITION track. Ordered between bufferBar and seekBar deliberately: later children
                  draw on top, so the wave covers the buffer's inactive track but the Slider's thumb still
@@ -96,12 +96,17 @@
                  The Slider keeps ownership of touch, value and seeking; this draws the active line only,
                  which is why seekBar's trackColorActive is transparent (and why PlayerFragment's
                  playerColors block tints THIS view rather than the Slider's track).
-                 layout_height is pinned rather than wrap_content: the wave is drawn inside the drawable's
-                 bounds and it is not verifiable from the Material artifact whether the preferred height
-                 grows to accommodate waveAmplitude. 12dp clears 2dp track + 2x1.5dp amplitude with slack,
-                 and stays an order of magnitude under the Slider's ~78dp (paddingVertical 38dp x2), so the
-                 FrameLayout still measures to the Slider and uiViewModel.playerControlsHeight — which the
-                 collapse morph reads via PlayerFragment's doOnLayout — does not move.
+                 layout_height is pinned rather than wrap_content. LinearDrawingDelegate.getPreferredHeight()
+                 is `trackThickness + waveAmplitude * 2` (read from the 1.14.0 artifact), so wrap_content
+                 would give 4 + 6 = 10dp here — the wave does NOT clip at wrap_content. The pin is 12dp so
+                 that a future amplitude change cannot silently start clipping, and it stays far under the
+                 Slider's measured height, so the FrameLayout still measures to the Slider and
+                 uiViewModel.playerControlsHeight — which the collapse morph reads via PlayerFragment's
+                 doOnLayout — does not move.
+                 The Slider's thumb is a 4dp x 20dp BAR, not a circle: 4dp is Material's own
+                 m3_comp_slider_active_handle_width. Only thumbWidth was reduced; thumbHeight stays 20dp
+                 deliberately, because BaseSlider.onMeasure sizes the widget to `widgetThickness` and
+                 thumbHeight feeds that, so raising it would move playerControlsHeight and the morph with it.
                  importantForAccessibility=no: this duplicates the value the Slider already exposes through
                  contentDescription, and TalkBack should not announce a second progress bar for it. -->
             <com.google.android.material.progressindicator.LinearProgressIndicator
@@ -113,10 +118,15 @@
                 android:layout_marginHorizontal="12dp"
                 android:importantForAccessibility="no"
                 app:indicatorColor="?attr/colorTertiary"
-                app:waveAmplitude="1.5dp"
-                app:wavelength="32dp"
-                app:trackThickness="2dp" />
+                app:waveAmplitude="3dp"
+                app:wavelength="40dp"
+                app:trackThickness="4dp" />
 
+            <!-- Thumb is a 4dp x 20dp BAR (Material's own default handle width), not a circle. TV
+                 deliberately keeps a 24dp circle — see the note at fragment_player_tv.xml's tv_seek_bar
+                 for why, and do not unify the two. thumbHeight stays 20dp here on purpose: it feeds
+                 widgetThickness in BaseSlider.onMeasure, which sets this Slider's measured height, which
+                 propagates to uiViewModel.playerControlsHeight and the collapse morph. -->
             <com.google.android.material.slider.Slider
                 android:id="@+id/seekBar"
                 android:layout_width="match_parent"
@@ -130,10 +140,10 @@
                 app:minTouchTargetSize="90dp"
                 app:thumbColor="?attr/colorTertiary"
                 app:thumbHeight="20dp"
-                app:thumbWidth="20dp"
+                app:thumbWidth="4dp"
                 app:trackColorActive="@android:color/transparent"
                 app:trackColorInactive="@android:color/transparent"
-                app:trackHeight="2dp"
+                app:trackHeight="4dp"
                 app:trackStopIndicatorSize="0dp" />
         </FrameLayout>
 

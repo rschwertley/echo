@@ -148,18 +148,30 @@
          the widgets, because the right amplitude is a ratio against trackThickness and the two tracks are
          different thicknesses (phone 2dp, TV 4dp; Material's own 3dp default is tuned for its 4dp track).
 
-         waveSpeed=0dp is LOAD-BEARING, not a default being restated. A non-zero waveSpeed runs
-         DeterminateDrawable's phaseAnimator continuously, which invalidates the drawable every frame for
-         as long as the bar is visible — a 60Hz+ draw loop on a screen that currently has none (progress is
-         polled on a 500ms Handler in PlayerUiListener, which is not a frame loop). The wave here is a
-         static shape by design. Do not remove this to "animate it" without accounting for that cost.
+         waveSpeed matches wavelength: Material's convention is one wavelength per second.
+
+         MOTION IS GATED AT RUNTIME, and how it is gated is not obvious — read this before "fixing" it.
+         DeterminateDrawable starts phaseAnimator ONCE in its constructor with setRepeatCount(-1), and
+         nothing ever cancels it. That looks alarming and isn't: the animator's per-frame body is
+             if (spec.hasWavyEffect(true) && spec.waveSpeed != 0 && isVisible()) invalidateSelf();
+         so it is triple-gated and costs three boolean tests when any gate fails. The expensive part of a
+         frame is draw and composite, and a gated tick reaches neither.
+         Consequences the fragments rely on:
+           - setWaveSpeed(0) stops every invalidation WITHOUT cancelling the animator. Do not try to
+             cancel it; there is no API, and cancelling is not what makes it cheap.
+           - setWaveAmplitude(0) trips the hasWavyEffect gate, so flattening the wave on pause and
+             stopping the loop are the SAME action, not two.
+           - Backgrounding is handled by the library: BaseProgressIndicator.onDetachedFromWindow calls
+             getCurrentDrawable().hideNow(), and onWindowVisibilityChanged drives the drawable's visible
+             state, so isVisible() goes false on its own. The fragments still gate it explicitly so all
+             three stop conditions sit together rather than one being implicit in library behaviour.
 
          trackColor is transparent because the buffer indicator behind this one already draws the
          full-width inactive track; a second one would double the alpha. trackStopIndicatorSize is zeroed
          because the Material3 parent sets a non-zero stop dot that would paint at the far right of the
          track. indicatorTrackGapSize matches the buffer indicators, which zero it explicitly. -->
     <style name="EchoLinearProgressIndicator.Wavy">
-        <item name="waveSpeed">0dp</item>
+        <item name="waveSpeed">40dp</item>
         <item name="trackColor">@android:color/transparent</item>
         <item name="indicatorTrackGapSize">0dp</item>
         <item name="trackStopIndicatorSize">0dp</item>

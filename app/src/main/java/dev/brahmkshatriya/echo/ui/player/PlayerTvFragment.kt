@@ -101,9 +101,44 @@ class PlayerTvFragment : Fragment() {
         backCallback.isEnabled = uiViewModel.playerSheetState.value == STATE_EXPANDED
         viewLifecycleOwner.observe(uiViewModel.playerSheetState) { state ->
             backCallback.isEnabled = state == STATE_EXPANDED
+            updateWaveMotion()
             // Landing is driven by the physical settle in UiViewModel.onStateChanged plus the single
             // MainActivity window-focus arbiter — the old flow-driven doOnLayout here raced the unlock.
         }
+    }
+
+    // Wave motion — TV twin of PlayerFragment.updateWaveMotion(); the gating note lives in styles.xml
+    // (EchoLinearProgressIndicator.Wavy) and applies verbatim here. Two TV-specific differences:
+    //   - TV rests at STATE_HIDDEN, not STATE_COLLAPSED (it has a separate mini bar), so the on-screen
+    //     test is "== STATE_EXPANDED" rather than "!= STATE_COLLAPSED".
+    //   - PlayerTvFragment had no onPause/onResume at all, so unlike the phone there was no Ken Burns
+    //     discipline to mirror; the pair below exists solely for this.
+    private var waveSpeedPx = -1
+    private var waveAmplitudePx = -1
+    private var waveResumed = false
+
+    private fun updateWaveMotion() {
+        val wave = binding?.tvSeekWaveBar ?: return
+        if (waveSpeedPx < 0) {
+            waveSpeedPx = wave.waveSpeed
+            waveAmplitudePx = wave.waveAmplitude
+        }
+        val playing = viewModel.playerState.current.value?.isPlaying == true
+        val expanded = uiViewModel.playerSheetState.value == STATE_EXPANDED
+        wave.waveAmplitude = if (playing) waveAmplitudePx else 0
+        wave.waveSpeed = if (playing && expanded && waveResumed) waveSpeedPx else 0
+    }
+
+    override fun onPause() {
+        super.onPause()
+        waveResumed = false
+        updateWaveMotion()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        waveResumed = true
+        updateWaveMotion()
     }
 
     private val likeListener = CheckBoxListener { viewModel.likeCurrent(it) }
@@ -114,6 +149,8 @@ class PlayerTvFragment : Fragment() {
 
         // Track metadata
         observe(viewModel.playerState.current) { current ->
+            // Before the null early-return below: an emptied queue must flatten the wave too.
+            updateWaveMotion()   // Current carries isPlaying, so this fires on every play/pause
             if (current == null) {
                 uiViewModel.changePlayerState(STATE_HIDDEN)
                 return@observe

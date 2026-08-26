@@ -159,6 +159,15 @@
                     app:wavelength="40dp"
                     app:trackThickness="4dp" />
 
+                <!-- DELIBERATE DIVERGENCE from the phone, which uses a 4dp-wide BAR thumb. TV keeps the
+                     24dp CIRCLE for three reasons: (1) the thumb doubles as the focus indicator and sits
+                     inside a 28dp-radius colorPrimary halo (tv_slider_focus_selector) — a circle in a
+                     circle reads as one focus target, a 4dp line in a 56dp disc does not; (2) the halo is
+                     already at its geometric limit (28dp radius vs the Slider's 26dp half-height, with
+                     minTouchTargetSize=56dp making the room), and thumbHeight feeds widgetThickness in
+                     BaseSlider.onMeasure, so changing it risks clipping the halo; (3) the bar shape
+                     communicates a precise grabbable position, and TV never drags — it seeks in +/-10s
+                     D-pad steps. Do not "unify" these two thumbs. -->
                 <com.google.android.material.slider.Slider
                     android:id="@+id/tv_seek_bar"
                     android:layout_width="match_parent"

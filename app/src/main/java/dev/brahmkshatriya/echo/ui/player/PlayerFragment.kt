@@ -139,13 +139,47 @@ class PlayerFragment : Fragment() {
         configureBackgroundPlayerView()
     }
 
+    // Wave motion follows the SAME discipline as the Ken Burns background below: a lifecycle pair plus the
+    // playerSheetState observer, with a third condition (isPlaying) that Ken Burns does not have.
+    // The "on" values are captured from the inflated view rather than duplicated as constants here, so the
+    // style stays the single source of truth for amplitude and speed.
+    private var waveSpeedPx = -1
+    private var waveAmplitudePx = -1
+    // NOT Fragment.isResumed: that reports mState and its value during onPause is an ordering detail
+    // of FragmentStateManager. This is our own flag, set explicitly either side.
+    private var waveResumed = false
+
+    // Read the gating note in styles.xml (EchoLinearProgressIndicator.Wavy) before changing this.
+    // Short version: the phase animator is never cancelled and does not need to be. setWaveSpeed(0)
+    // stops every invalidation, and setWaveAmplitude(0) trips the hasWavyEffect gate so flattening on
+    // pause IS the stop. Do not "fix" this by reaching for the animator.
+    private fun updateWaveMotion() {
+        val wave = binding?.playerControls?.seekWaveBar ?: return
+        if (waveSpeedPx < 0) {
+            waveSpeedPx = wave.waveSpeed
+            waveAmplitudePx = wave.waveAmplitude
+        }
+        val playing = viewModel.playerState.current.value?.isPlaying == true
+        val expanded = uiViewModel.playerSheetState.value == STATE_EXPANDED
+        // Amplitude tracks PLAYING only: a paused player shows a flat line, which is what the system
+        // media notification does. Speed additionally requires the wave to be on screen and the fragment
+        // resumed — collapsed is the one state the library does not handle for us, because the sheet's
+        // views stay attached and window-visible when it slides down.
+        wave.waveAmplitude = if (playing) waveAmplitudePx else 0
+        wave.waveSpeed = if (playing && expanded && waveResumed) waveSpeedPx else 0
+    }
+
     override fun onPause() {
         super.onPause()
+        waveResumed = false
+        updateWaveMotion()
         binding?.bgImage?.pause()
     }
 
     override fun onResume() {
         super.onResume()
+        waveResumed = true
+        updateWaveMotion()
         if (uiViewModel.playerSheetState.value == STATE_EXPANDED)
             binding?.bgImage?.resume()
     }
@@ -327,6 +361,7 @@ class PlayerFragment : Fragment() {
                 STATE_EXPANDED -> binding.bgImage.resume()
                 else -> binding.bgImage.pause()
             }
+            updateWaveMotion()
             // Canvas/video is fullscreen-only — re-run applyPlayer() for the new sheet state: on collapse it
             // DETACHES the video surface (playerView.player = null) so the Canvas/video stops rendering in the
             // mini-bar (surface-only — audio keeps playing via the service player); on expand it re-attaches
@@ -510,6 +545,7 @@ class PlayerFragment : Fragment() {
                     else if (playerSheetState.value == STATE_HIDDEN) changePlayerState(STATE_COLLAPSED)
                 }
                 submit()
+                updateWaveMotion()   // Current carries isPlaying, so this fires on every play/pause
                 it?.mediaItem ?: return@collectLatest
                 binding.applyCurrent(it.mediaItem)
                 loadCurrentBackground(it.mediaItem)
