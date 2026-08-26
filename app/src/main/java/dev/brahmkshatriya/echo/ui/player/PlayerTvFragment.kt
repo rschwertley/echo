@@ -154,6 +154,7 @@ class PlayerTvFragment : Fragment() {
         observe(viewModel.progress) { (curr, buff) ->
             binding.tvBufferBar.progress = buff.toInt()
             if (!binding.tvSeekBar.isPressed) {
+                binding.tvSeekWaveBar.progress = curr.toInt()
                 binding.tvSeekBar.value =
                     max(0f, min(curr.toFloat(), binding.tvSeekBar.valueTo))
                 binding.tvCurrentTime.text = curr.toTimeString()
@@ -167,6 +168,7 @@ class PlayerTvFragment : Fragment() {
             total ?: current?.track?.duration ?: 0L
         }) { duration ->
             binding.tvBufferBar.max = duration.toInt()
+            binding.tvSeekWaveBar.max = duration.toInt()
             binding.tvSeekBar.apply {
                 value = max(0f, min(value, duration.toFloat()))
                 valueTo = 1f + duration
@@ -176,7 +178,13 @@ class PlayerTvFragment : Fragment() {
 
         // Seek bar interactions
         binding.tvSeekBar.addOnChangeListener { _, value, fromUser ->
-            if (fromUser) binding.tvCurrentTime.text = value.toLong().toTimeString()
+            if (fromUser) {
+                binding.tvCurrentTime.text = value.toLong().toTimeString()
+                // Mirrors PlayerFragment: the wave is a separate view, the progress observer is gated on
+                // !isPressed, so without this the wave lags the thumb for the whole drag. On TV the drag
+                // also arrives from DPAD_LEFT/RIGHT via seekToAdd, which comes back through the observer.
+                binding.tvSeekWaveBar.progress = value.toInt()
+            }
         }
         binding.tvSeekBar.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) = Unit
@@ -349,7 +357,10 @@ class PlayerTvFragment : Fragment() {
 
             b.root.setBackgroundColor(if (dynamic) colors.accent else colors.background)
             b.tvBgGradient.imageTintList = ColorStateList.valueOf(colors.background)
-            b.tvSeekBar.trackActiveTintList = ColorStateList.valueOf(colors.accent)
+            // Accent goes on the WAVE, not the Slider's active track — see PlayerFragment's twin of this
+            // line. A runtime tint here would override the transparent trackColorActive in XML and draw a
+            // straight line back under the wave.
+            b.tvSeekWaveBar.setIndicatorColor(colors.accent)
             b.tvSeekBar.thumbTintList = ColorStateList.valueOf(colors.accent)
             b.tvPlayingIndicator.setIndicatorColor(colors.accent)
             b.tvBufferBar.setIndicatorColor(colors.accent)

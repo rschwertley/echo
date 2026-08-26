@@ -90,6 +90,33 @@
                 app:trackColor="?attr/colorOnSurface"
                 app:trackThickness="2dp" />
 
+            <!-- Wavy POSITION track. Ordered between bufferBar and seekBar deliberately: later children
+                 draw on top, so the wave covers the buffer's inactive track but the Slider's thumb still
+                 draws over the wave. Moving this after seekBar would paint the wave over the thumb.
+                 The Slider keeps ownership of touch, value and seeking; this draws the active line only,
+                 which is why seekBar's trackColorActive is transparent (and why PlayerFragment's
+                 playerColors block tints THIS view rather than the Slider's track).
+                 layout_height is pinned rather than wrap_content: the wave is drawn inside the drawable's
+                 bounds and it is not verifiable from the Material artifact whether the preferred height
+                 grows to accommodate waveAmplitude. 12dp clears 2dp track + 2x1.5dp amplitude with slack,
+                 and stays an order of magnitude under the Slider's ~78dp (paddingVertical 38dp x2), so the
+                 FrameLayout still measures to the Slider and uiViewModel.playerControlsHeight — which the
+                 collapse morph reads via PlayerFragment's doOnLayout — does not move.
+                 importantForAccessibility=no: this duplicates the value the Slider already exposes through
+                 contentDescription, and TalkBack should not announce a second progress bar for it. -->
+            <com.google.android.material.progressindicator.LinearProgressIndicator
+                android:id="@+id/seekWaveBar"
+                style="@style/EchoLinearProgressIndicator.Wavy"
+                android:layout_width="match_parent"
+                android:layout_height="12dp"
+                android:layout_gravity="center"
+                android:layout_marginHorizontal="12dp"
+                android:importantForAccessibility="no"
+                app:indicatorColor="?attr/colorTertiary"
+                app:waveAmplitude="1.5dp"
+                app:wavelength="32dp"
+                app:trackThickness="2dp" />
+
             <com.google.android.material.slider.Slider
                 android:id="@+id/seekBar"
                 android:layout_width="match_parent"
@@ -104,7 +131,7 @@
                 app:thumbColor="?attr/colorTertiary"
                 app:thumbHeight="20dp"
                 app:thumbWidth="20dp"
-                app:trackColorActive="?attr/colorTertiary"
+                app:trackColorActive="@android:color/transparent"
                 app:trackColorInactive="@android:color/transparent"
                 app:trackHeight="2dp"
                 app:trackStopIndicatorSize="0dp" />

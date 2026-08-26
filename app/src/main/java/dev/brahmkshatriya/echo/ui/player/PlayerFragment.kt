@@ -555,6 +555,7 @@ class PlayerFragment : Fragment() {
             binding.playerControls.run {
                 if (!seekBar.isPressed) {
                     bufferBar.progress = buff.toInt()
+                    seekWaveBar.progress = curr.toInt()
                     seekBar.value = max(0f, min(curr.toFloat(), seekBar.valueTo))
                     trackCurrentTime.text = curr.toTimeString()
                 }
@@ -577,6 +578,7 @@ class PlayerFragment : Fragment() {
             }
             binding.playerControls.run {
                 bufferBar.max = duration.toInt()
+                seekWaveBar.max = duration.toInt()
                 seekBar.apply {
                     value = max(0f, min(value, duration.toFloat()))
                     valueTo = 1f + duration
@@ -617,7 +619,15 @@ class PlayerFragment : Fragment() {
         binding.playerControls.run {
             seekBar.apply {
                 addOnChangeListener { _, value, fromUser ->
-                    if (fromUser) trackCurrentTime.text = value.toLong().toTimeString()
+                    if (fromUser) {
+                        trackCurrentTime.text = value.toLong().toTimeString()
+                        // The wave is a separate view from the Slider, so it is NOT carried along by the
+                        // drag. The progress observer above is gated on !seekBar.isPressed, so during a
+                        // gesture nothing else updates it and the wave would visibly lag the thumb for the
+                        // whole drag. Drive it from here so the two stay together; fromUser keeps this off
+                        // the programmatic path, which the observer already owns.
+                        seekWaveBar.progress = value.toInt()
+                    }
                 }
                 addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
                     override fun onStartTrackingTouch(slider: Slider) = Unit
@@ -782,7 +792,10 @@ class PlayerFragment : Fragment() {
             }
 
             binding.playerControls.run {
-                seekBar.trackActiveTintList = ColorStateList.valueOf(colors.accent)
+                // The accent goes on the WAVE, not the Slider's active track. seekBar.trackColorActive is
+                // transparent in XML so the wave is the only thing drawing the position line — but a
+                // runtime tint would override that XML and paint a straight line back under the wave.
+                seekWaveBar.setIndicatorColor(colors.accent)
                 seekBar.thumbTintList = ColorStateList.valueOf(colors.accent)
                 playingIndicator.setIndicatorColor(colors.accent)
                 bufferBar.setIndicatorColor(colors.accent)

@@ -134,6 +134,31 @@
                     app:trackColor="?attr/colorOnSurface"
                     app:trackThickness="4dp" />
 
+                <!-- Wavy POSITION track — TV twin of item_player_controls.xml's seekWaveBar; see the note
+                     there for the ordering, the pinned layout_height and the accessibility rationale.
+                     Amplitude/wavelength are Material's own defaults here because this track is 4dp, which
+                     is exactly the thickness they were derived against (the phone's 1.5dp is that same
+                     3dp:4dp ratio applied to its 2dp track).
+                     focusable=false is TV-specific: tv_seek_bar sits in the D-pad chain via nextFocusUp/
+                     nextFocusDown, and a focusable sibling inserted between it and tv_buffer_bar could
+                     break that traversal. LinearProgressIndicator is not clickable so it should not take
+                     focus anyway — this is explicit because it is the one surface where it would matter.
+                     Ordering also keeps the Slider's focus halo (haloRadius 28dp, colorPrimary when
+                     focused per tv_slider_focus_selector) drawing above the wave rather than under it. -->
+                <com.google.android.material.progressindicator.LinearProgressIndicator
+                    android:id="@+id/tv_seek_wave_bar"
+                    style="@style/EchoLinearProgressIndicator.Wavy"
+                    android:layout_width="match_parent"
+                    android:layout_height="20dp"
+                    android:layout_gravity="center_vertical"
+                    android:layout_marginHorizontal="12dp"
+                    android:focusable="false"
+                    android:importantForAccessibility="no"
+                    app:indicatorColor="?attr/colorTertiary"
+                    app:waveAmplitude="3dp"
+                    app:wavelength="40dp"
+                    app:trackThickness="4dp" />
+
                 <com.google.android.material.slider.Slider
                     android:id="@+id/tv_seek_bar"
                     android:layout_width="match_parent"
@@ -153,7 +178,7 @@
                     app:thumbColor="?attr/colorTertiary"
                     app:thumbHeight="24dp"
                     app:thumbWidth="24dp"
-                    app:trackColorActive="?attr/colorTertiary"
+                    app:trackColorActive="@android:color/transparent"
                     app:trackColorInactive="@android:color/transparent"
                     app:trackHeight="4dp"
                     app:trackStopIndicatorSize="0dp" />

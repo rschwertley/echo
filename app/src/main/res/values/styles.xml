@@ -138,6 +138,33 @@
         <item name="showAnimationBehavior">outward</item>
     </style>
 
+    <!-- Wavy position track for the EXPANDED players (phone + TV). Deliberately NOT
+         Widget.Material3Expressive.LinearProgressIndicator.Wavy: that style's parent chain resolves to
+         Widget.Material3.LinearProgressIndicator, the same parent as EchoLinearProgressIndicator above,
+         so applying it directly would silently drop showAnimationBehavior on whichever widgets used it.
+         Dot-notation parent here inherits it instead.
+
+         This carries only what BOTH surfaces share. waveAmplitude/wavelength are per-surface and live on
+         the widgets, because the right amplitude is a ratio against trackThickness and the two tracks are
+         different thicknesses (phone 2dp, TV 4dp; Material's own 3dp default is tuned for its 4dp track).
+
+         waveSpeed=0dp is LOAD-BEARING, not a default being restated. A non-zero waveSpeed runs
+         DeterminateDrawable's phaseAnimator continuously, which invalidates the drawable every frame for
+         as long as the bar is visible — a 60Hz+ draw loop on a screen that currently has none (progress is
+         polled on a 500ms Handler in PlayerUiListener, which is not a frame loop). The wave here is a
+         static shape by design. Do not remove this to "animate it" without accounting for that cost.
+
+         trackColor is transparent because the buffer indicator behind this one already draws the
+         full-width inactive track; a second one would double the alpha. trackStopIndicatorSize is zeroed
+         because the Material3 parent sets a non-zero stop dot that would paint at the far right of the
+         track. indicatorTrackGapSize matches the buffer indicators, which zero it explicitly. -->
+    <style name="EchoLinearProgressIndicator.Wavy">
+        <item name="waveSpeed">0dp</item>
+        <item name="trackColor">@android:color/transparent</item>
+        <item name="indicatorTrackGapSize">0dp</item>
+        <item name="trackStopIndicatorSize">0dp</item>
+    </style>
+
     <style name="TextInput" parent="Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
