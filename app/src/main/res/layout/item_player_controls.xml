@@ -113,17 +113,26 @@
                  playerColors block tints THIS view rather than the Slider's track).
                  layout_height is pinned rather than wrap_content. LinearDrawingDelegate.getPreferredHeight()
                  is `trackThickness + waveAmplitude * 2` (read from the 1.14.0 artifact), so the wave's real
-                 extent here is 4 + 12 = 16dp. THE PIN MUST BE RAISED WITH THE AMPLITUDE — at 20dp it clears
-                 16dp with slack, but an amplitude bump alone would start clipping the crests silently
+                 extent here is 4 + 20 = 24dp. THE PIN MUST BE RAISED WITH THE AMPLITUDE — at 28dp it clears
+                 24dp with slack, but an amplitude bump alone would start clipping the crests silently
                  (symptom: a trapezoidal, flat-topped wave that does not get taller when you raise
-                 waveAmplitude).
+                 waveAmplitude). Keep the slack at 4dp: adjustCanvas offsets the drawing DOWN by
+                 max(0, (boundsHeight - preferredHeight) / 2), so changing the gap moves the wave off the
+                 rail's centre line.
                  bufferBar above is deliberately THINNER than this (2dp vs 4dp): the wave and the rail never
                  coexist spatially — left of the thumb the wave replaces the rail, right of it only the rail
                  shows — so a thicker active over a thinner inactive reads as hierarchy, not as overhang.
                  Matching them made the played and unplayed halves carry equal visual weight.
-                 The Slider's thumb is a 4dp x 28dp BAR, not a circle: 4dp is Material's own
-                 m3_comp_slider_active_handle_width. 28dp clears the 16dp wave extent so the thumb stands
-                 above the crests rather than being swallowed by them — raise them together or not at all.
+                 The Slider's thumb is a 4dp x 44dp BAR, not a circle: both are Material's own
+                 m3_comp_slider_active_handle_width/_height.
+                 Material's 44:16 thumb-to-track ratio (2.75:1) would want ~66dp against this 24dp band, and
+                 that is DELIBERATELY not taken: thumbHeight feeds widgetThickness in BaseSlider.onMeasure,
+                 which sizes this Slider, which propagates to uiViewModel.playerControlsHeight and the
+                 collapse morph — 20->28->44 has already spent that budget twice and 66dp compounds it.
+                 44dp still clears the 24dp band by 10dp each side, so the thumb reads as standing over the
+                 crests rather than being swallowed, which is the property that actually matters.
+                 Width stays 4dp: thumbWidth is horizontal and does not feed widgetThickness, so it can be
+                 widened at any time at zero geometric risk; thumbHeight cannot.
                  thumbHeight feeds widgetThickness in BaseSlider.onMeasure, which sizes this Slider, which
                  propagates to uiViewModel.playerControlsHeight and the collapse morph. Whether it actually
                  moves depends on whether minTouchTargetSize=90dp already dominates. The test is free: drag
@@ -134,12 +143,12 @@
                 android:id="@+id/seekWaveBar"
                 style="@style/EchoLinearProgressIndicator.Wavy"
                 android:layout_width="match_parent"
-                android:layout_height="20dp"
+                android:layout_height="28dp"
                 android:layout_gravity="center"
                 android:layout_marginHorizontal="12dp"
                 android:importantForAccessibility="no"
                 app:indicatorColor="?attr/colorTertiary"
-                app:waveAmplitude="6dp"
+                app:waveAmplitude="10dp"
                 app:wavelength="40dp"
                 app:trackThickness="4dp" />
 
@@ -158,7 +167,7 @@
                 app:labelBehavior="gone"
                 app:minTouchTargetSize="90dp"
                 app:thumbColor="?attr/colorTertiary"
-                app:thumbHeight="28dp"
+                app:thumbHeight="44dp"
                 app:thumbWidth="4dp"
                 app:trackColorActive="@android:color/transparent"
                 app:trackColorInactive="@android:color/transparent"
