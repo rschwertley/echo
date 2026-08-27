@@ -159,7 +159,13 @@ class PlayerFragment : Fragment() {
             waveSpeedPx = wave.waveSpeed
             waveAmplitudePx = wave.waveAmplitude
         }
-        val playing = viewModel.playerState.current.value?.isPlaying == true
+        // playWhenReady, NOT Current.isPlaying. isPlaying is `player.isPlaying && state == READY`, and
+        // Media3's own isPlaying additionally requires playbackSuppressionReason == NONE — so it goes
+        // FALSE on buffering, on any seek that rebuffers, and on every track transition. Gating on it
+        // flattened the wave on all of those and left it flat until an unrelated event happened to run
+        // this again. playWhenReady tracks the player's INTENT and only changes on a real pause.
+        // MainActivity:109 picked the same signal for keepScreenOn, with the same reasoning.
+        val playing = viewModel.playWhenReady.value
         val expanded = uiViewModel.playerSheetState.value == STATE_EXPANDED
         // Amplitude tracks PLAYING only: a paused player shows a flat line, which is what the system
         // media notification does. Speed additionally requires the wave to be on screen and the fragment
@@ -545,12 +551,18 @@ class PlayerFragment : Fragment() {
                     else if (playerSheetState.value == STATE_HIDDEN) changePlayerState(STATE_COLLAPSED)
                 }
                 submit()
-                updateWaveMotion()   // Current carries isPlaying, so this fires on every play/pause
                 it?.mediaItem ?: return@collectLatest
                 binding.applyCurrent(it.mediaItem)
                 loadCurrentBackground(it.mediaItem)
             }
         }
+
+        // The wave's primary driver, and deliberately a GATED observer rather than a raw launch:
+        // ContextUtils.observe is flowWithLifecycle(STARTED), so it re-subscribes on every ON_START and a
+        // StateFlow replays its current value. That makes this LEVEL-driven — a missed edge self-corrects
+        // at the next wake instead of leaving the wave wrong indefinitely, which is what the previous
+        // edge-only wiring off the `current` collector did.
+        observe(viewModel.playWhenReady) { updateWaveMotion() }
 
         observe(viewModel.queueFlow) { submit() }
         observe(viewModel.browser) { controller ->

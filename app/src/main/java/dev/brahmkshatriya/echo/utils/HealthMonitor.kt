@@ -46,6 +46,19 @@ class HealthMonitor(private val app: App) {
         "resume index/id mismatch: index=$index size=$size expected=$expectedId actual=$actualId", null
     )
 
+    // Benign teardown race: a media3 datasource raised a bare IllegalStateException from one of its
+    // checkState() lifecycle assertions because the player/cache was torn down while a load was still
+    // closing. Suppressed at the player layer (PlayerEventListener.onPlayerError) so it never reaches the
+    // user; reported here rate-limited so the FREQUENCY is still visible. The original ISE is attached as
+    // the cause, so its retraceable close-cascade stack survives.
+    // The message is deliberately CONSTANT: report()'s dedupe signature is simpleName + message, so a
+    // varying message (track id, extension) would defeat the cooldown and turn this back into spam.
+    class DataSourceTeardownRaceException(cause: Throwable) : HealthException(
+        "IllegalStateException during media3 datasource close/teardown", null
+    ) {
+        init { initCause(cause) }
+    }
+
     private val prefs = app.context.getSharedPreferences("gladix_health_monitor", Context.MODE_PRIVATE)
     private val memoryTimestamps = ConcurrentHashMap<String, Long>()
 

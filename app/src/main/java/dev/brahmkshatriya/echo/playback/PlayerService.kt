@@ -675,6 +675,18 @@ class PlayerService : MediaLibraryService() {
         // recovery below), so this scopes to precisely that one finding with no collateral. The swallow is
         // deliberate best-effort recovery and the cause is now logged (Log.w) — rethrowing would change the
         // wipe-and-retry control flow. Not try-scoped only because it's a return-position try.
+        // ⚠️ MUST REMAIN A SINGLETON. Registered as singleOf(PlayerService::getCache) in DI.kt, and that
+        // registration is the ONLY thing making the recovery below safe.
+        // SimpleCache's constructor takes an exclusive lock on its directory. If getCache ever ran a second
+        // time while an instance was live, the first SimpleCache(...) would throw ("Another SimpleCache
+        // instance uses the folder"), the catch would deleteRecursively() the LIVE cache's files out from
+        // under the running instance, and the retry would hand back a second cache over a directory the
+        // first one still holds in-memory spans for. Those spans then point at deleted files, and the next
+        // commitFile()/read fails a checkState — which is exactly the bare IllegalStateException that
+        // PlayerEventListener's isDataSourceTeardownRace guard exists to absorb. It would be absorbed
+        // silently, so this would not announce itself.
+        // If you ever change this to a factory, scope it per-directory, or add a second caller, the
+        // wipe-and-retry must move behind a check that no live instance holds the lock.
         @Suppress("SwallowedException")
         @OptIn(UnstableApi::class)
         fun getCache(

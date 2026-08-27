@@ -12,6 +12,12 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.datasource.StatsDataSource
+import androidx.media3.datasource.TeeDataSource
+import androidx.media3.datasource.cache.CacheDataSink
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.ExoTimeoutException
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import dev.brahmkshatriya.echo.R
@@ -467,6 +473,23 @@ class PlayerEventListener(
     }
 
     companion object {
+        // RUNTIME class names of the media3 datasource close() cascade, resolved from the classes
+        // themselves so each string carries whatever R8 renamed (or merged) it to in this build. Compared
+        // against StackTraceElement.className, which is also a runtime name — see the long note at the
+        // isDataSourceTeardownRace check for why literal source strings cannot work here.
+        // The set spans the whole cascade because inlining moves the throwing frame: the 1052 report had
+        // SimpleCache.commitFile inlined into CacheDataSink, so a SimpleCache-only match found nothing.
+        // DataSourceUtil is deliberately EXCLUDED: R8 merged it into a class that also hosts Ac4Util,
+        // HctSolver and SntpClient, so matching its runtime name could swallow unrelated ISEs.
+        private val dataSourceRuntimeClassNames: Set<String> = setOf(
+            CacheDataSource::class.java.name,
+            CacheDataSink::class.java.name,
+            TeeDataSource::class.java.name,
+            ResolvingDataSource::class.java.name,
+            StatsDataSource::class.java.name,
+            SimpleCache::class.java.name,
+        )
+
         private const val BUFFERING_WATCHDOG_MS = 5_000L
         // Cold-start re-seek belt: only re-apply the saved position if the current position is still at the
         // start. A user seek before the first STATE_READY moves it past this, and we leave their choice.
@@ -869,6 +892,41 @@ class PlayerEventListener(
                     || rootCause.message?.contains("HTTP 403") == true))
         val isMalformedContent = rootCause is ParserException && rootCause.contentIsMalformed
         val isTimeout = rootCause is TimeoutCancellationException || rootCause is SocketTimeoutException
+
+        // Benign media3 datasource teardown race — suppressed, but counted. The player/cache is torn down
+        // while a load is still closing (the stop()+prepare() churn from the watchdog and skip paths) and
+        // one of media3's checkState() lifecycle assertions fires. The throwing frame MOVES around the
+        // close() cascade — SimpleCache.commitFile inlined into CacheDataSink one report, TeeDataSource
+        // .close the next — which is why this matches a family rather than a single class.
+        //
+        // ⚠️ MATCH ON RUNTIME NAMES, NEVER ON LITERAL SOURCE NAMES. This guard has been written three
+        // times and twice shipped broken:
+        //   3c438db6 (Jun 17)  className == SimpleCache::class.java.name   — correct but too narrow:
+        //                      R8 INLINES SimpleCache.commitFile into CacheDataSink, so no SimpleCache
+        //                      frame exists in the trace at all.
+        //   f6464c00 (Jun 23)  className.contains("SimpleCache")           — BROKEN in release.
+        //   3707e4c9 (Jul 1)   className.startsWith("androidx.media3.datasource.") — BROKEN in release,
+        //                      then deleted as dead code by fe71e813 (Jul 3).
+        // proguard-rules.pro has no media3 keep rules, so these classes ARE obfuscated: the frames read
+        // xw / zs4 / zw / m04 / gm4 in a release build and no literal string can ever match them.
+        // Comparing StackTraceElement.className against Class.getName() compares two RUNTIME names, so it
+        // survives both renaming and horizontal merging (a merged class reports its host's name on both
+        // sides). Only inlining defeats it, which is why the set spans the whole cascade.
+        //
+        // message == null is load-bearing twice over: media3's bare checkState(boolean) throws a
+        // message-less ISE, and it keeps this disjoint from the is401 branch above, which matches an
+        // IllegalStateException carrying "HTTP 401"/"HTTP 403" and must keep its retry.
+        val isDataSourceTeardownRace = rootCause is IllegalStateException
+            && rootCause.message == null
+            && rootCause.stackTrace.any { it.className in dataSourceRuntimeClassNames }
+        if (isDataSourceTeardownRace) {
+            healthMonitor?.report(
+                HealthMonitor.DataSourceTeardownRaceException(rootCause),
+                HealthMonitor.Scope.MEMORY_ONLY, 10 * 60 * 1000L
+            )
+            return
+        }
+
         if (is401) {
             val currentMediaId = mediaItem?.mediaId
             if (retriedMediaId != currentMediaId) {

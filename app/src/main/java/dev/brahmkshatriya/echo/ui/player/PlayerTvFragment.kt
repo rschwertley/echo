@@ -123,7 +123,8 @@ class PlayerTvFragment : Fragment() {
             waveSpeedPx = wave.waveSpeed
             waveAmplitudePx = wave.waveAmplitude
         }
-        val playing = viewModel.playerState.current.value?.isPlaying == true
+        // playWhenReady, not Current.isPlaying — see the note on PlayerFragment's twin of this line.
+        val playing = viewModel.playWhenReady.value
         val expanded = uiViewModel.playerSheetState.value == STATE_EXPANDED
         wave.waveAmplitude = if (playing) waveAmplitudePx else 0
         wave.waveSpeed = if (playing && expanded && waveResumed) waveSpeedPx else 0
@@ -149,8 +150,6 @@ class PlayerTvFragment : Fragment() {
 
         // Track metadata
         observe(viewModel.playerState.current) { current ->
-            // Before the null early-return below: an emptied queue must flatten the wave too.
-            updateWaveMotion()   // Current carries isPlaying, so this fires on every play/pause
             if (current == null) {
                 uiViewModel.changePlayerState(STATE_HIDDEN)
                 return@observe
@@ -178,6 +177,10 @@ class PlayerTvFragment : Fragment() {
         val playPauseListener = CheckBoxListener { viewModel.setPlaying(it) }
         binding.tvTrackPlayPause.addOnCheckedStateChangedListener(playPauseListener)
         observe(viewModel.playWhenReady) {
+            // Also the wave's primary driver — observe() is flowWithLifecycle(STARTED) over a StateFlow,
+            // so this re-asserts on every ON_START and a missed edge self-corrects. Folded into the
+            // existing observer rather than adding a second one over the same flow.
+            updateWaveMotion()
             playPauseListener.enabled = false
             binding.tvTrackPlayPause.isChecked = it
             playPauseListener.enabled = true
