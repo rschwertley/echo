@@ -122,6 +122,17 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp">
 
+                <!-- Despite the id this draws ONLY the inactive rail; the buffer indicator is transparent
+                     for the same structural reason as the phone's bufferBar (see the full note in
+                     item_player_controls.xml): DeterminateDrawable assigns endFraction and never
+                     startFraction, so the indicator can only fill from the LEFT EDGE and drew a solid
+                     accent line under the whole played portion, showing through the wave. Reversal is two
+                     lines — this colour AND the setIndicatorColor call in PlayerTvFragment's colours block,
+                     which would otherwise override it at runtime.
+                     3dp rather than the phone's 2dp: the thinner-rail hierarchy transfers, but dp is
+                     density-independent and not DISTANCE-independent, so a 2dp line at three metres is far
+                     fainter than 2dp at arm's length. Half the 4dp+ wave without vanishing.
+                     KNOWN COST: no buffer display on the TV player. Real on a slow connection. -->
                 <com.google.android.material.progressindicator.LinearProgressIndicator
                     android:id="@+id/tv_buffer_bar"
                     android:layout_width="match_parent"
@@ -129,16 +140,18 @@
                     android:layout_gravity="center_vertical"
                     android:layout_marginHorizontal="12dp"
                     android:alpha="0.5"
-                    app:indicatorColor="?attr/colorTertiary"
+                    app:indicatorColor="@android:color/transparent"
                     app:indicatorTrackGapSize="0dp"
                     app:trackColor="?attr/colorOnSurface"
-                    app:trackThickness="4dp" />
+                    app:trackThickness="3dp" />
 
                 <!-- Wavy POSITION track — TV twin of item_player_controls.xml's seekWaveBar; see the note
                      there for the ordering, the pinned layout_height and the accessibility rationale.
-                     Amplitude/wavelength are Material's own defaults here because this track is 4dp, which
-                     is exactly the thickness they were derived against (the phone's 1.5dp is that same
-                     3dp:4dp ratio applied to its 2dp track).
+                     Amplitude matches the phone's 6dp rather than Material's 3dp default: the shipped
+                     default is tuned for legibility at arm's length and read as too shallow on both
+                     surfaces. Extent is therefore trackThickness + waveAmplitude * 2 = 4 + 12 = 16dp, which
+                     the 20dp layout_height below still clears — RAISE THE PIN IF AMPLITUDE GOES HIGHER,
+                     or the crests clip silently (symptom: a flat-topped wave that will not get taller).
                      focusable=false is TV-specific: tv_seek_bar sits in the D-pad chain via nextFocusUp/
                      nextFocusDown, and a focusable sibling inserted between it and tv_buffer_bar could
                      break that traversal. LinearProgressIndicator is not clickable so it should not take
@@ -155,7 +168,7 @@
                     android:focusable="false"
                     android:importantForAccessibility="no"
                     app:indicatorColor="?attr/colorTertiary"
-                    app:waveAmplitude="3dp"
+                    app:waveAmplitude="6dp"
                     app:wavelength="40dp"
                     app:trackThickness="4dp" />
 

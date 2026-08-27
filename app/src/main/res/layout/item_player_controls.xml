@@ -77,6 +77,21 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content">
 
+            <!-- Despite the id, this now draws ONLY the inactive rail: its buffer indicator is
+                 deliberately transparent. DeterminateDrawable.setIndicatorFraction() assigns endFraction
+                 and nothing ever assigns startFraction, so it keeps its 0f default — a LinearProgressIndicator
+                 can only ever fill from the LEFT EDGE to `progress`. With buffered >= position that put a
+                 solid accent line under the entire played portion, showing through the wave wherever the
+                 4dp band swung clear of the centre line: the "wave oscillating around a straight line".
+                 There is no way to draw only the useful playhead->buffered segment from one indicator
+                 (ProgressBar.min rescales the fraction, it does not offset the start).
+                 fillTrack() is called with (0f, 1f) unconditionally, so the rail stays continuous across
+                 the full width with the indicator transparent — no gap where it used to be.
+                 progress is still wired in PlayerFragment's progress observer so this is a two-line
+                 reversal: restore ?attr/colorTertiary here AND the setIndicatorColor call in
+                 PlayerFragment's playerColors block, which otherwise overrides this at runtime.
+                 KNOWN COST: no buffer display on the expanded player. Real on a slow connection.
+                 tv_buffer_bar carries the same change; keep the two in step. -->
             <com.google.android.material.progressindicator.LinearProgressIndicator
                 android:id="@+id/bufferBar"
                 android:layout_width="match_parent"
@@ -85,10 +100,10 @@
                 android:layout_marginHorizontal="12dp"
                 android:alpha="0.5"
                 android:progress="40"
-                app:indicatorColor="?attr/colorTertiary"
+                app:indicatorColor="@android:color/transparent"
                 app:indicatorTrackGapSize="0dp"
                 app:trackColor="?attr/colorOnSurface"
-                app:trackThickness="4dp" />
+                app:trackThickness="2dp" />
 
             <!-- Wavy POSITION track. Ordered between bufferBar and seekBar deliberately: later children
                  draw on top, so the wave covers the buffer's inactive track but the Slider's thumb still
@@ -97,36 +112,40 @@
                  which is why seekBar's trackColorActive is transparent (and why PlayerFragment's
                  playerColors block tints THIS view rather than the Slider's track).
                  layout_height is pinned rather than wrap_content. LinearDrawingDelegate.getPreferredHeight()
-                 is `trackThickness + waveAmplitude * 2` (read from the 1.14.0 artifact), so wrap_content
-                 would give 4 + 6 = 10dp here — the wave does NOT clip at wrap_content. The pin is 12dp so
-                 that a future amplitude change cannot silently start clipping, and it stays far under the
-                 Slider's measured height, so the FrameLayout still measures to the Slider and
-                 uiViewModel.playerControlsHeight — which the collapse morph reads via PlayerFragment's
-                 doOnLayout — does not move.
-                 The Slider's thumb is a 4dp x 20dp BAR, not a circle: 4dp is Material's own
-                 m3_comp_slider_active_handle_width. Only thumbWidth was reduced; thumbHeight stays 20dp
-                 deliberately, because BaseSlider.onMeasure sizes the widget to `widgetThickness` and
-                 thumbHeight feeds that, so raising it would move playerControlsHeight and the morph with it.
+                 is `trackThickness + waveAmplitude * 2` (read from the 1.14.0 artifact), so the wave's real
+                 extent here is 4 + 12 = 16dp. THE PIN MUST BE RAISED WITH THE AMPLITUDE — at 20dp it clears
+                 16dp with slack, but an amplitude bump alone would start clipping the crests silently
+                 (symptom: a trapezoidal, flat-topped wave that does not get taller when you raise
+                 waveAmplitude).
+                 bufferBar above is deliberately THINNER than this (2dp vs 4dp): the wave and the rail never
+                 coexist spatially — left of the thumb the wave replaces the rail, right of it only the rail
+                 shows — so a thicker active over a thinner inactive reads as hierarchy, not as overhang.
+                 Matching them made the played and unplayed halves carry equal visual weight.
+                 The Slider's thumb is a 4dp x 28dp BAR, not a circle: 4dp is Material's own
+                 m3_comp_slider_active_handle_width. 28dp clears the 16dp wave extent so the thumb stands
+                 above the crests rather than being swallowed by them — raise them together or not at all.
+                 thumbHeight feeds widgetThickness in BaseSlider.onMeasure, which sizes this Slider, which
+                 propagates to uiViewModel.playerControlsHeight and the collapse morph. Whether it actually
+                 moves depends on whether minTouchTargetSize=90dp already dominates. The test is free: drag
+                 the player down and watch the cover morph — if it morphs correctly, the height did not move.
                  importantForAccessibility=no: this duplicates the value the Slider already exposes through
                  contentDescription, and TalkBack should not announce a second progress bar for it. -->
             <com.google.android.material.progressindicator.LinearProgressIndicator
                 android:id="@+id/seekWaveBar"
                 style="@style/EchoLinearProgressIndicator.Wavy"
                 android:layout_width="match_parent"
-                android:layout_height="12dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:layout_marginHorizontal="12dp"
                 android:importantForAccessibility="no"
                 app:indicatorColor="?attr/colorTertiary"
-                app:waveAmplitude="3dp"
+                app:waveAmplitude="6dp"
                 app:wavelength="40dp"
                 app:trackThickness="4dp" />
 
             <!-- Thumb is a 4dp x 20dp BAR (Material's own default handle width), not a circle. TV
                  deliberately keeps a 24dp circle — see the note at fragment_player_tv.xml's tv_seek_bar
-                 for why, and do not unify the two. thumbHeight stays 20dp here on purpose: it feeds
-                 widgetThickness in BaseSlider.onMeasure, which sets this Slider's measured height, which
-                 propagates to uiViewModel.playerControlsHeight and the collapse morph. -->
+                 for why, and do not unify the two. -->
             <com.google.android.material.slider.Slider
                 android:id="@+id/seekBar"
                 android:layout_width="match_parent"
@@ -139,7 +158,7 @@
                 app:labelBehavior="gone"
                 app:minTouchTargetSize="90dp"
                 app:thumbColor="?attr/colorTertiary"
-                app:thumbHeight="20dp"
+                app:thumbHeight="28dp"
                 app:thumbWidth="4dp"
                 app:trackColorActive="@android:color/transparent"
                 app:trackColorInactive="@android:color/transparent"

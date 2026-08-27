@@ -73,26 +73,37 @@ class PlayerViewModel(
 
     var queue: List<MediaItem> = emptyList()
 
-    // ⚠️ THIS FLOW DOES NOT DELIVER WHILE THE SCREEN IS OFF. It is a replay-0, zero-buffer
-    // MutableSharedFlow, and its only collector (PlayerFragment's `observe(queueFlow)`) goes through
-    // ContextUtils.observe -> flowWithLifecycle(lifecycle), whose default minActiveState is STARTED. A
-    // stopped Activity therefore has NO subscriber, and MutableSharedFlow with no subscriber drops the
-    // emission outright — there is no buffering and no replay at ON_START, so the update is gone for
-    // good, not deferred. Measured 2026-08-24 across eight consecutive screen-off auto-advances:
-    // subscriptionCount was 0 at every emit and the collector never ran.
+    // replay = 1 is LOAD-BEARING. Without it this flow does not deliver while the screen is off: it is a
+    // zero-buffer MutableSharedFlow, and BOTH its collectors go through ContextUtils.observe ->
+    // flowWithLifecycle(lifecycle), whose default minActiveState is STARTED. A stopped Activity has NO
+    // subscriber, and a MutableSharedFlow with no subscriber and no replay drops the emission outright —
+    // gone for good, not deferred. Measured 2026-08-24 across eight consecutive screen-off auto-advances:
+    // subscriptionCount was 0 at every emit and neither collector ran.
     //
-    // `queue` itself IS kept current while stopped (the collector that writes it lives in
-    // viewModelScope and is not lifecycle-gated), so the damage is confined to whatever the SIGNAL
-    // drives, not the data.
+    // The two collectors, and they are NOT equivalent:
+    //   PlayerFragment:555   -> submit(), the full-screen ViewPager pages
+    //   QueueFragment:121    -> submit(), the Up Next list and its scroll-to-current
+    // Both are backed by a sibling `playerState.current` collector that rebuilds from `queue`, but by
+    // different mechanisms, and the asymmetry is the whole point:
+    //   QueueFragment's sibling (:120) is ALSO gated, so flowWithLifecycle re-subscribes at ON_START and
+    //     `current` — a StateFlow — replays its latest value. It self-heals on every wake.
+    //   PlayerFragment's sibling (:534) is a raw lifecycleScope.launch that subscribes ONCE for the life
+    //     of the fragment. It never re-subscribes, so it never gets a replay. The ungated collector that
+    //     rescues the album art is precisely the one with NO resume-time recovery.
     //
-    // Album art survives this only by accident of ordering: PlayerFragment's `current` collector is a
-    // raw lifecycleScope.launch (ungated, runs while stopped) and its submit() reads the queue and the
-    // index together, committing a consistent list+index pair. It does not need the queueFlow signal.
-    // Anything ELSE added as a queueFlow observer gets no such guarantee and will silently miss every
-    // queue change that happens with the screen off. If you need reliable delivery, do not add an
-    // observer here — either give the flow replay/buffer, or drive the new work from the `current`
-    // collector alongside submit().
-    val queueFlow = MutableSharedFlow<Unit>()
+    // The case that made this real rather than theoretical: a queue mutation with a STATIONARY current —
+    // a radio top-up while the screen is off. PlayerState.Current is a data class and StateFlow conflates
+    // equal values, so `current` does not emit; only this flow does. Before replay=1 the appended tracks
+    // were missing as ViewPager pages until the next track change, while QueueFragment showed them
+    // correctly. That divergence is the signature of this bug if it ever returns.
+    //
+    // Why replay is safe HERE specifically: the flow carries Unit, so a replayed emission can never
+    // deliver stale data — it only says "re-read", and submit() reads `queue` and `current` together at
+    // call time. A flow carrying the queue itself would not have that property.
+    //
+    // `queue` itself IS kept current while stopped (the collector that writes it lives in viewModelScope
+    // and is not lifecycle-gated), so the damage was always confined to the SIGNAL, not the data.
+    val queueFlow = MutableSharedFlow<Unit>(replay = 1)
 
     init {
         // The cold-start current is seeded ONCE, in the getController callback below, from the shared

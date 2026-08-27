@@ -400,7 +400,11 @@ class PlayerTvFragment : Fragment() {
             b.tvSeekWaveBar.setIndicatorColor(colors.accent)
             b.tvSeekBar.thumbTintList = ColorStateList.valueOf(colors.accent)
             b.tvPlayingIndicator.setIndicatorColor(colors.accent)
-            b.tvBufferBar.setIndicatorColor(colors.accent)
+            // tvBufferBar.setIndicatorColor is DELIBERATELY ABSENT — mirrors PlayerFragment. The buffer
+            // indicator is transparent in XML because DeterminateDrawable never assigns startFraction, so
+            // it could only draw from the left edge and put a solid line under the whole played portion,
+            // visible through the wave. A runtime setIndicatorColor here would override that XML. Only the
+            // rail is tinted. See the note on tv_buffer_bar in fragment_player_tv.xml.
             b.tvBufferBar.trackColor = colors.onBackground
             b.tvCurrentTime.setTextColor(colors.onBackground)
             b.tvTotalTime.setTextColor(colors.onBackground)

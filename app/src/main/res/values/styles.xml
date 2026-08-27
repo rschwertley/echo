@@ -148,7 +148,15 @@
          the widgets, because the right amplitude is a ratio against trackThickness and the two tracks are
          different thicknesses (phone 2dp, TV 4dp; Material's own 3dp default is tuned for its 4dp track).
 
-         waveSpeed matches wavelength: Material's convention is one wavelength per second.
+         PERCEIVED RATE = waveSpeed / wavelength, in cycles per second, because waveSpeed is a distance
+         travelled per second. Material's shipped convention is waveSpeed == wavelength, i.e. exactly 1Hz —
+         a full crest every second, which reads as hurried next to the system media notification. 12dp
+         against a 40dp wavelength gives 0.3Hz, roughly one cycle per 3.3 seconds. Note this is COUPLED to
+         wavelength: changing wavelength alone changes the apparent speed even with waveSpeed fixed.
+
+         Shared by phone and TV deliberately. Rate is a perceptual property rather than a per-surface one,
+         and if anything a fast wave is worse at TV viewing distance. Amplitude, wavelength and thickness
+         are per-widget precisely because those DO differ by surface.
 
          MOTION IS GATED AT RUNTIME, and how it is gated is not obvious — read this before "fixing" it.
          DeterminateDrawable starts phaseAnimator ONCE in its constructor with setRepeatCount(-1), and
@@ -171,7 +179,7 @@
          because the Material3 parent sets a non-zero stop dot that would paint at the far right of the
          track. indicatorTrackGapSize matches the buffer indicators, which zero it explicitly. -->
     <style name="EchoLinearProgressIndicator.Wavy">
-        <item name="waveSpeed">40dp</item>
+        <item name="waveSpeed">12dp</item>
         <item name="trackColor">@android:color/transparent</item>
         <item name="indicatorTrackGapSize">0dp</item>
         <item name="trackStopIndicatorSize">0dp</item>

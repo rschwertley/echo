@@ -834,7 +834,14 @@ class PlayerFragment : Fragment() {
                 seekWaveBar.setIndicatorColor(colors.accent)
                 seekBar.thumbTintList = ColorStateList.valueOf(colors.accent)
                 playingIndicator.setIndicatorColor(colors.accent)
-                bufferBar.setIndicatorColor(colors.accent)
+                // bufferBar.setIndicatorColor is DELIBERATELY ABSENT — do not restore it without also
+                // changing the layout. bufferBar's indicator is transparent in XML because
+                // DeterminateDrawable never assigns startFraction (it stays 0f), so the indicator can only
+                // fill from the left edge and drew a solid accent line under the whole played portion,
+                // visible through the wave. A runtime setIndicatorColor here would override that XML and
+                // paint it straight back. Only the rail is tinted now. See the note on bufferBar in
+                // item_player_controls.xml. PlayerTvFragment carries the same omission for tvBufferBar —
+                // keep the two in step.
                 bufferBar.trackColor = colors.onBackground
                 trackCurrentTime.setTextColor(colors.onBackground)
                 trackTotalTime.setTextColor(colors.onBackground)
