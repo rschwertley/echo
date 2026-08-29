@@ -74,7 +74,23 @@ class PlayerViewModel(
 
     var queue: List<MediaItem> = emptyList()
 
-    // replay = 1 is LOAD-BEARING. Without it this flow does not deliver while the screen is off: it is a
+    // ⚠️ replay = 1 WAS TRIED HERE AND REVERTED (2026-08-28). Do not re-apply it without reading this.
+    // It was added to fix the dropped-emission problem described below — a problem found while tracing
+    // something else, never observed by the user, and cosmetic when it does occur. The build carrying it
+    // hung on a cold start: restored queue, session state=NONE, position 0, spinner, nothing logged for
+    // 19 minutes. It could not be cheaply ruled out as the cause, so it went rather than being carried.
+    // Why it is not obviously safe, despite both consumers being pure UI: replay changes whether an
+    // emission made BEFORE PlayerFragment subscribes is delivered at subscribe time. Whether one exists is
+    // a RACE between this ViewModel's restore block emitting (below) and onViewCreated subscribing, so the
+    // change is intermittent by construction and shows up exactly when cold-start disk I/O is slow — the
+    // same timing window every cold-start bug in this project has lived in. An earlier analysis called it
+    // "deterministic on cold start, therefore ruled out"; that was wrong.
+    // To clear it you need either a cold-start reproduction on replay=0 (proving it wasn't the cause) or
+    // enough clean launches to bound an unknown failure rate. Neither is cheap. The dropped emission is
+    // not worth that; drive new work from the `current` collector instead.
+    //
+    // The problem it was addressing, which is real and still present:
+    // This flow does not deliver while the screen is off: it is a
     // zero-buffer MutableSharedFlow, and BOTH its collectors go through ContextUtils.observe ->
     // flowWithLifecycle(lifecycle), whose default minActiveState is STARTED. A stopped Activity has NO
     // subscriber, and a MutableSharedFlow with no subscriber and no replay drops the emission outright —
@@ -104,7 +120,7 @@ class PlayerViewModel(
     //
     // `queue` itself IS kept current while stopped (the collector that writes it lives in viewModelScope
     // and is not lifecycle-gated), so the damage was always confined to the SIGNAL, not the data.
-    val queueFlow = MutableSharedFlow<Unit>(replay = 1)
+    val queueFlow = MutableSharedFlow<Unit>()
 
     init {
         // The cold-start current is seeded ONCE, in the getController callback below, from the shared

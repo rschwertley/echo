@@ -99,15 +99,29 @@
                          is the BROWSING extension and would change the icon while a track from another extension
                          kept playing. A queue mixing extensions therefore updates this per track.
                          Starts on ic_extension_32dp rather than empty so an extension with no icon, and the
-                         window before the first track resolves, both show the generic glyph instead of a hole. -->
+                         window before the first track resolves, both show the generic glyph instead of a hole.
+
+                         PURELY INFORMATIONAL - DO NOT GIVE THIS A CLICK LISTENER. applyCurrent sets an
+                         OnClickListener on the WHOLE toolbar ("Playing from <context>" -> opens that playlist or
+                         artist), so the entire top bar is one uniform tap target. An ImageView is not clickable by
+                         default, returns false from onTouchEvent, and the Toolbar consumes the event instead - so
+                         taps here fall through to that action, which is the intent, not an oversight.
+                         Adding a listener would carve a 32dp dead island out of the middle of a target users aim
+                         at loosely, and would make the same gesture do two different things a few dp apart. The
+                         extension is not something you switch mid-playback, and the selector is reachable
+                         elsewhere. importantForAccessibility=no for the same reason: TalkBack should describe the
+                         toolbar's action, not announce a second element inside it. No contentDescription for the
+                         same reason - one would imply it is actionable. -->
                     <com.google.android.material.imageview.ShapeableImageView
                         android:id="@+id/extensionIcon"
+                        android:clickable="false"
+                        android:focusable="false"
                         android:layout_width="32dp"
                         android:layout_height="32dp"
                         android:layout_gravity="end|center_vertical"
                         android:layout_marginEnd="4dp"
-                        android:contentDescription="@string/extensions"
-                        android:src="@drawable/ic_extension_32dp"
+                                android:importantForAccessibility="no"
+                                android:src="@drawable/ic_extension_32dp"
                         app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
                     </com.google.android.material.appbar.MaterialToolbar>
 

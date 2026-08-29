@@ -13,7 +13,7 @@
         android:layout_height="wrap_content"
         android:clipToPadding="false"
         android:gravity="center"
-        android:paddingHorizontal="24dp"
+        android:paddingHorizontal="16dp"
         android:translationZ="1dp">
 
         <View
@@ -58,7 +58,7 @@
             android:layout_width="64dp"
             android:layout_height="64dp"
             android:background="@drawable/ripple_60dp"
-            android:button="@drawable/anim_heart_40dp"
+            android:button="@drawable/anim_heart_36dp"
             android:contentDescription="@string/like"
             app:buttonTint="@color/button_player_heart" />
 
@@ -232,7 +232,17 @@
              Ellipsis is the right outcome when it does happen - merged servers contribute one source
              title each, video streams add a whole segment - because the full string is one tap away in
              QualitySelectionBottomSheet. minHeight keeps that tap target at 48dp while the visual pill
-             stays short via the background's vertical inset. -->
+             stays short via the background's vertical inset.
+             minHeight is 40dp, NOT the usual 48dp: the seek FrameLayout is exactly widgetThickness tall
+             (BaseSlider sizes to max(minWidgetThickness, max(trackThickness, thumbHeight) + paddingTop +
+             paddingBottom) = 44 + 76 = 120dp here), the wave band is centred so it occupies 48-72dp, and a
+             48dp pill at bottom gravity occupies 72-120dp - touching it exactly. The timestamps beside it
+             are ~40dp and clear the wave by 8dp, so the pill was simply taller than its neighbours.
+             Buying that clearance any other way costs block height: paddingVertical is additive to
+             widgetThickness, and only HALF of any increase becomes clearance (the wave centre moves down
+             by half, the pill by all of it), so 8dp of gap would cost 16dp of playerControlsHeight.
+             40dp is defensible here because this is a SECONDARY affordance - the same QualitySelection
+             sheet is reachable from the quality controls - and 48dp is a guideline for primary targets. -->
         <TextView
             android:id="@+id/trackSubtitle"
             android:layout_width="wrap_content"
@@ -244,7 +254,7 @@
             android:gravity="center"
             android:maxLines="1"
             android:maxWidth="@dimen/player_pill_max_width"
-            android:minHeight="48dp"
+            android:minHeight="40dp"
             android:paddingHorizontal="10dp"
             android:textColor="@color/amoled_fg"
             android:textSize="12sp"

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 36dp variant of the 28dp heart set, for the full-screen player's favourite button (64dp box).
+     36dp sits between the mini bar's 32dp play/pause and the transport row's 28dp glyphs, so the heart
+     gains presence without becoming the loudest thing in the title row.
+     SIZE-ONLY COPY, NOT NEW ARTWORK: only android:width/height differ from the 28dp original. The
+     viewport (40) and every path string are byte-identical, because the viewport is the coordinate space
+     and width/height is only the intrinsic render size - which is what keeps the fill<->outline morph
+     working with no re-authoring. Same pattern as the *_32dp play/pause set. -->
+<animated-selector
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/state_on"
+        android:drawable="@drawable/ic_heart_filled_36dp"
+        android:state_checked="true"/>
+
+    <item android:id="@+id/state_off"
+        android:drawable="@drawable/ic_heart_outline_36dp"
+        android:state_checked="false"
+        />
+    <transition
+        android:drawable="@drawable/ic_heart_filled_to_outline_36dp"
+        android:fromId="@+id/state_on"
+        android:toId="@+id/state_off"
+        />
+    <transition
+        android:drawable="@drawable/ic_heart_outline_to_filled_36dp"
+        android:fromId="@+id/state_off"
+        android:toId="@+id/state_on"
+        />
+</animated-selector>

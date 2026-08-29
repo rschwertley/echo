@@ -347,9 +347,18 @@
         <item name="layout_constraintWidth_max">@dimen/max_cover_size</item>
     </style>
 
+    <!-- 16dp, not 24dp: the cover is SQUARE (layout_constraintDimensionRatio 1,1) and width-bound on a
+         phone - 411dp screen minus these margins is well under the 384dp max_cover_size cap - so its size
+         is governed here and NOT by any vertical space freed elsewhere in the player. Narrowing the margins
+         is the only lever that grows it.
+         KEEP IN STEP WITH item_player_controls.xml's paddingHorizontal, currently also 16dp: the title,
+         artist, heart and overflow align to the cover's edges, and they diverge visibly if only one moves.
+         Stays under the cap on wider devices (anything past ~416dp was already capped at 384dp).
+         values-land overrides these to 0dp and is untouched: landscape puts the cover in its own column
+         where it is height-bound, so narrowing margins there would buy nothing. -->
     <style name="PlayerTrackCoverContainer" parent="BasePlayerTrackCoverContainer">
-        <item name="android:layout_marginStart">24dp</item>
-        <item name="android:layout_marginEnd">24dp</item>
+        <item name="android:layout_marginStart">16dp</item>
+        <item name="android:layout_marginEnd">16dp</item>
         <item name="android:layout_marginTop">8dp</item>
         <item name="android:layout_marginBottom">8dp</item>
     </style>

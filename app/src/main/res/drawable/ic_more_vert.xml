@@ -1,7 +1,9 @@
-<!-- Vertical three-dot overflow glyph. Same geometry as ic_more_horiz with the dot centres
-     transposed in the 960 viewport (x<->y): dots at y=240/480/720 on x=480 instead of the reverse.
-     Used by the full-screen player's overflow button, which moved out of the toolbar menu and down
-     beside the heart. ic_more_horiz is still used elsewhere - do not replace it. -->
+<!-- Vertical three-dot overflow glyph: the exact TRANSPOSE of ic_more_horiz, which is also how
+     Material derives its own more_vert. Dot centres at y = 240/480/720 on x = 480, radius 80, so the
+     edge gap is 80 units - identical to ic_more_horiz's x = 240/480/720.
+     An earlier version of this file put the centres at 320/480/640: spacing 160 against a diameter of
+     160, i.e. the dots exactly TOUCHING, which read as a solid bar rather than a menu affordance.
+     If you edit this, check the spacing against ic_more_horiz rather than eyeballing it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -10,5 +12,5 @@
     android:viewportHeight="960">
   <path
       android:fillColor="#FF000000"
-      android:pathData="M480,720q-33,0 -56.5,-23.5T400,640q0,-33 23.5,-56.5T480,560q33,0 56.5,23.5T560,640q0,33 -23.5,56.5T480,720ZM480,560q-33,0 -56.5,-23.5T400,480q0,-33 23.5,-56.5T480,400q33,0 56.5,23.5T560,480q0,33 -23.5,56.5T480,560ZM480,400q-33,0 -56.5,-23.5T400,320q0,-33 23.5,-56.5T480,240q33,0 56.5,23.5T560,320q0,33 -23.5,56.5T480,400Z"/>
+      android:pathData="M480,320q-33,0 -56.5,-23.5T400,240q0,-33 23.5,-56.5T480,160q33,0 56.5,23.5T560,240q0,33 -23.5,56.5T480,320ZM480,560q-33,0 -56.5,-23.5T400,480q0,-33 23.5,-56.5T480,400q33,0 56.5,23.5T560,480q0,33 -23.5,56.5T480,560ZM480,800q-33,0 -56.5,-23.5T400,720q0,-33 23.5,-56.5T480,640q33,0 56.5,23.5T560,720q0,33 -23.5,56.5T480,800Z"/>
 </vector>
