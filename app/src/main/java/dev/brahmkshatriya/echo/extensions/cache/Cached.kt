@@ -86,6 +86,18 @@ object Cached {
         }
     }
 
+    // ⚠️ PUBLIC INLINE: this body is COPIED into every caller's class file, not called. Changing anything
+    // it touches - a member's visibility, its signature, its very existence - silently orphans every
+    // caller that is not recompiled in the same run, and neither the compiler nor R8 will say a word. The
+    // caller keeps its stale copy, links against the old member, and fails at RUNTIME with
+    // NoSuchMethodError. Build 1058 shipped exactly that: `fileCache` went private here, Cached.kt was
+    // recompiled, StreamableLoader was not, and every track resolve died calling App.getFileCache().
+    // Callers today: StreamableLoader:84, MediaViewModel:45/48, TrackInfoViewModel:48,
+    // UnifiedExtension:374, and the four *Fragment feedData lambdas.
+    // If you edit this body, do a CLEAN build before shipping - app/build.gradle.kts's
+    // verifyCleanKotlinOutput enforces that for release/nightly/stable, but it cannot help a local
+    // install. `inline` is required here only for `reified T`; if that need ever goes away, drop the
+    // keyword and this whole hazard with it.
     suspend inline fun <reified T : EchoMediaItem> getMedia(
         app: App, extensionId: String, itemId: String,
     ) = runCatching {
@@ -107,6 +119,18 @@ object Cached {
     @PublishedApi
     internal fun canonicalId(id: String) = id.removePrefix("VL")
 
+    // ⚠️ PUBLIC INLINE: this body is COPIED into every caller's class file, not called. Changing anything
+    // it touches - a member's visibility, its signature, its very existence - silently orphans every
+    // caller that is not recompiled in the same run, and neither the compiler nor R8 will say a word. The
+    // caller keeps its stale copy, links against the old member, and fails at RUNTIME with
+    // NoSuchMethodError. Build 1058 shipped exactly that: `fileCache` went private here, Cached.kt was
+    // recompiled, StreamableLoader was not, and every track resolve died calling App.getFileCache().
+    // Callers today: StreamableLoader:84, MediaViewModel:45/48, TrackInfoViewModel:48,
+    // UnifiedExtension:374, and the four *Fragment feedData lambdas.
+    // If you edit this body, do a CLEAN build before shipping - app/build.gradle.kts's
+    // verifyCleanKotlinOutput enforces that for release/nightly/stable, but it cannot help a local
+    // install. `inline` is required here only for `reified T`; if that need ever goes away, drop the
+    // keyword and this whole hazard with it.
     suspend inline fun <reified T : EchoMediaItem> loadMedia(
         app: App, extension: Extension<*>, state: MediaState<T>,
     ) = coroutineScope {

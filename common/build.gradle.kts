@@ -14,6 +14,40 @@ java {
 kotlin {
     jvmToolchain(17)
 
+    // ── PUBLIC-ABI LOCK FOR THE EXTENSION SURFACE ──
+    // :common is what every extension compiles against - the :deezer-extension module by project
+    // dependency, third parties via the Maven Central publication below. Anything public here is therefore
+    // ABI: removing a member, narrowing its visibility or changing its signature breaks every ALREADY
+    // INSTALLED extension at runtime, and nothing else in this build can see that. The Kotlin compiler
+    // cannot (extensions are not in the repo, so there is no caller to fail), and app's verifyExtensionAbi
+    // cannot (it proves R8 did not RENAME the kept packages - it never looks at members).
+    //
+    // `checkKotlinAbi` dumps the public ABI and diffs it against the committed reference dump, failing
+    // the build on any divergence. A deliberate API change then shows up as a visible diff in that file
+    // rather than as a one-word edit nobody reviews.
+    //
+    // Bootstrap (once): ./gradlew :common:updateKotlinAbi   then COMMIT the dump it writes.
+    // After any intended API change: re-run updateKotlinAbi and commit the diff alongside the change.
+    //
+    // ⚠️ TASK NAMES ARE VERSION-SPECIFIC. On Kotlin 2.4.10 they are `checkKotlinAbi` / `updateKotlinAbi`,
+    // verified by extracting org/jetbrains/kotlin/gradle/plugin/abi + tasks/abi from the KGP jar - NOT the
+    // `checkLegacyAbi` / `updateLegacyAbi` the current online docs describe, which belong to an earlier
+    // DSL and do not exist here. app/build.gradle.kts depends on the check task BY NAME, so if a Kotlin
+    // bump renames it that dependsOn fails loudly (unknown task) rather than silently skipping - but
+    // re-verify from the jar rather than the docs when bumping.
+    //
+    // Built-in Kotlin Gradle plugin feature, NOT the standalone kotlinx binary-compatibility-validator
+    // plugin - no extra coordinate, so nothing to keep in step with the Kotlin version. The DSL is marked
+    // experimental, hence the opt-in; if a Kotlin bump breaks it, the fallback is that same standalone
+    // plugin, which produces an equivalent dump.
+    @OptIn(org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation::class)
+    abiValidation {
+        // Intentionally empty: CALLING this block is what enables validation. The `enabled` property
+        // still exists on AbiValidationMultiplatformExtension but is deprecated to an ERROR
+        // ("Property was removed, to enable ABI validation call function abiValidation()"), so setting
+        // it fails the build. Do not "fix" this by adding enabled.set(true) back.
+    }
+
     android {
         namespace = "echo.common"
         compileSdk = 37

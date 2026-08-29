@@ -230,3 +230,64 @@ tasks.register("verifyExtensionAbi") {
 tasks.matching { it.name.matches(Regex("^minify.*WithR8$")) }.configureEach {
     finalizedBy("verifyExtensionAbi")
 }
+
+// The OTHER half of the extension-ABI guarantee, gated on the same trigger so a shippable build cannot be
+// produced without both. They cover disjoint failure modes and neither subsumes the other:
+//   verifyExtensionAbi (finalizedBy, above) - POST-compile: did R8 rename/repackage the kept classes?
+//   :common:checkKotlinAbi (dependsOn, here) - PRE-compile: did the public ABI of :common itself change?
+// dependsOn rather than finalizedBy because this one needs no build output, so failing before R8 runs is
+// strictly cheaper. See the abiValidation block in common/build.gradle.kts for the bootstrap step.
+tasks.matching { it.name.matches(Regex("^minify.*WithR8$")) }.configureEach {
+    dependsOn(":common:checkKotlinAbi")
+}
+
+// ── A SHIPPABLE BUILD MUST NOT COMPILE ON TOP OF PREVIOUS KOTLIN OUTPUT ──
+// Build 1058 shipped an APK in which StreamableLoader still called App.getFileCache(), a getter that had
+// been deleted two commits earlier. Nothing was wrong with the source. Cached.loadMedia/getMedia are
+// PUBLIC INLINE, so their bodies are copied into every CALLER's class file; the commit that changed them
+// recompiled Cached.kt but not its callers, and those orphaned copies kept a call to a member that no
+// longer existed. Every track resolve then died with NoSuchMethodError at runtime.
+//
+// Neither half of the toolchain can see this. The compiler never re-checks an already-inlined body (the
+// caller is simply not recompiled, so nothing looks at it), and R8 packaged the dangling member reference
+// silently - there is no -dontwarn suppressing it. Compiling a shippable variant from nothing is the only
+// reliable defence, and it is the GENERAL fix: it covers every future edit to any public inline function,
+// not just this one.
+//
+// This gate deliberately does NOT clean for you. A clean task wired into the same build has no ordering
+// guarantee against the compile it is meant to precede, so it would be a fix that silently stops working.
+// It REFUSES instead - same shape as verifyExtensionAbi above: a cheap check with an actionable message.
+//
+// Scope is the minified variants only. Debug stays incremental and fast: it is never shipped, and its
+// output lives in a different directory, so it cannot leak into a release compilation.
+//
+// ⚠️ Fail-open if the task-name regex ever stops matching (a product flavor would make the names
+// `compile<Flavor><BuildType>Kotlin`). If flavors are ever added, widen the regex or this silently
+// protects nothing. The variant list below must likewise track buildTypes {} above.
+tasks.register("verifyCleanKotlinOutput") {
+    description = "Fails a release/nightly/stable build that would compile on top of existing Kotlin output."
+    group = "verification"
+    // Resolved at CONFIGURATION time into plain serializable locals so the action below captures no
+    // Project reference - same configuration-cache constraint as verifyExtensionAbi.
+    val kotlinClassesRoot: File = layout.buildDirectory.dir("tmp/kotlin-classes").get().asFile
+    val guarded: List<String> = listOf("release", "nightly", "stable")
+    // In `gradlew clean bundleRelease` the two are independent roots; without this they could be ordered
+    // either way and a genuinely clean build could still trip the check.
+    mustRunAfter("clean")
+    doLast {
+        val dirty = guarded
+            .map { variant -> File(kotlinClassesRoot, variant) }
+            .filter { dir -> dir.isDirectory && dir.walkTopDown().any { it.extension == "class" } }
+        if (dirty.isNotEmpty()) throw GradleException(
+            "Refusing to build a shippable variant on top of existing Kotlin output " +
+                "(${dirty.joinToString(", ") { it.name }}). Incremental compilation can leave a caller " +
+                "holding a STALE copy of a public inline function's body: build 1058 shipped with " +
+                "StreamableLoader still calling the deleted App.getFileCache(), and every track resolve " +
+                "failed with NoSuchMethodError. Run './gradlew clean' first, then rebuild."
+        )
+    }
+}
+
+tasks.matching { it.name.matches(Regex("^compile(Release|Nightly|Stable)Kotlin$")) }.configureEach {
+    dependsOn("verifyCleanKotlinOutput")
+}
