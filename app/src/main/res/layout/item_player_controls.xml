@@ -36,7 +36,7 @@
                 android:ellipsize="marquee"
                 android:gravity="bottom"
                 android:maxLines="1"
-                android:minHeight="32dp"
+                android:minHeight="24dp"
                 android:textSize="20sp"
                 android:textStyle="bold"
                 tools:text="Bruh" />
@@ -47,7 +47,7 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:maxLines="2"
-                android:paddingBottom="8dp"
+                android:paddingBottom="12dp"
                 android:textColorLink="@color/button_player"
                 android:textSize="16sp"
                 tools:text="@tools:sample/lorem/random" />
@@ -57,18 +57,52 @@
             android:id="@+id/trackHeart"
             android:layout_width="64dp"
             android:layout_height="64dp"
-            android:layout_marginEnd="-20dp"
             android:background="@drawable/ripple_60dp"
             android:button="@drawable/anim_heart_40dp"
             android:contentDescription="@string/like"
-            app:buttonTint="@color/button_player" />
+            app:buttonTint="@color/button_player_heart" />
+
+        <!-- Overflow, moved down from the toolbar's menu (more_menu / menu_more) so it sits beside the
+             heart rather than in the top right, which the extension icon now occupies. It is a plain
+             view with a click listener, NOT a menu item, so PlayerToolbarStyle no longer sets `menu`.
+             It carries the -20dp end margin that trackHeart used to: the row has 24dp horizontal
+             padding and these are 64/48dp boxes, so the trailing control needs to be pulled back for
+             its optical edge to line up. Whichever control is LAST owns that margin.
+             trackHeart is gone entirely when the extension has no LikeClient (isVisible is gated on
+             isTrackClient in PlayerFragment), so this must not depend on the heart being present -
+             it is a sibling of the row, not of the heart. -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/trackMore"
+            style="@style/Widget.Material3.Button.IconButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center_vertical"
+            android:layout_marginEnd="-20dp"
+            android:contentDescription="@string/more"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            app:icon="@drawable/ic_more_vert"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="24dp"
+            app:iconTint="@color/button_player" />
 
     </LinearLayout>
 
+    <!-- marginTop and trackTitle's minHeight are a PAIR and must be changed together. trackTitle used to
+         reserve 32dp for ~24dp of 20sp bold text with gravity=bottom, i.e. ~8dp of dead space above the
+         glyphs — which is what opened the cover/title gap, since fragment_player.xml constrains the cover's
+         bottom directly to this layout's top with no margin. That 8dp was moved here (-40 -> -32) to give
+         the seek thumb clearance from the artist line instead: the Slider's measured height is floored by
+         minWidgetThickness (minTouchTargetSize=90dp) and did NOT change when thumbHeight went 20 -> 28 ->
+         44dp, so the track centre stayed put while the thumb grew symmetrically around it and ate the
+         clearance. Net height change is ZERO, so uiViewModel.playerControlsHeight and the collapse morph
+         are untouched. If more clearance is ever needed it has to come from trackArtist's paddingBottom,
+         which DOES grow this block and DOES move the morph target. -->
     <FrameLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="-40dp"
+        android:layout_marginTop="-36dp"
         android:clipToPadding="false"
         android:paddingHorizontal="12dp"
         android:translationZ="-1dp">
@@ -186,6 +220,36 @@
             android:padding="12dp"
             tools:text="00:00" />
 
+        <!-- The metadata pill: same line as the timestamps, elapsed left / pill centred / total right.
+             Measured before sizing rather than estimated: "MPEG - 44100 Hz - 2ch - 320 kbps" is 185dp in
+             Roboto at 12sp, and the gap between the timestamps is ~215dp even for 1:23:45 durations
+             (387dp row minus two 70dp timestamps minus breathing room), so the typical string does NOT
+             ellipsize. At 16sp it would be 243dp and would clip on every track - which is why the text is
+             smaller here than in the full-width label it replaces. The pill is glanceable, not read.
+             maxWidth is ONE dimen with NO values-land override: landscape is SHORT, not narrow (the
+             controls column is a weighted half of ~914dp, comparable to portrait's 411dp), so an override
+             would add the same drift risk flagged on collapsed_end_controls_width for no gain.
+             Ellipsis is the right outcome when it does happen - merged servers contribute one source
+             title each, video streams add a whole segment - because the full string is one tap away in
+             QualitySelectionBottomSheet. minHeight keeps that tap target at 48dp while the visual pill
+             stays short via the background's vertical inset. -->
+        <TextView
+            android:id="@+id/trackSubtitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center|bottom"
+            android:background="@drawable/shape_pill"
+            android:elevation="1dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="1"
+            android:maxWidth="@dimen/player_pill_max_width"
+            android:minHeight="48dp"
+            android:paddingHorizontal="10dp"
+            android:textColor="@color/amoled_fg"
+            android:textSize="12sp"
+            tools:text="MPEG - 44100 Hz - 2ch - 320 kbps" />
+
         <TextView
             android:id="@+id/trackTotalTime"
             android:layout_width="wrap_content"
@@ -201,7 +265,7 @@
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="-16dp"
+        android:layout_marginTop="-8dp"
         android:paddingHorizontal="4dp">
 
         <com.google.android.material.checkbox.MaterialCheckBox
@@ -216,7 +280,7 @@
             app:buttonTint="@color/button_player"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintHorizontal_bias="0.0"
+            app:layout_constraintHorizontal_bias="1.0"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
 
@@ -236,7 +300,7 @@
             app:iconTint="@color/button_player"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toStartOf="@+id/playPauseContainer"
-            app:layout_constraintStart_toEndOf="@+id/trackShuffle"
+            app:layout_constraintStart_toEndOf="@+id/trackRepeat"
             app:layout_constraintTop_toTopOf="parent" />
 
         <FrameLayout
@@ -282,10 +346,16 @@
             app:iconSize="40dp"
             app:iconTint="@color/button_player"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/trackRepeat"
+            app:layout_constraintEnd_toStartOf="@id/trackShuffle"
             app:layout_constraintStart_toEndOf="@id/playPauseContainer"
             app:layout_constraintTop_toTopOf="parent" />
 
+        <!-- trackRepeat and trackShuffle are BOTH 64dp boxes but size their glyphs by different
+             mechanisms, which is why they looked mismatched: trackShuffle is a MaterialCheckBox whose
+             glyph comes from the button drawable's INTRINSIC size (anim_shuffle -> ic_shuffle_40dp, 28dp),
+             while this is a MaterialButton sizing its icon explicitly via app:iconSize. The 12dp padding
+             was never the cause - iconSize was 32dp against shuffle's 28dp. Keep these two numbers equal;
+             changing padding will not fix a glyph-size mismatch on a MaterialButton. -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/trackRepeat"
             style="?attr/materialIconButtonStyle"
@@ -297,29 +367,14 @@
             android:outlineProvider="none"
             android:padding="12dp"
             app:icon="@drawable/ic_repeat_to_repeat_one_40dp"
-            app:iconSize="32dp"
+            app:iconSize="28dp"
             app:iconTint="@color/amoled_fg"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintHorizontal_bias="1.0"
+            app:layout_constraintHorizontal_bias="0.0"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <TextView
-        android:id="@+id/trackSubtitle"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginHorizontal="48dp"
-        android:layout_marginBottom="8dp"
-        android:ellipsize="end"
-        android:gravity="center"
-        android:maxLines="2"
-        android:minHeight="40sp"
-        android:textAppearance="@style/TextAppearance.AppCompat.Small"
-        android:textColor="@color/amoled_fg"
-        android:textSize="16sp"
-        tools:text="@tools:sample/lorem/random" />
 </LinearLayout>

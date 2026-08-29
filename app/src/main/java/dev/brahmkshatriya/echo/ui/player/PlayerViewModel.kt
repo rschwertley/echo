@@ -19,6 +19,7 @@ import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Message
 import dev.brahmkshatriya.echo.common.models.Streamable
+import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.download.Downloader
@@ -270,6 +271,15 @@ class PlayerViewModel(
 
     fun setRepeat(repeatMode: Int) {
         withBrowser { it.repeatMode = repeatMode }
+    }
+
+    // Icon of the PLAYING extension, for the full-screen player's top-right slot. Takes an explicit id
+    // (from the current MediaItem) rather than reading extensionLoader.current, which is the BROWSING
+    // extension and would change while a track from a different extension kept playing.
+    // Null when the id is unknown or the extension ships no icon; the view keeps its ic_extension_32dp.
+    suspend fun getExtensionIcon(extensionId: String?): ImageHolder? = withContext(Dispatchers.IO) {
+        extensionId ?: return@withContext null
+        extensions.music.getExtension(extensionId)?.metadata?.icon
     }
 
     suspend fun isLikeClient(extensionId: String): Boolean = withContext(Dispatchers.IO) {

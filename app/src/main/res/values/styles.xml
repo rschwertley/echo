@@ -179,6 +179,28 @@
          because the Material3 parent sets a non-zero stop dot that would paint at the far right of the
          track. indicatorTrackGapSize matches the buffer indicators, which zero it explicitly. -->
     <style name="EchoLinearProgressIndicator.Wavy">
+        <!-- Overrides Material's 0.1 / 0.9 defaults so the wave keeps full amplitude for the WHOLE track.
+             Not a tuning number and not per-surface: it is a statement that this component is being used
+             as a SEEK bar rather than a loading bar, which is equally true on phone and TV.
+
+             DeterminateDrawable.getAmplitudeFractionFromLevel is a BINARY gate despite the "Ramp" naming:
+                 level >= min * 10000 && level <= max * 10000 ? 1f : 0f
+             With the defaults that pins amplitude to ZERO below 10% and above 90% of the track and snaps
+             it to full in between. Measured on device: flat until ~14s of a 2:21 track, flat again from
+             3:00 of a 3:18. It is NOT buffering, playWhenReady or a track transition — purely progress.
+
+             The defaults are right for what this widget actually is: a LOADING indicator, where the wave
+             eases in as work starts and settles flat as the bar completes, so a full bar reads as
+             finished rather than still working. A seek bar has no completion to settle into and the user
+             scrubs across the whole range, so all that behaviour does here is delete the wave for the
+             first and last tenth of every track.
+
+             0 and 1 make the gate always-true (level is 0..10000 inclusive). Safe to override: scanning
+             every class in the progressindicator package, DeterminateDrawable is the ONLY consumer of
+             these two fields, and its only reads are the two inside that single gate — nothing in
+             layout, measurement or any other visual path depends on them. -->
+        <item name="waveAmplitudeRampProgressMin">0</item>
+        <item name="waveAmplitudeRampProgressMax">1</item>
         <item name="waveSpeed">12dp</item>
         <item name="trackColor">@android:color/transparent</item>
         <item name="indicatorTrackGapSize">0dp</item>
@@ -295,7 +317,10 @@
         <item name="android:layout_height">wrap_content</item>
         <item name="android:layout_marginStart">4dp</item>
         <item name="android:layout_marginEnd">12dp</item>
-        <item name="menu">@menu/more_menu</item>
+        <!-- No `menu` here on purpose: the overflow moved out of the toolbar and down beside the
+             heart in item_player_controls.xml (trackMore), as a plain view with a click listener. The
+             top-right slot it vacated now holds the playing extension's icon. more_menu.xml is still
+             referenced elsewhere - do not delete it. -->
         <item name="navigationIcon">@drawable/ic_expand_more</item>
         <item name="navigationIconTint">@color/amoled_fg</item>
         <item name="navigationContentDescription">@string/close</item>

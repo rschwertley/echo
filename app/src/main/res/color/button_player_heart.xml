@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The heart is the only control in the transport region representing a persistent user CHOICE rather
+     than a transport action, so it is the one place the album accent earns its keep: liked vs not-liked
+     should read at a glance. PlayerFragment overrides the checked entry at runtime with
+     playerColors.accent; this file is the pre-tint default and the unchecked colour.
+     accent is acceptable here despite its weak-palette fallback chain (lightVibrant ?: vibrant ?:
+     lightMuted ?: titleTextColor) precisely because a muted accent makes the heart SUBTLE, never
+     illegible - unlike a container fill, where the same fallback would erase the element. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/amoled_fg" android:alpha="@dimen/material_emphasis_disabled" android:state_enabled="false" />
+    <item android:color="?attr/colorTertiary" android:state_checked="true" />
+    <item android:color="@color/amoled_fg" />
+</selector>

@@ -1,0 +1,14 @@
+<!-- Vertical three-dot overflow glyph. Same geometry as ic_more_horiz with the dot centres
+     transposed in the 960 viewport (x<->y): dots at y=240/480/720 on x=480 instead of the reverse.
+     Used by the full-screen player's overflow button, which moved out of the toolbar menu and down
+     beside the heart. ic_more_horiz is still used elsewhere - do not replace it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:tint="?colorOnSurface"
+    android:viewportWidth="960"
+    android:viewportHeight="960">
+  <path
+      android:fillColor="#FF000000"
+      android:pathData="M480,720q-33,0 -56.5,-23.5T400,640q0,-33 23.5,-56.5T480,560q33,0 56.5,23.5T560,640q0,33 -23.5,56.5T480,720ZM480,560q-33,0 -56.5,-23.5T400,480q0,-33 23.5,-56.5T480,400q33,0 56.5,23.5T560,480q0,33 -23.5,56.5T480,560ZM480,400q-33,0 -56.5,-23.5T400,320q0,-33 23.5,-56.5T480,240q33,0 56.5,23.5T560,320q0,33 -23.5,56.5T480,400Z"/>
+</vector>

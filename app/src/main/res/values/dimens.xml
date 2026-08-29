@@ -10,6 +10,13 @@
          animation): the two title columns must reserve the identical end width, or the title shifts
          horizontally as the player collapses. Single source of truth so they can't drift. -->
     <dimen name="collapsed_end_controls_width">64dp</dimen>
+
+    <!-- Ceiling for the full-screen player's metadata pill (trackSubtitle). 210dp = the measured 185dp of
+         "MPEG - 44100 Hz - 2ch - 320 kbps" in Roboto at 12sp plus its 10dp horizontal padding each side.
+         Deliberately has NO values-land override: landscape is short, not narrow - its controls column is
+         a weighted half of ~914dp, comparable to portrait's 411dp - so a second value would only create
+         the drift risk documented on collapsed_end_controls_width without buying anything. -->
+    <dimen name="player_pill_max_width">210dp</dimen>
     <dimen name="context_menu_cover_size">48dp</dimen>
     <dimen name="max_cover_size">384dp</dimen>
     <dimen name="media_header_cover_size">250dp</dimen>

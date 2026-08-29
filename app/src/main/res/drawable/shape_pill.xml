@@ -1,0 +1,7 @@
+<!-- Fully-rounded container for the full-screen player's metadata pill (trackSubtitle on the
+     timestamp line). No solid fill, so backgroundTintList still colours it - PlayerFragment tints it
+     from playerColors.background, deliberately NOT accent: the pill sits between the two timestamps and
+     must not compete with them. 100% radius keeps it a pill at any height. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <corners android:radius="100dp" />
+</shape>

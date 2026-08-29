@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 32dp variant of the 24dp set, for the mini bar's play/pause (48dp checkbox: 32dp gives the
+     same 2:3 icon-to-button ratio the full-screen player uses at 48dp-in-72dp, and clears both the
+     44dp ripple and the 36dp buffering ring).
+     THIS IS THE 24dp GEOMETRY AT A LARGER INTRINSIC SIZE, NOT NEW ARTWORK. Only android:width and
+     android:height differ from the 24dp original; the viewport, pivots and every path string are
+     byte-identical, because the viewport is the coordinate space and width/height is only the render
+     size. That is why there are now THREE sets rather than two.
+     Deliberate trade-off, accepted 2026-08-28: the 48dp set is independently drawn and OPTICALLY
+     CORRECTED (thinner bars, different corner radii, a 960 viewport rather than 24) — this one is not,
+     so its strokes are marginally heavier than a redrawn 32dp would be. Judged not visible at this
+     size. If it ever needs correcting, redraw it against the 48dp set; do not rescale this one. -->
+<animated-selector
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/state_on"
+        android:drawable="@drawable/ic_pause_32dp"
+        android:state_checked="true"/>
+
+    <item android:id="@+id/state_off"
+        android:drawable="@drawable/ic_play_32dp"
+        android:state_checked="false"
+        />
+    <transition
+        android:drawable="@drawable/ic_pause_to_play_32dp_anim"
+        android:fromId="@+id/state_on"
+        android:toId="@+id/state_off"
+        />
+    <transition
+        android:drawable="@drawable/ic_play_to_pause_32dp_anim"
+        android:fromId="@+id/state_off"
+        android:toId="@+id/state_on"
+        />
+</animated-selector>

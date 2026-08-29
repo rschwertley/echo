@@ -91,6 +91,7 @@ import dev.brahmkshatriya.echo.utils.ContextUtils.emit
 import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.getCachedDrawable
+import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadAsCircle
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadBlurred
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadWithThumb
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.animateVisibility
@@ -844,6 +845,17 @@ class PlayerFragment : Fragment() {
                 // transparent in XML so the wave is the only thing drawing the position line — but a
                 // runtime tint would override that XML and paint a straight line back under the wave.
                 seekWaveBar.setIndicatorColor(colors.accent)
+                // The heart is the one control here that shows a persistent CHOICE, so it gets the
+                // accent when checked and stays amoled_fg otherwise (see color/button_player_heart.xml
+                // for why accent's weak-palette fallback is acceptable on a glyph but not on a fill).
+                trackHeart.buttonTintList = ColorStateList(
+                    arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                    intArrayOf(colors.accent, colors.onBackground)
+                )
+                // Pill takes `background`, NOT accent: it sits between the two timestamps and must read
+                // as a container behind them rather than competing with them.
+                trackSubtitle.backgroundTintList = ColorStateList.valueOf(colors.background)
+                trackSubtitle.setTextColor(colors.onBackground)
                 seekBar.thumbTintList = ColorStateList.valueOf(colors.accent)
                 playingIndicator.setIndicatorColor(colors.accent)
                 // bufferBar.setIndicatorColor is DELIBERATELY ABSENT — do not restore it without also
@@ -877,10 +889,20 @@ class PlayerFragment : Fragment() {
             setOnClickListener(if (navigableContext != null) View.OnClickListener {
                 openItem(extId, navigableContext)
             } else null)
-            setOnMenuItemClickListener {
-                if (it.itemId != R.id.menu_more) return@setOnMenuItemClickListener false
-                onMoreClicked(item)
-                true
+        }
+        // Overflow moved out of the toolbar menu (PlayerToolbarStyle no longer sets `menu`) and down
+        // beside the heart, so it is a plain click listener now rather than setOnMenuItemClickListener.
+        playerControls.trackMore.setOnClickListener { onMoreClicked(item) }
+        // Playing extension's icon, top right. Resolved from the item's extensionId - the PLAYING
+        // extension - not from extensionLoader.current, which is the BROWSING one and would swap the
+        // icon mid-track when the user changes tabs. loadAsCircle keeps ic_extension_32dp when the
+        // extension has none, so the slot never goes empty.
+        lifecycleScope.launch {
+            val icon = viewModel.getExtensionIcon(extId)
+            icon.loadAsCircle(extensionIcon, R.drawable.ic_extension_32dp) {
+                // Only overwrite on a real image: a null delivery must leave the XML fallback in place
+                // rather than blanking the slot.
+                if (it != null) extensionIcon.setImageDrawable(it)
             }
         }
         playerCollapsedContainer.run {

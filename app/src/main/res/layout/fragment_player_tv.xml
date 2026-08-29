@@ -354,6 +354,29 @@
 
             </LinearLayout>
 
+            <!-- ═══ TV DIVERGENCES FROM THE PHONE PLAYER - ALL DELIBERATE, DO NOT "UNIFY" ═══
+                 Four differences, recorded together so this file explains itself:
+
+                 1. STREAM INFO PLACEMENT. Phone moved this to a small centred PILL on the timestamp line
+                    (12sp, ellipsized, ~210dp cap). TV keeps it as a full-width centred label BELOW the
+                    transport row. A pill between two timestamps is unreadable at lean-back distance, and
+                    TV has the vertical room the phone does not.
+                 2. SEEK THUMB SHAPE. Phone uses a 4x44dp BAR; TV keeps a 24dp CIRCLE. The thumb doubles
+                    as the D-pad focus indicator inside a 28dp-radius halo, a circle-in-circle reads as one
+                    focus target, and thumbHeight feeds widgetThickness so changing it risks clipping the
+                    halo. See the note on tv_seek_bar.
+                 3. NO OVERFLOW BUTTON. Phone moved its overflow out of the toolbar menu to a view beside
+                    the heart. On TV that would be another focus target competing with the transport row
+                    in the D-pad chain - the same argument as the thumb.
+                 4. NO EXTENSION ICON. Phone shows the playing extension's icon top-right. Arguable for TV
+                    and not ruled out, but it needs the focus question answered first (decorative and
+                    skipped, or focusable and in the chain) and TV's toolbar has its own insets. If it is
+                    ever added it gets its own pass, not a fold-in.
+
+                 What IS shared: the wavy seek bar and its ramp thresholds live in
+                 EchoLinearProgressIndicator.Wavy precisely because they are statements about the
+                 component, not per-surface tuning. Amplitude, thickness and thumb sizing are per-surface. -->
+
             <!-- Quality / stream info label -->
             <TextView
                 android:id="@+id/tv_track_subtitle"

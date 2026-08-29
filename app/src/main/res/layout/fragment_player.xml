@@ -74,7 +74,24 @@
 
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/expanded_toolbar"
-            style="@style/PlayerToolbarStyle" />
+            style="@style/PlayerToolbarStyle" >
+            <!-- Playing extension's icon, in the top right where the overflow menu used to sit (the
+                 overflow moved down beside the heart). Driven from applyCurrent, i.e. from the PLAYING
+                 extension on the current MediaItem - deliberately NOT from extensionLoader.current, which
+                 is the BROWSING extension and would change the icon while a track from another extension
+                 kept playing. A queue mixing extensions therefore updates this per track.
+                 Starts on ic_extension_32dp rather than empty so an extension with no icon, and the
+                 window before the first track resolves, both show the generic glyph instead of a hole. -->
+            <com.google.android.material.imageview.ShapeableImageView
+                android:id="@+id/extensionIcon"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="4dp"
+                android:contentDescription="@string/extensions"
+                android:src="@drawable/ic_extension_32dp"
+                app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
+            </com.google.android.material.appbar.MaterialToolbar>
 
         <androidx.constraintlayout.widget.ConstraintLayout
             android:id="@+id/constraint_layout"

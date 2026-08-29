@@ -83,7 +83,7 @@
                 android:layout_width="48dp"
                 android:layout_height="48dp"
                 android:background="@drawable/ripple_44dp"
-                android:button="@drawable/anim_play_pause"
+                android:button="@drawable/anim_play_pause_32dp"
                 android:contentDescription="@string/play"
                 app:buttonTint="@color/button_player" />
 
