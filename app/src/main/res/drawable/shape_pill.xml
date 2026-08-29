@@ -1,7 +1,23 @@
-<!-- Fully-rounded container for the full-screen player's metadata pill (trackSubtitle on the
-     timestamp line). No solid fill, so backgroundTintList still colours it - PlayerFragment tints it
-     from playerColors.background, deliberately NOT accent: the pill sits between the two timestamps and
-     must not compete with them. 100% radius keeps it a pill at any height. -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <corners android:radius="100dp" />
-</shape>
+<!-- Fully-rounded container for the full-screen player's metadata pill (trackSubtitle, on the timestamp
+     line). No solid fill, so backgroundTintList still colours it - PlayerFragment tints it from
+     playerColors.background, deliberately NOT accent: it sits between the two timestamps and must not
+     compete with them. 100% radius keeps it a pill at any height.
+
+     THE 6dp INSETS ARE LOAD-BEARING, not padding. The TextView's LAYOUT box stays 40dp (its minHeight,
+     i.e. the tap target that opens QualitySelectionBottomSheet) while the DRAWN pill is 28dp. That gap is
+     what keeps it off the seek thumb: the seek FrameLayout is 120dp tall (BaseSlider sizes to
+     thumbHeight + paddingTop + paddingBottom = 44 + 76), the 44dp thumb is centred on the track at 60dp
+     so it occupies 38-82dp, and a bottom-gravity 40dp box occupies 80-120dp - a 2dp overlap. Inset, the
+     visible pill occupies 86-114dp: 4dp clear of the thumb above and 6dp off the bottom edge.
+     Note the collider is the THUMB, not the wave band (24dp, 50-74dp) - the thumb reaches 12dp further
+     down each side. The neighbouring timestamps do not collide only because they have no background, so
+     their 12dp padding hides the overlap. Shrinking the layout box instead would cost the tap target;
+     buying the clearance from the Slider's paddingVertical would cost 2dp of block height per 1dp of
+     gap. This costs neither. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetBottom="6dp"
+    android:insetTop="6dp">
+    <shape>
+        <corners android:radius="100dp" />
+    </shape>
+</inset>

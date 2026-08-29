@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.playback.listener
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
@@ -23,6 +24,7 @@ import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.models.Message
+import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionNotFoundException
@@ -323,7 +325,7 @@ class PlayerEventListener(
             serverErrorNotified = false
             retried404MediaId = null
             retriedSocketMediaId = null
-            retriedNetworkMediaId = null
+            networkRetryCount = 0
             // Cold-start re-seek: the saved position was lost when prepare() resolved the deferred source's
             // placeholder->real timeline to the default (0). The real timeline now exists (STATE_READY), so a
             // seek sticks. Position-only on the current window (no index form — sidesteps ShufflePlayer's
@@ -398,7 +400,76 @@ class PlayerEventListener(
                     retriedMediaId = null
                     retriedWatchdogCount = 0
                     Log.d("GladixPlayback", "Buffering watchdog fired: skipping ${player.currentMediaItem?.mediaId}")
-                    recordSkip(null)
+                    // Stall-mode discriminator for the otherwise bare "StuckBuffering" cause. This path
+                    // passes recordSkip(null) -- there is no exception to describe -- so before this the
+                    // report said only "it stalled", which is exactly what the class name already said.
+                    // Build-1055/1056 produced four reports reading
+                    // lastCauses=StuckBuffering,StuckBuffering,StuckBuffering and they were unactionable.
+                    // The four modes these three fields separate:
+                    //   loaded=false loads=1+ -> extension resolve still in flight, never returned a stream
+                    //   loaded=false loads=0  -> resolve ended without producing a source
+                    //   loaded=true  buf=0    -> source opened, zero bytes arrived (CDN / network stall)
+                    //   loaded=true  buf=some -> bytes arriving, just too slowly for BUFFERING_WATCHDOG_MS
+                    // and three context fields that say WHICH failure this is a case of:
+                    //   item= 1st / same / next -- three trips on three tracks is a queue- or source-wide
+                    //         fault; three on ONE track is ours, and reachable: skipInvoluntarily() is
+                    //         seekToNextMediaItem(), which under REPEAT_MODE_ONE resolves to the SAME
+                    //         index, so the breaker can trip without the queue ever advancing.
+                    //   net=  up / down / ? -- separates "this device lost the network" from "the source
+                    //         is unreachable while we are online", which no other field here can. Read
+                    //         from ConnectivityManager rather than App.networkFlow because this listener
+                    //         is not given App; runCatching because a diagnostic must never throw.
+                    //   play= yes / no -- playWhenReady at the trip. The watchdog arms on ANY
+                    //         STATE_BUFFERING, so a PAUSED restore that stalls can trip the breaker with
+                    //         the user never having pressed play. Not inferable from the crash keys:
+                    //         is_playing is false throughout STATE_BUFFERING regardless of intent.
+                    //
+                    // Deliberately NOT added, because they carry no information here:
+                    //   time-in-buffering -- continuous (see the cardinality note below), and the grace
+                    //     expiry it would show is already implied: reaching this branch with loaded=false
+                    //     loads=1+ can ONLY happen after COLD_GRACE_MS elapsed, or the cold branch above
+                    //     would have re-armed instead.
+                    //   retriedWatchdogCount -- always maxWatchdogRetries here; a constant.
+                    //   mediaId / track title -- extension-authored, would need scrubbing, and item=
+                    //     answers the only question they were wanted for. extensionId already attributes.
+                    //
+                    // (!) EVERY FIELD MUST STAY LOW-CARDINALITY. HealthMonitor.report() dedupes on
+                    // simpleName + message, and lastCauses is PART of that message, so any continuous value
+                    // here -- elapsed ms, a buffered-ms count, a track id -- gives every trip a unique
+                    // signature, defeats the 10-minute cooldown and turns this back into spam. That is the
+                    // same trap the deliberately-constant message on DataSourceTeardownRaceException exists
+                    // to avoid. Hence the booleans, the "2+" clamp and the bucketed net/item: the ceiling
+                    // is 2 x 3 x 2 x 3 x 3 x 2 = 216 signatures, but that is a CEILING and not a rate --
+                    // the fields are strongly correlated (loaded=true forces loads=0; net=down forces
+                    // buf=0) and every one of them is stable for the duration of an episode, so a
+                    // repeating condition still collapses to one report per cooldown while a CHANGE of
+                    // condition reports immediately. What would actually break the cooldown is a field
+                    // that MOVES for uninteresting reasons; that is the test to apply to anything you add
+                    // here, not the size of the product. Bucket anything new; never interpolate a raw
+                    // number. Every field is ours - a player/system read, never an extension-authored
+                    // string - so none of them need scrubbing, and the mediaId stays out for exactly that
+                    // reason (extensionId already attributes, and item= answers what it was wanted for).
+                    val loads = activeLoadCount()
+                    val bufferedAhead = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+                    // currentMediaId, not a fresh read: it is captured at the top of this withContext and
+                    // nothing has touched the player on this branch yet, so the two are identical here.
+                    val item = when {
+                        lastWatchdogSkipMediaId == null -> "1st"
+                        lastWatchdogSkipMediaId == currentMediaId -> "same"
+                        else -> "next"
+                    }
+                    lastWatchdogSkipMediaId = currentMediaId
+                    val net = runCatching {
+                        val cm = context.getSystemService(ConnectivityManager::class.java)
+                        if (cm?.activeNetwork == null) "down" else "up"
+                    }.getOrDefault("?")
+                    recordSkip(
+                        null,
+                        detail = "loaded=${player.currentMediaItem?.isLoaded == true} " +
+                            "loads=${if (loads > 2) "2+" else "$loads"} " +
+                            "buf=${if (bufferedAhead > 0L) "some" else "0"} " +
+                            "item=$item net=$net play=${if (wasPlaying) "yes" else "no"}"
+                    )
                     if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                         reportAndResetConsecutiveSkips(player.currentMediaItem?.extensionId, "pause")
                         player.pause()
@@ -559,9 +630,21 @@ class PlayerEventListener(
     private var retriedMediaId: String? = null
     private var retriedWatchdogCount = 0
     private val maxWatchdogRetries = 1
+    // Item of the PREVIOUS watchdog skip in the current breaker run - the only thing that can tell three
+    // trips on three tracks from three trips on ONE. Cleared in resetConsecutiveSkips() so it moves in
+    // lockstep with recentSkipCauses and never compares across runs. NOT foldable into retriedMediaId:
+    // that one is cleared at the top of this same branch (it scopes the per-track RETRY, not the run).
+    private var lastWatchdogSkipMediaId: String? = null
     private var retried404MediaId: String? = null
     private var retriedSocketMediaId: String? = null
-    private var retriedNetworkMediaId: String? = null
+    // Retry BUDGET for the network-down branch, not a per-track latch. It was a single mediaId compared
+    // only against the current one, which cannot bound retries ACROSS tracks: alternating A -> B -> A the
+    // id never matches the previous, so every track retried every time it came round and the hold was
+    // never reached. STATE_READY is the only reset (see the block that clears retried404/retriedSocket),
+    // and while the network is down STATE_READY never fires - so the old form was an unbounded retry
+    // storm for exactly as long as the outage lasted. A counter bounds the outage, not the track.
+    private var networkRetryCount = 0
+    private val maxNetworkRetries = 2
 
     // Chain-walk, NOT rootCause. `rootCause` (Serializer.kt:35) is the DEEPEST node, and Android's real
     // network chains bottom out in PLATFORM types: UnknownHostException -> android.system.GaiException,
@@ -577,9 +660,11 @@ class PlayerEventListener(
     // The ONLY way to advance the breaker: increments the counter and records this skip's cause together,
     // so they cannot drift. Called at every skip site; never at the exempt (5xx / removed-extension) sites,
     // which do not skip. cause == null for the buffering watchdog (a stuck resolve, no error object).
-    private fun recordSkip(cause: Throwable?, playbackError: PlaybackException? = null) {
+    private fun recordSkip(
+        cause: Throwable?, playbackError: PlaybackException? = null, detail: String? = null
+    ) {
         consecutiveUnavailableSkips++
-        recentSkipCauses.addLast(safeCause(cause, playbackError))
+        recentSkipCauses.addLast(safeCause(cause, playbackError, detail))
         if (recentSkipCauses.size > maxConsecutiveUnavailableSkips) recentSkipCauses.removeFirst()
     }
 
@@ -588,6 +673,7 @@ class PlayerEventListener(
     private fun resetConsecutiveSkips() {
         consecutiveUnavailableSkips = 0
         recentSkipCauses.clear()
+        lastWatchdogSkipMediaId = null
     }
 
     // Enriched skip-cause detail (build-985 "lastCauses=Exception,Exception,Exception" was uselessly bare —
@@ -610,13 +696,20 @@ class PlayerEventListener(
     // the MAX_CAUSE_LEN truncation — attribution is the part that was missing entirely.
     // Same scrub/cap treatment as the message: the name is an author-declared third-party string, so it is
     // never emitted raw, and its own cap keeps it from eating the budget the real diagnosis needs.
-    private fun safeCause(cause: Throwable?, playbackError: PlaybackException? = null): String {
+    // `detail` is caller-supplied context for a skip that has NO exception to describe -- today only the
+    // buffering watchdog, whose recordSkip(null) otherwise renders as the bare word "StuckBuffering". It is
+    // placed immediately after the class name because it QUALIFIES it; the http/msg fields are always null
+    // on that path, so nothing is displaced. Callers must keep it low-cardinality -- see the note at the
+    // watchdog's call site for why (report()'s dedupe signature includes this string).
+    private fun safeCause(
+        cause: Throwable?, playbackError: PlaybackException? = null, detail: String? = null
+    ): String {
         val code = playbackError?.errorCodeName
         val ext = playbackError?.appExtensionName()?.let { "ext:$it" }
         val cls = cause?.let { it::class.simpleName ?: "Unknown" } ?: "StuckBuffering"
         val http = (cause as? HttpDataSource.InvalidResponseCodeException)?.let { "HTTP ${it.responseCode}" }
         val msg = cause?.deepestSafeMessage()
-        return listOfNotNull(code, ext, cls, http, msg).joinToString(" ").take(MAX_CAUSE_LEN)
+        return listOfNotNull(code, ext, cls, detail, http, msg).joinToString(" ").take(MAX_CAUSE_LEN)
     }
 
     // Name of the extension that OWNS this failure: the first AppException in the chain (ExtensionUtils.get
@@ -827,16 +920,37 @@ class PlayerEventListener(
         // occurrence: silent re-prepare (clears the player error, so a transient blip recovers to
         // clean playback with no message). Second occurrence: the retry also failed → pause and
         // hold, surface the no_internet message, and let the user / AA-BT resume via play (which
-        // re-prepares and retries). retriedNetworkMediaId is kept on the hold so a failed resume
-        // holds again (one attempt per tap); it resets in the STATE_READY block on recovery and
-        // auto-invalidates when the mediaId changes. Scoped to these two exceptions only, so
+        // re-prepares and retries). The budget is kept on the hold so a failed resume holds again;
+        // it resets in the STATE_READY block on recovery, i.e. only a track that actually PLAYS
+        // refills it. Scoped to these two exceptions only, so
         // genuinely-unavailable tracks still skip via the branches above/below.
+        // Cache timeout is a WHOLE-APP condition, like a network outage - so it holds, exactly as the
+        // network-down branch below does, and for the same reason: skipping cannot help. app.fileCache is a
+        // single lazily-started Deferred shared process-wide, so the NEXT track awaits the identical object
+        // and will time out identically. Skipping would walk the whole queue silently at 60s a track.
+        // Placed ABOVE the generic tail on purpose: with no explicit branch this fell through to it and got
+        // the retry-then-skip bookkeeping, i.e. a slow cache produced tracks that quietly skipped - the
+        // symptom family this codebase has repeatedly had to chase. No recordSkip, so the consecutive-skip
+        // breaker is untouched; a cache stall must not consume the budget that exists for dead tracks.
+        // See App.FileCacheTimeoutException for why it carries no cause (attaching one would route it into
+        // the silent-skip family via rootCause).
+        if (rootCause is App.FileCacheTimeoutException) {
+            Log.d("GladixPlayback", "onPlayerError: file cache timed out, holding")
+            scope.launch { throwableFlow.emit(PlayerException(mediaItem, rootCause)) }
+            player.pause()
+            return
+        }
+
         // isNetworkDown is computed above the socket branch (see there for why the ordering matters).
         if (isNetworkDown) {
             val currentMediaId = mediaItem?.mediaId
-            if (retriedNetworkMediaId == null || retriedNetworkMediaId != currentMediaId) {
-                retriedNetworkMediaId = currentMediaId
-                Log.d("GladixPlayback", "onPlayerError: network down for $currentMediaId, retrying once")
+            if (networkRetryCount < maxNetworkRetries) {
+                networkRetryCount++
+                Log.d(
+                    "GladixPlayback",
+                    "onPlayerError: network down for $currentMediaId, " +
+                        "retry $networkRetryCount/$maxNetworkRetries"
+                )
                 val savedIndex = player.currentMediaItemIndex
                 val savedPosition = player.currentPosition
                 player.stop()
@@ -845,7 +959,10 @@ class PlayerEventListener(
                 player.play()
                 requestAudioFocus()
             } else {
-                Log.d("GladixPlayback", "onPlayerError: network down retry failed for $currentMediaId, holding")
+                Log.d(
+                    "GladixPlayback",
+                    "onPlayerError: network down, retry budget spent for $currentMediaId, holding"
+                )
                 scope.launch { throwableFlow.emit(PlayerException(mediaItem, rootCause)) }
                 player.pause()
             }

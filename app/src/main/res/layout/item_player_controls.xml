@@ -84,7 +84,7 @@
             app:icon="@drawable/ic_more_vert"
             app:iconGravity="textStart"
             app:iconPadding="0dp"
-            app:iconSize="24dp"
+            app:iconSize="28dp"
             app:iconTint="@color/button_player" />
 
     </LinearLayout>

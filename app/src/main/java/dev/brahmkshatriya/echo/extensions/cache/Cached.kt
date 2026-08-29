@@ -89,7 +89,7 @@ object Cached {
     suspend inline fun <reified T : EchoMediaItem> getMedia(
         app: App, extensionId: String, itemId: String,
     ) = runCatching {
-        val fileCache = app.fileCache.await()
+        val fileCache = app.awaitFileCache()
         val id = "media-$extensionId-$itemId-state"
         fileCache.getData<MediaState.Loaded<T>>(id).getOrThrow()
     }
@@ -166,7 +166,7 @@ object Cached {
                     showRadio = new.isRadioSupported && extension.isClient<RadioClient>(),
                     showShare = new.isShareable && extension.isClient<ShareClient>(),
                 )
-                val fileCache = app.fileCache.await()
+                val fileCache = app.awaitFileCache()
                 val id = "media-${extension.id}-${newState.item.id}-state"
                 fileCache.putData(id, newState)
                 newState
@@ -266,7 +266,7 @@ object Cached {
     }
 
     suspend fun loadLyrics(app: App, extension: Extension<*>, lyrics: Lyrics) = runCatching {
-        val fileCache = app.fileCache.await()
+        val fileCache = app.awaitFileCache()
         val id = "lyrics-${extension.id}-${lyrics.id}"
         val loaded = extension.getAs<LyricsClient, Lyrics> {
             loadLyrics(lyrics)
@@ -330,7 +330,7 @@ object Cached {
     suspend inline fun <reified T : Any> getFeed(
         app: App, extensionId: String, feedId: String, crossinline transform: suspend (T) -> T,
     ): Feed<T> {
-        val fileCache = app.fileCache.await()
+        val fileCache = app.awaitFileCache()
         val tabId = "feed-$extensionId-$feedId"
         val tabs = fileCache.getData<List<Tab>>(tabId).getOrThrow()
         return Feed(tabs) { tab ->
@@ -348,7 +348,7 @@ object Cached {
     suspend inline fun <reified T : Any> savingFeed(
         app: App, extension: Extension<*>, feedId: String, feed: Feed<T>,
     ): Feed<T> {
-        val fileCache = app.fileCache.await()
+        val fileCache = app.awaitFileCache()
         val tabId = "feed-${extension.id}-$feedId"
         fileCache.putData(tabId, feed.tabs)
         return Feed(feed.tabs) { tab ->

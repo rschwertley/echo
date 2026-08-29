@@ -35,7 +35,7 @@ import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.ui.common.UiViewModel
 import dev.brahmkshatriya.echo.ui.player.PlayerColors.Companion.defaultPlayerColors
 import dev.brahmkshatriya.echo.ui.player.PlayerColors.Companion.getColorsFrom
-import dev.brahmkshatriya.echo.ui.player.quality.FormatUtils.getDetails
+import dev.brahmkshatriya.echo.ui.player.quality.FormatUtils.getDetailsFormatFirst
 import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.common.models.ImageHolder
@@ -301,7 +301,7 @@ class PlayerTvFragment : Fragment() {
         // Quality subtitle
         observe(viewModel.serverAndTracks) { (tracks, server, index) ->
             binding.tvTrackSubtitle.text =
-                tracks?.getDetails(requireContext(), server, index)
+                tracks?.getDetailsFormatFirst(requireContext(), server, index)
                     ?.joinToString(" ⦿ ")?.takeIf { it.isNotBlank() }
         }
 

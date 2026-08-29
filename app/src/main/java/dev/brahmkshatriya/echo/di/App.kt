@@ -14,6 +14,7 @@ import dev.brahmkshatriya.echo.common.models.Message
 import dev.brahmkshatriya.echo.common.models.NetworkConnection
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -25,13 +26,35 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class App(
     val context: Application,
     val settings: SharedPreferences,
 ) {
-    val throwFlow = MutableSharedFlow<Throwable>()
-    val messageFlow = MutableSharedFlow<Message>()
+    // ⚠️ THE BUFFER IS LOAD-BEARING. With the default zero buffer these are SUSPEND-on-emit flows, so
+    // `emit` blocks until EVERY current subscriber has accepted the value — which makes error REPORTING
+    // able to stall the code that is reporting. That is not theoretical: ExtensionUtils.getOrThrow awaits
+    // `throwableFlow.emit(it)` inline in the caller's coroutine before returning null, so any failing
+    // extension call on the browse/settings/feed paths waits on these subscribers. And the throwFlow
+    // collector below has NO suspension point (printStackTrace + six setCustomKey + recordException are
+    // all blocking), so collectLatest cannot cancel it — a stuck Crashlytics call wedges the collector and
+    // every emitter behind it, with no way out short of a process restart.
+    // DROP_OLDEST makes emit non-suspending unconditionally. 64 slots means normal operation loses
+    // nothing; only a pathological burst drops, and dropping an error REPORT is strictly better than
+    // hanging the caller that produced it. Nothing depends on the back-pressure: both subscribers are
+    // fire-and-forget (Crashlytics record, snackbar) and getOrThrow discards the result either way.
+    // Do not remove the buffer to "not lose reports" — losing a report is the trade being made.
+    val throwFlow = MutableSharedFlow<Throwable>(
+        extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    // Same shape, same fix. messageFlow is worse than throwFlow in one respect: its only subscriber is
+    // SnackBarHandler's lifecycle-gated observe(), with no ungated sibling, so a message emitted while the
+    // Activity is stopped was already lost with no record anywhere.
+    val messageFlow = MutableSharedFlow<Message>(
+        extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     // Safety net for UNCAUGHT exceptions in background coroutines launched on `scope` — e.g. an extension's
     // background token refresh throwing a raw IllegalStateException. Without a handler these hit the default
@@ -65,12 +88,56 @@ data class App(
         strategy = KacheStrategy.LRU
     }
 
-    val fileCache = scope.async(Dispatchers.IO, CoroutineStart.LAZY) {
-        runCatching { getCache() }.getOrElse {
+    // CancellationException MUST propagate: runCatching caught it, so a CANCELLED first attempt fell into
+    // the recovery path and ran deleteRecursively() on a cache another coroutine may still be using, then
+    // rebuilt over it. That is the wipe-underneath-a-running-instance shape already documented at
+    // PlayerService.getCache, and cancellation is not a corrupt cache - it is this coroutine being told to
+    // stop. Only a real failure should trigger the wipe.
+    private val fileCache = scope.async(Dispatchers.IO, CoroutineStart.LAZY) {
+        try {
+            getCache()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // Corrupt/locked kache -> wipe and rebuild. Deliberate best-effort recovery; if the rebuild
+            // also fails the exception completes this Deferred and every awaiter sees it, which is the
+            // correct outcome (a failure they can report, not a hang).
             context.cacheDir.resolve("kache").deleteRecursively()
             getCache()
         }
     }
+
+    // 60s, and deliberately generous. The job of this bound is to convert INFINITY into something finite,
+    // not to enforce responsiveness - so it should sit far above any plausible normal duration, because a
+    // value tuned too tight converts a slow-but-working cache into a failed load, on a path with known I/O
+    // and OOM history. It is nearly free: the Deferred is LAZY and single-instance, so construction happens
+    // ONCE PER PROCESS and every await after the first returns immediately on a completed Deferred. The
+    // bound can therefore only bite on the first track load of a session.
+    // NOT measured. Nobody has established what FileKache construction normally costs; if that number is
+    // ever wanted it needs a deliberate timing pass, not a guess dressed up as one.
+    private val fileCacheTimeoutMs = 60_000L
+
+    // ⚠️ NO CAUSE, DELIBERATELY. Do not "improve" this by attaching the timeout as a cause.
+    // PlayerEventListener classifies errors off `rootCause`, the DEEPEST node in the chain, and its
+    // silent-skip family matches `rootCause is TimeoutCancellationException`. Attaching a
+    // TimeoutCancellationException here would make every cache timeout resolve to it, and a slow cache
+    // would silently skip every track in the queue - the same shape as the May 2026 bug where each track
+    // skipped until one had a fresh token. Causeless, this resolves to itself and reaches the explicit
+    // branch in onPlayerError that pauses and surfaces the message instead.
+    class FileCacheTimeoutException(ms: Long) :
+        Exception("Timed out waiting for the file cache after ${ms}ms")
+
+    // The raw Deferred is PRIVATE so this is the only way in - the rule is structural, not advisory. That Deferred is a single
+    // lazily-started instance shared process-wide and sits on the critical path of every track load
+    // (Cached.loadMedia -> StreamableLoader.loadTrack -> StreamableMediaSource), so an unbounded await
+    // there means one stalled cache init hangs ALL playback, silently, until the process is killed.
+    // Bounding it does NOT poison the Deferred: withTimeoutOrNull cancels the AWAITING coroutine, not the
+    // async, which keeps running on `scope` independently. So a transient stall self-heals - the next
+    // caller's await returns immediately once it completes - while a permanent one degrades to a bounded
+    // failure per load instead of a permanent hang. Throwing rather than returning null keeps every call
+    // site unchanged: they already run inside runCatching, so this surfaces as an ordinary failed load.
+    suspend fun awaitFileCache(): FileKache =
+        withTimeoutOrNull(fileCacheTimeoutMs) { fileCache.await() } ?: throw FileCacheTimeoutException(fileCacheTimeoutMs)
 
     private val _networkFlow = MutableStateFlow(NetworkConnection.NotConnected)
     val networkFlow = _networkFlow.asStateFlow()
@@ -107,33 +174,43 @@ data class App(
                 // every later throwFlow.emit then suspends FOREVER on the 0-buffer MutableSharedFlow —
                 // silencing both the Crashlytics non-fatals and the snackbars, with no error anywhere.
                 // A wholesale silencer waiting to happen; the fix is a runCatching around the apply.
-                @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants")
-                if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) FirebaseCrashlytics.getInstance().apply {
-                    // extension_id is the PLAYING extension (crashExtensionId, written at
-                    // PlayerService:322 on media-item transition) — NOT the thrower. Most browse/feed
-                    // errors come from a non-playing extension, so this systematically mis-attributes
-                    // them. Kept unchanged for historical comparability with existing issues, and
-                    // duplicated by playing_extension_id. Read throwing_extension_id for attribution.
-                    setCustomKey("extension_id", crashExtensionId)
-                    // The extension that actually threw, walked off the AppException in the chain
-                    // (ExtensionUtils.get:30 wraps every extension call, so one is present for any
-                    // error routed through that helper). ALWAYS written — Crashlytics keys are sticky
-                    // on the singleton, so omitting it would leave the previous report's value
-                    // attached to a host-side error. "none" now means a genuine HOST-side failure —
-                    // the two AndroidAutoCallback sites that bypass ExtensionUtils.get (performSearch
-                    // and getList) wrap explicitly, so the AA browse/search path attributes correctly.
-                    // AndroidAutoCallback:294 stays deliberately unwrapped: Job.join() does not rethrow
-                    // the joined job's failure, so the only throwable reaching it is from Media3's
-                    // notifySearchResultChanged — host-side, and "none" is the right answer there.
-                    setCustomKey("throwing_extension_id", it.throwingExtensionId() ?: "none")
-                    // "none" = this report came through throwFlow, NOT HealthMonitor. Written for the
-                    // same always-write reason as the keys around it: HealthMonitor.report sets
-                    // health_report_type to its exception type, and without this line that value would
-                    // stick on the singleton and mislabel the NEXT throwFlow report as a health report.
-                    setCustomKey("health_report_type", "none")
-                    setCustomKey("player_state", crashPlayerState)
-                    setCustomKey("is_playing", crashIsPlaying)
-                    recordException(it)
+                // runCatching is the fix the KNOWN GAP note above has been asking for since 2026-08-20.
+                // FirebaseCrashlytics.getInstance() throws when the default FirebaseApp is absent, and
+                // getInstance() itself NPEs if the component is missing - and this block has no suspension
+                // point, so collectLatest cannot cancel it. Unwrapped, a throw here propagates out of
+                // collectLatest and kills this collector for the life of the process, silencing every later
+                // non-fatal. Swallowing is correct: failing to RECORD an error must never escalate into
+                // losing all subsequent ones. Pairs with the DROP_OLDEST buffer above - that stops a stuck
+                // collector blocking emitters, this stops a throwing one disappearing entirely.
+                @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants", "SwallowedException")
+                if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) runCatching {
+                    FirebaseCrashlytics.getInstance().apply {
+                        // extension_id is the PLAYING extension (crashExtensionId, written at
+                        // PlayerService:322 on media-item transition) — NOT the thrower. Most browse/feed
+                        // errors come from a non-playing extension, so this systematically mis-attributes
+                        // them. Kept unchanged for historical comparability with existing issues, and
+                        // duplicated by playing_extension_id. Read throwing_extension_id for attribution.
+                        setCustomKey("extension_id", crashExtensionId)
+                        // The extension that actually threw, walked off the AppException in the chain
+                        // (ExtensionUtils.get:30 wraps every extension call, so one is present for any
+                        // error routed through that helper). ALWAYS written — Crashlytics keys are sticky
+                        // on the singleton, so omitting it would leave the previous report's value
+                        // attached to a host-side error. "none" now means a genuine HOST-side failure —
+                        // the two AndroidAutoCallback sites that bypass ExtensionUtils.get (performSearch
+                        // and getList) wrap explicitly, so the AA browse/search path attributes correctly.
+                        // AndroidAutoCallback:294 stays deliberately unwrapped: Job.join() does not rethrow
+                        // the joined job's failure, so the only throwable reaching it is from Media3's
+                        // notifySearchResultChanged — host-side, and "none" is the right answer there.
+                        setCustomKey("throwing_extension_id", it.throwingExtensionId() ?: "none")
+                        // "none" = this report came through throwFlow, NOT HealthMonitor. Written for the
+                        // same always-write reason as the keys around it: HealthMonitor.report sets
+                        // health_report_type to its exception type, and without this line that value would
+                        // stick on the singleton and mislabel the NEXT throwFlow report as a health report.
+                        setCustomKey("health_report_type", "none")
+                        setCustomKey("player_state", crashPlayerState)
+                        setCustomKey("is_playing", crashIsPlaying)
+                        recordException(it)
+                    }
                 }
             }
         }

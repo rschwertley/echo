@@ -191,6 +191,20 @@ class PlayerTrackAdapter(
         // could re-enter the cover block and re-run the synchronous pre-set.
         private var lastBoundMediaId: String? = null
 
+        // ═══ WHAT THE 2026-08-24 FIX DID AND DID NOT DO - read before trusting the guards ═══
+        // It fixed the SEALING, not the failure. Two bookkeeping defects made a failed cover load
+        // permanent: coverDrawable was set from the SYNCHRONOUS thumbnail (disarming retryLoad's guard
+        // with a placeholder) and lastBoundMediaId was recorded BEFORE completion (so no rebind could
+        // re-issue). Fixing both made the recovery paths reachable again.
+        // It never established WHY the load fails, and it never guarded the PAINT. onDelivered below is
+        // guarded; the paint callbacks were not, until 2026-08-29. Do not read the guarded onDelivered and
+        // assume the pixels are covered - they are separate callbacks with separate guards.
+        // The failure mode that survived: a load that DELIVERS CORRECTLY, then a stale delivery for a
+        // previous track repaints the same recycled ImageView afterwards. The bookkeeping is then
+        // CORRECT - coverDrawable and lastBoundMediaId both refer to the right track - so every recovery
+        // path is correctly disarmed while the pixels are wrong, permanently, until something rebinds.
+        // That is why guarding the paint matters and why the sealing fix alone could not have caught it.
+
         // The mediaId this holder is currently trying to show. A late delivery from a superseded load
         // must not write bookkeeping for a track the holder has already moved off, or the next bind for
         // the real track would see a mismatch and re-issue. Compared by value inside onDelivered.
@@ -219,6 +233,39 @@ class PlayerTrackAdapter(
                     }
                 }
             ) {
+                if (pendingMediaId != boundId) return@loadWithThumb
+                val image = it
+                    ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
+                setImageDrawable(image)
+                paintedDrawable = it
+                applyDrawable()
+            }
+        }
+
+        // Belt for the screen-off wake case, driven from PlayerFragment.onResume. Re-issues the cover load
+        // UNCONDITIONALLY, ignoring the coverDrawable / lastBoundMediaId guards, because in the overwrite
+        // scenario those are correctly SATISFIED: the right cover did deliver and set them, and a stale
+        // delivery then repainted over it. Nothing else can notice that, so nothing else re-issues.
+        // This is a belt, not the fix. Its ordering is not guaranteed - it can still lose to a slower
+        // in-flight stale request - which is exactly why the paint guard above is the real remedy. It is
+        // here because the two candidate mechanisms have different fixes and this covers the other one:
+        // if the failure is a load that never delivers, a fresh load in a live window is what recovers it.
+        fun forceReloadCover() {
+            val index = bindingAdapterPosition.takeIf { it != RecyclerView.NO_POSITION } ?: return
+            val item = getItem(index) ?: return
+            val boundId = item.mediaId
+            pendingMediaId = boundId
+            val old = item.unloadedCover?.getCachedDrawable(binding.root.context)
+            item.track.cover.loadWithThumb(
+                binding.playerTrackCover, old,
+                onDelivered = { drawable ->
+                    if (pendingMediaId == boundId) {
+                        coverDrawable = drawable
+                        lastBoundMediaId = boundId
+                    }
+                }
+            ) {
+                if (pendingMediaId != boundId) return@loadWithThumb
                 val image = it
                     ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
                 setImageDrawable(image)
@@ -250,6 +297,7 @@ class PlayerTrackAdapter(
                         }
                     }
                 ) {
+                    if (pendingMediaId != boundId) return@loadWithThumb
                     val image = it
                         ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
                     setImageDrawable(image)
@@ -324,6 +372,11 @@ class PlayerTrackAdapter(
     fun insetsUpdated() = onEachViewHolder { updateInsets() }
     fun playerControlsHeightUpdated() = onEachViewHolder { updateInsets() }
     fun onColorsUpdated() = onEachViewHolder { updateColors() }
+    // Called from PlayerFragment.onResume - see forceReloadCover for why this exists and why it is a belt
+    // rather than the fix. Hits every ATTACHED holder, not just the visible one: neighbouring pages are
+    // equally exposed to a stale delivery and equally invisible to the guards.
+    fun refreshCovers() = onEachViewHolder { forceReloadCover() }
+
     fun onCurrentUpdated() {
         onEachViewHolder { applyDrawable() }
         if (current.value == null) currentDrawableListener?.invoke(null)

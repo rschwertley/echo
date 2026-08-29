@@ -123,6 +123,18 @@ object ImageUtils {
             tryWith(false) { onDelivered?.invoke(view, drawable) }
         }
         request.target({}, ::setDrawable, ::setDrawable)
+        // ⚠️ NO PER-VIEW COALESCING. This applies to EVERY loadWithThumb call site in the app.
+        // Coil disposes the previous request for a view in ViewTargetRequestDelegate.start(), via
+        // target.view.requestManager.setRequest(this) - that is what makes "last request wins" true for a
+        // normal ImageView load. Our lambda target takes the LifecycleRequestDelegate branch instead,
+        // which never touches requestManager. So multiple requests can target the SAME ImageView at once,
+        // none cancels another, and DELIVERY ORDER IS NOT GUARANTEED: whichever finishes last paints.
+        // This was an unweighed cost of choosing the lambda target for SizeResolver.ORIGINAL and to skip
+        // ViewTargetRequestDelegate.assertActive()'s isAttachedToWindow check (see below) - both of which
+        // we do want. Callers that reuse a view across items MUST guard their own paint callback against
+        // a superseded load; PlayerTrackAdapter does this with pendingMediaId. If you add a call site that
+        // paints into a recycled or reused view, it needs the same guard.
+        //
         // This load is ENQUEUED and its target is a lambda, NOT a ViewTarget, so
         // RequestService.requestDelegate takes the `request.lifecycle ?: findLifecycle()` branch and
         // findLifecycle resolves from the request CONTEXT (view.context -> the Activity).

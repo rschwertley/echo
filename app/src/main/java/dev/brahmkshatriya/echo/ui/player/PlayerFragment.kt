@@ -85,7 +85,7 @@ import dev.brahmkshatriya.echo.ui.media.more.MediaMoreBottomSheet
 import dev.brahmkshatriya.echo.ui.player.PlayerColors.Companion.defaultPlayerColors
 import dev.brahmkshatriya.echo.ui.player.PlayerColors.Companion.getColorsFrom
 import dev.brahmkshatriya.echo.ui.player.PlayerTrackAdapter.Companion.configureClicking
-import dev.brahmkshatriya.echo.ui.player.quality.FormatUtils.getDetails
+import dev.brahmkshatriya.echo.ui.player.quality.FormatUtils.getDetailsFormatFirst
 import dev.brahmkshatriya.echo.ui.player.quality.QualitySelectionBottomSheet
 import dev.brahmkshatriya.echo.utils.ContextUtils.emit
 import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
@@ -187,6 +187,14 @@ class PlayerFragment : Fragment() {
         super.onResume()
         waveResumed = true
         updateWaveMotion()
+        // Belt for the screen-off stale-cover bug - the guard in PlayerTrackAdapter is the actual fix.
+        // While the screen is off no layout runs, so no cover load is issued; meanwhile Coil parks every
+        // request from the ungated `current` collector on the lifecycle gate and releases them all at
+        // ON_START. Posted rather than called inline so it lands AFTER the wake traversal, which is as
+        // late as we can cheaply place it - later means more likely to be the last delivery. It is still
+        // only a belt: a cache hit here can finish before a slower in-flight stale request, which is
+        // precisely why issuing a fresh load cannot be the whole answer.
+        binding?.viewPager?.post { adapter.refreshCovers() }
         if (uiViewModel.playerSheetState.value == STATE_EXPANDED)
             binding?.bgImage?.resume()
     }
@@ -263,8 +271,20 @@ class PlayerFragment : Fragment() {
         var rightPadding = 0
         val isLandscape = requireContext().isLandscape()
         fun updateCollapsed() {
+            // The `playerSheetOffset >= 1f` conjunct is the TWIN of the one in
+            // PlayerTrackAdapter.updateCollapsed - see the long note there for the full reasoning.
+            // Short version: playerSheetState is a SETTLED-STATES-ONLY signal (UiViewModel gates its write
+            // with `if (!isFinalState(newState)) return`), so it still reads EXPANDED for the whole of a
+            // collapse drag. Keying on state alone sent every frame into the EXPANDED arm, where `offset`
+            // comes from moreSheetOffset - 0 with Up Next closed - so alphaInv stayed 1 and the expanded
+            // header ("Playing From", the context title, the extension icon) slid down with the sheet at
+            // FULL OPACITY instead of fading out, while the cover morphed correctly.
+            // ⚠️ THERE ARE TWO updateCollapsed() FUNCTIONS. The adapter's animates the per-page cover; this
+            // one animates the real collapsed bar, bgCollapsed, the toolbar and playerControls. Fixing one
+            // fixes half the morph - that is exactly what happened on 2026-08-26, and why the cover
+            // morphed while the header did not. Change them together.
             val (collapsedY, offset, collapsedOffset) = uiViewModel.run {
-                if (playerSheetState.value == STATE_EXPANDED) {
+                if (playerSheetState.value == STATE_EXPANDED && playerSheetOffset.value >= 1f) {
                     val offset = moreSheetOffset.value
                     Triple(systemInsets.value.top, offset, if (isLandscape) 0f else offset)
                 } else {
@@ -735,7 +755,7 @@ class PlayerFragment : Fragment() {
                 QualitySelectionBottomSheet().show(parentFragmentManager, null)
             }
             observe(viewModel.serverAndTracks) { (tracks, server, index) ->
-                trackSubtitle.text = tracks?.getDetails(requireContext(), server, index)
+                trackSubtitle.text = tracks?.getDetailsFormatFirst(requireContext(), server, index)
                     ?.joinToString(" ⦿ ")?.takeIf { it.isNotBlank() }
             }
         }
