@@ -35,21 +35,6 @@ class StreamableDataSource(
         )
     }
 
-    // PROBE (2026-08-29). Counts every entry into open() below, process wide.
-    // WHY A COUNTER AND NOT A LOG: ProgressiveMediaPeriod.prepare() reaches startLoading() with no
-    // LoadControl, allocator or state gate in between (ProgressiveMediaPeriod:286-304 -> :1079-1102), so a
-    // load starting is a faithful proxy for "prepare() was invoked on the period". Nine periods were created
-    // and never opened in the 1059 captures; logcat showed it and Crashlytics could not, because the main
-    // buffer rolls in minutes. PlayerEventListener diffs this against a per-item snapshot and puts the delta
-    // in the consecutive-skip report, so the answer survives the buffer.
-    // Process wide and static ON PURPOSE: only the deltas are ever read, there is exactly one player process,
-    // and a static needs no constructor change on the Factory or on StreamableMediaSource.Factory. It
-    // survives service recreation, which is correct - the ExoPlayer instance does too.
-    // REMOVE WITH THE PROBE. This is diagnostic scaffolding, not a feature.
-    companion object {
-        val openCount = AtomicInteger(0)
-    }
-
     private var source: DataSource? = null
 
     override fun getUri() = source?.uri
@@ -87,6 +72,22 @@ class StreamableDataSource(
     }
 
     companion object {
+        // PROBE (2026-08-29). Counts every entry into open() above, process wide.
+        // WHY A COUNTER AND NOT A LOG: ProgressiveMediaPeriod.prepare() reaches startLoading() with no
+        // LoadControl, allocator or state gate in between (ProgressiveMediaPeriod:286-304 -> :1079-1102),
+        // so a load starting is a faithful proxy for "prepare() was invoked on the period". Nine periods
+        // were created and never opened in the 1059 captures; logcat showed it and Crashlytics could not,
+        // because the main buffer rolls in minutes. PlayerEventListener diffs this against a per-item
+        // snapshot and puts the delta in the consecutive-skip report, so the answer survives the buffer.
+        // Process wide and static ON PURPOSE: only deltas are read, there is exactly one player process,
+        // and a static needs no constructor change on either Factory. It survives service recreation,
+        // which is correct - the ExoPlayer instance does too.
+        // LIVES IN THIS COMPANION, not its own: Kotlin allows exactly ONE companion per class, and this
+        // one already existed for Streamable.Source.uri below. Adding a second made BOTH invalid, which
+        // also unresolved the uri reference in open() - the failure reads as two unrelated errors.
+        // REMOVE WITH THE PROBE. This is diagnostic scaffolding, not a feature.
+        val openCount = AtomicInteger(0)
+
         val Streamable.Source.uri
             get() = when (this) {
                 is Streamable.Source.Http -> request.url.toUri()
