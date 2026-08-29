@@ -101,10 +101,9 @@ object FormatUtils {
             else listOfNotNull(sources.getOrNull(index ?: -1)?.title)
         }.orEmpty()
 
-    // SOURCES FIRST. For QualitySelectionBottomSheet, which joins with "
-" into a multi-line block where
-    // the source reads as a heading over its formats. Do not reorder this to fix a truncation problem -
-    // this consumer does not truncate; use getDetailsFormatFirst instead.
+    // SOURCES FIRST. For QualitySelectionBottomSheet, which joins the returned list with a newline into
+    // a multi-line block where the source reads as a heading over its formats. Do not reorder this to fix
+    // a truncation problem - this consumer does not truncate; use getDetailsFormatFirst instead.
     fun Tracks.getDetails(
         context: Context, server: Streamable.Media.Server?, index: Int?,
     ): List<String> = sourceTitles(server, index) + formatDetails(context)
