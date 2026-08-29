@@ -47,7 +47,7 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:maxLines="2"
-                android:paddingBottom="12dp"
+                android:paddingBottom="20dp"
                 android:textColorLink="@color/button_player"
                 android:textSize="16sp"
                 tools:text="@tools:sample/lorem/random" />
@@ -89,20 +89,26 @@
 
     </LinearLayout>
 
-    <!-- marginTop and trackTitle's minHeight are a PAIR and must be changed together. trackTitle used to
-         reserve 32dp for ~24dp of 20sp bold text with gravity=bottom, i.e. ~8dp of dead space above the
-         glyphs — which is what opened the cover/title gap, since fragment_player.xml constrains the cover's
-         bottom directly to this layout's top with no margin. That 8dp was moved here (-40 -> -32) to give
-         the seek thumb clearance from the artist line instead: the Slider's measured height is floored by
-         minWidgetThickness (minTouchTargetSize=90dp) and did NOT change when thumbHeight went 20 -> 28 ->
-         44dp, so the track centre stayed put while the thumb grew symmetrically around it and ate the
-         clearance. Net height change is ZERO, so uiViewModel.playerControlsHeight and the collapse morph
-         are untouched. If more clearance is ever needed it has to come from trackArtist's paddingBottom,
-         which DOES grow this block and DOES move the morph target. -->
+    <!-- This negative margin pulls the seek assembly UP over the title/artist row. It has to be negative
+         at all because the Slider is far taller than it looks: BaseSlider.onMeasure sizes to
+         max(minWidgetThickness, max(trackHeight, thumbHeight) + paddingTop + paddingBottom) = 44 + 76 =
+         120dp here, nearly all of it empty space around a 4dp track. Without the pull, the region below the
+         artist reads as a large void.
+         Relaxed from -36dp to -20dp in the spacing pass: at -36dp the 44dp thumb reached into the artist
+         line, which was the "middle is packed" symptom. The 16dp handed back is the single largest
+         contributor to the crowding between artist, seek bar and timestamps.
+         This GROWS the block by 16dp, and that is intended. Growth is safe and self correcting:
+         PlayerFragment measures this layout into uiViewModel.playerControlsHeight, and
+         PlayerTrackAdapter:157 writes that onto item_player_track.xml's player_controls_placeholder, so the
+         page's cover position and the collapse morph target (toMoveY = placeholder.top - cover.top) both
+         follow it. The 107dp in that placeholder is a design time value only.
+         Growth also SHRINKS the end gaps rather than the reverse: with the cover chain packed (see
+         PlayerTrackCoverContainer) every dp added here comes out of the leftover pooled at the two ends,
+         not out of the cover to title gap, which is now fixed by the cover's own marginBottom. -->
     <FrameLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="-36dp"
+        android:layout_marginTop="-20dp"
         android:clipToPadding="false"
         android:paddingHorizontal="12dp"
         android:translationZ="-1dp">
@@ -275,7 +281,7 @@
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="-8dp"
+        android:layout_marginTop="8dp"
         android:paddingHorizontal="4dp">
 
         <com.google.android.material.checkbox.MaterialCheckBox

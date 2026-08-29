@@ -356,20 +356,51 @@
          Stays under the cap on wider devices (anything past ~416dp was already capped at 384dp).
          values-land overrides these to 0dp and is untouched: landscape puts the cover in its own column
          where it is height-bound, so narrowing margins there would buy nothing. -->
+    <!-- CHAIN STYLE IS LOAD BEARING. DO NOT DELETE IT AS REDUNDANT.
+         In portrait this view and player_controls form a two element VERTICAL CHAIN: the cover's bottom is
+         constrained to the controls' top and the controls' top back to the cover's bottom, with the cover
+         held to the parent top and the controls to the parent bottom. Each references the other, which is
+         what makes it a chain rather than two independent anchors.
+         Left at the default `spread`, ConstraintLayout divides ALL leftover vertical space into three EQUAL
+         gaps: above the cover, between cover and controls, and below the controls. That made the cover to
+         title gap a RESIDUE that nobody set and everybody moved by accident. Every edit inside
+         item_player_controls.xml changed it as a side effect, always in the wrong direction:
+           removing trackSubtitle shortened the block, so leftover grew and all three gaps GREW;
+           widening the cover 16dp shrank leftover by 16dp, about 5dp per gap, which is invisible.
+         `packed` puts the cover and the controls adjacent, so the cover to title gap becomes exactly the
+         marginBottom below, a number you set, and the leftover pools at the two ENDS instead, where
+         layout_constraintVertical_bias is the single dial that trades top against bottom. Raise the bias to
+         tighten the gap above the tab sheet, lower it to lift the cover; neither can reopen the middle gap.
+         PORTRAIT ONLY, deliberately not on BasePlayerTrackCoverContainer: values-land puts the cover in its
+         own column constrained top AND bottom to parent, so there is no chain there. chainStyle would be
+         inert in landscape but the BIAS would not. It would slide the landscape cover off centre the first
+         time somebody nudged it here.
+         marginBottom is 24dp, not the 8dp it was under `spread`: under spread it was 8dp PLUS a chain gap
+         of roughly 50dp, so 24dp REDUCES the visible gap, it does not increase it. -->
     <style name="PlayerTrackCoverContainer" parent="BasePlayerTrackCoverContainer">
         <item name="android:layout_marginStart">16dp</item>
         <item name="android:layout_marginEnd">16dp</item>
         <item name="android:layout_marginTop">8dp</item>
-        <item name="android:layout_marginBottom">8dp</item>
+        <item name="android:layout_marginBottom">24dp</item>
+        <item name="layout_constraintVertical_chainStyle">packed</item>
+        <item name="layout_constraintVertical_bias">0.5</item>
     </style>
 
+    <!-- paddingBottom 64dp is NOT slack: player_info_peek_height resolves to nav_height then to
+         collapsed_cover_size = 64dp, so it reserves exactly the more sheet's peek, i.e. the Up Next /
+         Lyrics / Info tab row. Reducing it puts the transport row under the tabs. paddingTop 64dp likewise
+         clears the expanded toolbar. Neither is a spacing knob; the cover chain's bias is.
+         A `layout_constraintVertical_chainStyle` item used to sit here and was INERT: layout_constraint*
+         attributes are layout params read by a view's PARENT, and this style is applied to the
+         ConstraintLayout itself rather than to a member of the chain inside it. It therefore styled nothing
+         while reading as though the chain had already been configured. The real one is on
+         PlayerTrackCoverContainer, which IS the chain head. Do not add one back here. -->
     <style name="PlayerExpandedConstraintLayout">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">match_parent</item>
         <item name="android:clipToPadding">false</item>
         <item name="android:paddingTop">64dp</item>
         <item name="android:paddingBottom">64dp</item>
-        <item name="layout_constraintVertical_chainStyle">spread</item>
     </style>
 
     <style name="TertiaryButton" parent="Widget.Material3.Button.TonalButton">

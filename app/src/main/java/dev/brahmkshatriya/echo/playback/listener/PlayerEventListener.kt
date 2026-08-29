@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.ParserException
@@ -19,6 +20,7 @@ import androidx.media3.datasource.TeeDataSource
 import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.ExoTimeoutException
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import dev.brahmkshatriya.echo.R
@@ -41,6 +43,7 @@ import dev.brahmkshatriya.echo.playback.PlayerState
 import dev.brahmkshatriya.echo.playback.ResumptionUtils
 import dev.brahmkshatriya.echo.playback.ShufflePlayer
 import dev.brahmkshatriya.echo.playback.exceptions.PlayerException
+import dev.brahmkshatriya.echo.playback.source.StreamableDataSource
 import dev.brahmkshatriya.echo.playback.exceptions.TrackUnavailableException
 import dev.brahmkshatriya.echo.ui.common.ErrorCategory
 import dev.brahmkshatriya.echo.ui.common.classify
@@ -307,6 +310,24 @@ class PlayerEventListener(
         emitFullQueue()
     }
 
+    // THE BREAKER LEAVES THE PLAYER SOMEWHERE NOTHING CAN RE-ARM FROM. reportAndResetConsecutiveSkips
+    // ends in player.pause(), which flips playWhenReady ONLY - playbackState stays STATE_BUFFERING, because
+    // the load never completed. Every arm site needs an event that then cannot happen:
+    //   onPlaybackStateChanged fires on a TRANSITION, and BUFFERING -> BUFFERING is not one;
+    //   onTimelineChanged needs TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED;
+    //   the cold-grace self re-arm lives inside a job that has already completed.
+    // So a play press after a trip changed playWhenReady and nothing else, and the player span 12+ minutes
+    // with no watchdog behind it. The field evidence for that is exact: the 10:22:09 play produced a SINGLE
+    // audio-focus request, where a real state transition produces two (onPlayWhenReadyChanged plus
+    // AudioFocusListener's STATE_BUFFERING branch). One request means no transition happened.
+    //
+    // Safe to fire before a breaker trip: arming during ordinary buffering is exactly the intended
+    // behaviour, and armBufferingWatchdog cancels any existing job first, so it cannot double-arm.
+    // This is a MITIGATION, not the fix - it bounds the hang, it does not stop periods failing to prepare.
+    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+        if (playWhenReady && player.playbackState == Player.STATE_BUFFERING) armBufferingWatchdog()
+    }
+
     override fun onPlaybackStateChanged(playbackState: Int) {
         Log.d("GladixPlayback", "onPlaybackStateChanged: state=$playbackState")
         if (playbackState == Player.STATE_BUFFERING) {
@@ -316,6 +337,13 @@ class PlayerEventListener(
             bufferingWatchdog = null
         }
         if (playbackState == Player.STATE_READY) {
+            // PROBE (2026-08-29) - see the field declarations. This is the only moment the current item's
+            // timeline is final and the shouldLoadNextMediaPeriod gate is being evaluated against it.
+            // `as? ExoPlayer` rather than a hard cast: the probe must never be able to break playback, and
+            // audioFormat is not on the Player interface. Main thread here, so session.player is safe to
+            // touch under 1.11's app-thread enforcement.
+            lastReadyDurationKnown = player.duration != C.TIME_UNSET
+            lastReadyMime = (player as? ExoPlayer)?.audioFormat?.sampleMimeType
             resetConsecutiveSkips()
             // A track resolved successfully — the queue is not all-dead (removed-extension tracks never reach
             // READY). Suppresses the removed-extension exhaustion message for any queue that played anything.
@@ -347,6 +375,9 @@ class PlayerEventListener(
         if (coldMediaId != coldBufferingMediaId) {
             coldBufferingMediaId = coldMediaId
             coldBufferingStart = System.currentTimeMillis()
+            // PROBE (2026-08-29) - baseline for the `opens` delta, taken per ITEM rather than per arm so a
+            // watchdog retry on the same track does not reset it. Anything the retries open still counts.
+            openCountAtItemStart = StreamableDataSource.openCount.get()
         }
         bufferingWatchdog?.cancel()
         bufferingWatchdog = scope.launch {
@@ -463,12 +494,15 @@ class PlayerEventListener(
                         val cm = context.getSystemService(ConnectivityManager::class.java)
                         if (cm?.activeNetwork == null) "down" else "up"
                     }.getOrDefault("?")
+                    // PROBE (2026-08-29) - probeDetail() carries dur/opens/mime; the fields before it are
+                    // watchdog-local (item, play) or cheap player reads, so they stay here.
                     recordSkip(
                         null,
                         detail = "loaded=${player.currentMediaItem?.isLoaded == true} " +
                             "loads=${if (loads > 2) "2+" else "$loads"} " +
                             "buf=${if (bufferedAhead > 0L) "some" else "0"} " +
-                            "item=$item net=$net play=${if (wasPlaying) "yes" else "no"}"
+                            "item=$item net=$net play=${if (wasPlaying) "yes" else "no"} " +
+                            probeDetail()
                     )
                     if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                         reportAndResetConsecutiveSkips(player.currentMediaItem?.extensionId, "pause")
@@ -576,8 +610,19 @@ class PlayerEventListener(
         // Bounds for enriched skip-cause reporting (safeCause) — keep the Crashlytics non-fatal small and
         // spiral-proof: per-cause detail is capped, and only maxConsecutiveUnavailableSkips (3) causes are
         // ever joined, so lastCauses stays ~a few hundred chars regardless of how nested a message is.
+        // 140 -> 200 (2026-08-29). safeCause now also carries probeDetail() on the ERROR path, where it
+        // competes with code/ext/cls/http/msg for the budget; .take() truncates from the END, so at 140 a
+        // long message lost its tail — and the message is what identifies the fault. 3 x 200 = 600 chars.
+        // THIS IS A SELF-IMPOSED BUDGET, NOT AN EXTERNAL LIMIT. Verified 2026-08-29: nothing parses these
+        // strings, and lastCauses reaches Crashlytics only inside the HealthException MESSAGE — no custom
+        // key carries it (the keys are health_report_type / throwing_extension_id / extension_id /
+        // player_state / is_playing, all short), so Crashlytics'''s 1024-char CUSTOM KEY limit is not the
+        // binding constraint here. The one place the message is reused is report()'''s dedupe signature
+        // (simpleName + message); for ConsecutiveSkipException that is Scope.MEMORY_ONLY, i.e. a HashMap
+        // key with no length limit, and a longer string does not change the signature CARDINALITY because
+        // identical content still produces an identical signature. Safe to move again if needed.
         private const val MAX_MSG_LEN = 80
-        private const val MAX_CAUSE_LEN = 140
+        private const val MAX_CAUSE_LEN = 200
         // Extension display names are author-declared and unbounded; cap independently so a long one can't
         // eat the MAX_CAUSE_LEN budget the errorCodeName/type/message actually need.
         private const val MAX_EXT_NAME_LEN = 24
@@ -635,6 +680,57 @@ class PlayerEventListener(
     // lockstep with recentSkipCauses and never compares across runs. NOT foldable into retriedMediaId:
     // that one is cleared at the top of this same branch (it scopes the per-track RETRY, not the run).
     private var lastWatchdogSkipMediaId: String? = null
+
+    // PROBE (2026-08-29) - the two faults the 1059 captures separated, neither of which the existing
+    // detail fields can see. REMOVE WITH THE PROBE.
+    //
+    // FAULT 1, the advance that was never queued. MediaPeriodQueue.shouldLoadNextMediaPeriod():209-215 is
+    //   loading == null || (!loading.info.isFinal && loading.isFullyBuffered()
+    //                       && loading.info.durationUs != C.TIME_UNSET && length < MAX_BUFFER_AHEAD)
+    // There is NO LoadControl term and NO allocator term in it - which is what refuted the allocator
+    // hypothesis before it cost a build. A track played for 131 seconds and emitted no prepareSourceInternal
+    // for the next item at all, so that gate was shut for the whole track. Of its two candidate terms,
+    // durationUs == C.TIME_UNSET is the one a stream property could explain. `dur` reads it.
+    //
+    // FAULT 2, the forced retry that never started. queue.clear() nulls `loading`, so after player.stop()
+    // the gate reopens via the first branch and a holder IS enqueued and prepared - yet nine createPeriod
+    // calls produced zero opens. `opens` is the observable that separates this from fault 1.
+    //
+    // `mime` tests whether fault 1 is per-stream: FLAC carries total samples in STREAMINFO so duration is
+    // always known, while MP3 without a Xing/VBRI header needs a content length to divide. If failures are
+    // MP3 and successes are FLAC, the duration hypothesis holds; if both containers appear on both sides it
+    // is refuted, and `opens` still answers fault 2. media3-authored, never extension text - no scrubbing.
+    //
+    // Sampled at STATE_READY, NOT at the watchdog tick: by the tick the player has been stopped and
+    // re-prepared repeatedly and the reading describes the wreckage, not the state that shut the gate.
+    private var lastReadyDurationKnown: Boolean? = null
+    private var lastReadyMime: String? = null
+    private var openCountAtItemStart = 0
+
+    // The three probe fields rendered for a detail string. ONE helper, called from EVERY recordSkip site,
+    // because the fields were originally built inline in the buffering watchdog and therefore reported on
+    // the watchdog/breaker path ONLY. The error path has six recordSkip sites of its own (404, socket,
+    // network, the missing-file/401/malformed/timeout family, maxRetries, per-item retries) and every one
+    // of them passed detail = null, so a stall that surfaced through onPlayerError carried no probe data at
+    // all - the instrument was blind on exactly the path a StuckPlayerDetector report takes.
+    // Cheap and side-effect free: three field reads and an AtomicInteger get. REMOVE WITH THE PROBE.
+    private fun probeDetail(): String {
+        val opens = (StreamableDataSource.openCount.get() - openCountAtItemStart).coerceAtLeast(0)
+        val dur = when (lastReadyDurationKnown) {
+            true -> "set"
+            false -> "unset"
+            null -> "?"
+        }
+        val mimeRaw = lastReadyMime
+        val mime = when {
+            mimeRaw == null -> "none"
+            mimeRaw.endsWith("mpeg") -> "mpeg"
+            mimeRaw.endsWith("flac") -> "flac"
+            mimeRaw.contains("mp4a") -> "mp4a"
+            else -> "other"
+        }
+        return "dur=$dur opens=${if (opens > 1) "2+" else "$opens"} mime=$mime"
+    }
     private var retried404MediaId: String? = null
     private var retriedSocketMediaId: String? = null
     // Retry BUDGET for the network-down branch, not a per-track latch. It was a single mediaId compared
@@ -804,7 +900,7 @@ class PlayerEventListener(
             } else {
                 retried404MediaId = null
                 Log.d("GladixPlayback", "onPlayerError: 404 retry failed for $currentMediaId, skipping")
-                recordSkip(rootCause, error)
+                recordSkip(rootCause, error, probeDetail())
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                     reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                     player.stop()
@@ -886,7 +982,7 @@ class PlayerEventListener(
             } else {
                 retriedSocketMediaId = null
                 Log.d("GladixPlayback", "onPlayerError: SocketException retry failed for $currentMediaId, skipping")
-                recordSkip(rootCause, error)
+                recordSkip(rootCause, error, probeDetail())
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                     reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                     player.stop()
@@ -970,7 +1066,7 @@ class PlayerEventListener(
         }
 
         if (rootCause is TrackUnavailableException || rootCause.message?.contains("not available", ignoreCase = true) == true) {
-            recordSkip(rootCause, error)
+            recordSkip(rootCause, error, probeDetail())
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                 reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                 player.stop()
@@ -1008,6 +1104,27 @@ class PlayerEventListener(
                 && (rootCause.message?.contains("HTTP 401") == true
                     || rootCause.message?.contains("HTTP 403") == true))
         val isMalformedContent = rootCause is ParserException && rootCause.contentIsMalformed
+        // ⚠️ TYPE-BASED, AND THAT IS WHY StuckPlayerException MISSES IT. media3's StuckPlayerDetector
+        // surfaces through ExoPlayerImpl.onStuckPlayerDetected (:3652) as
+        //   stopInternal(ExoPlaybackException.createForUnexpected(exception, ERROR_CODE_TIMEOUT))
+        // so it CARRIES ERROR_CODE_TIMEOUT - but that is a PlaybackException CODE, not a Kotlin type, and
+        // this check tests the rootCause's type. StuckPlayerException is neither of the two below, so it
+        // falls past this branch, past the ExoTimeoutException release check, and into the generic tail.
+        // Do not "fix" that by widening this line: matching a code here would pull genuine socket/parse
+        // timeouts and the stuck detector into one bucket with one recovery, and they need different ones.
+        //
+        // WHAT THE GENERIC TAIL THEN DOES, measured on 1059 and contradicting the earlier scoping of a
+        // StuckPlayerDetector threshold change: it does NOT consume the retry/skip budget on a first
+        // occurrence. The tail emits the non-fatal, does last/currentRetries bookkeeping (currentRetries
+        // resets to 0 because the root-cause class changed), falls past BOTH recordSkip gates, and takes
+        // the else branch - replaceMediaItem(withRetry) then prepare() + play(). The budget is touched only
+        // once the same class repeats to maxRetries, or the item's own retries reach maxSingleItemRetries.
+        // It also DOES arm the watchdog: stopInternal drives STATE_IDLE (which cancels the watchdog and
+        // abandons focus), and the tail's prepare() then drives STATE_BUFFERING - a real transition. The
+        // 1059 timeline confirms it end to end: detector at 10:32:09, breaker trip at 10:32:39, exactly
+        // 3 x (5s retry + 5s skip) later.
+        // The one caveat that DOES survive: at a lowered threshold it can fire on a genuinely slow cold
+        // resolve, so it still needs reconciling with COLD_GRACE_MS = 25_000 before the threshold moves.
         val isTimeout = rootCause is TimeoutCancellationException || rootCause is SocketTimeoutException
 
         // Benign media3 datasource teardown race — suppressed, but counted. The player/cache is torn down
@@ -1075,7 +1192,7 @@ class PlayerEventListener(
         val isExtensionRemoved = rootCause is ExtensionNotFoundException
         if (isMissingFile || is401 || isMalformedContent || isTimeout || isExtensionRemoved) {
             if (!isExtensionRemoved) {
-                recordSkip(rootCause, error)
+                recordSkip(rootCause, error, probeDetail())
                 if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                     reportAndResetConsecutiveSkips(mediaItem?.extensionId, "stop")
                     player.stop()
@@ -1151,7 +1268,7 @@ class PlayerEventListener(
             // whichever branch actually runs (the breaker's own line inside reportAndResetConsecutiveSkips,
             // or the "skipping" line below).
             Log.d("GladixPlayback", "onPlayerError: maxRetries exhausted for ${mediaItem.mediaId}")
-            recordSkip(rootCause, error)
+            recordSkip(rootCause, error, probeDetail())
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                 reportAndResetConsecutiveSkips(mediaItem.extensionId, "stop")
                 player.stop()
@@ -1191,7 +1308,7 @@ class PlayerEventListener(
             // check: incrementing without deciding is precisely the count/decision drift recordSkip guards
             // against, and it would defer the trip by an unbounded number of tracks.
             Log.d("GladixPlayback", "onPlayerError: item retries exhausted for ${mediaItem.mediaId}")
-            recordSkip(rootCause, error)
+            recordSkip(rootCause, error, probeDetail())
             if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                 reportAndResetConsecutiveSkips(mediaItem.extensionId, "stop")
                 player.stop()

@@ -94,6 +94,7 @@ import dev.brahmkshatriya.echo.utils.image.ImageUtils.getCachedDrawable
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadAsCircle
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadBlurred
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadWithThumb
+import dev.brahmkshatriya.echo.utils.image.ImageUtils.warmMemoryCache
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.animateVisibility
 import dev.brahmkshatriya.echo.utils.ui.AutoClearedValue.Companion.autoClearedNullable
 import dev.brahmkshatriya.echo.utils.ui.CheckBoxListener
@@ -187,14 +188,25 @@ class PlayerFragment : Fragment() {
         super.onResume()
         waveResumed = true
         updateWaveMotion()
-        // Belt for the screen-off stale-cover bug - the guard in PlayerTrackAdapter is the actual fix.
-        // While the screen is off no layout runs, so no cover load is issued; meanwhile Coil parks every
-        // request from the ungated `current` collector on the lifecycle gate and releases them all at
-        // ON_START. Posted rather than called inline so it lands AFTER the wake traversal, which is as
-        // late as we can cheaply place it - later means more likely to be the last delivery. It is still
-        // only a belt: a cache hit here can finish before a slower in-flight stale request, which is
-        // precisely why issuing a fresh load cannot be the whole answer.
-        binding?.viewPager?.post { adapter.refreshCovers() }
+        // TRACE (2026-08-29, temporary, GladixArt). One line per wake for the VISIBLE page only, recording
+        // which of the three outcomes the cover took: no request and which guard declined, or a request
+        // and where its bytes came from. Posted so it runs AFTER the wake traversal, i.e. after bind and
+        // retryLoad have already decided - this REPORTS, it does not act. It issues nothing and writes no
+        // page position, so it is not a re-run of the resume-time re-commits (aecc6700, reverted 3 Aug).
+        // Needed because "the holder declined to issue" is the EXPECTED failure mode for the memory-cache
+        // warm, not an edge case, so a negative result is otherwise unreadable. REMOVE WITH THE TRACE.
+        binding?.let { b ->
+            // Synchronous, and BEFORE the post: onResume runs ahead of the wake traversal, so this opens
+            // the generation that bind/retryLoad then decide within, and the posted read below reports it.
+            adapter.beginCoverTrace()
+            b.viewPager.post {
+                val pos = b.viewPager.currentItem
+                Log.d(
+                    "GladixArt",
+                    "wake: page=$pos decision=${adapter.coverDecision(pos) ?: "no-holder"}"
+                )
+            }
+        }
         if (uiViewModel.playerSheetState.value == STATE_EXPANDED)
             binding?.bgImage?.resume()
     }
@@ -575,6 +587,45 @@ class PlayerFragment : Fragment() {
                 it?.mediaItem ?: return@collectLatest
                 binding.applyCurrent(it.mediaItem)
                 loadCurrentBackground(it.mediaItem)
+                // ═══ THIRD ATTEMPT ON THE SCREEN-OFF STALE COVER BUG. Read before changing. ═══
+                // The two before it are REFUTED, both shipped in f2b661b0 (build 1057) and both live in
+                // 1058 and 1059 while the bug survived:
+                //   the paint guard (a superseded load must not paint) - so it is NOT a stale delivery
+                //     overwriting a correct one. The guard stays because it is correct anyway;
+                //   a resume-time unconditional re-issue - so re-issuing at ON_START does not cure it.
+                //     Removed entirely rather than narrowed; it had a failed experiment behind it.
+                //
+                // WHAT THIS TESTS, and it is ONE property: a request that is ALREADY AT THE LIFECYCLE GATE
+                // when the gate opens. Nothing executes while the screen is off - every enqueued load
+                // awaitStarted()s on the Activity lifecycle (ImageUtils:140), the art_probe included, so
+                // "issued in the dark" was never the distinguishing trait and an earlier reading of mine
+                // that said so was wrong. What the probe had was a request ENQUEUED per dark advance, so at
+                // ON_START one already existed for the current track; the recorded consequence was bind
+                // resolving src=MEMORY_CACHE in ~2ms at a healthy wake. The ViewHolder enqueues NOTHING
+                // while dark: its only two entry points are bind (onBindViewHolder) and retryLoad
+                // (onViewAttachedToWindow), both driven by a layout traversal that a STOPPED Activity never
+                // performs - and at wake both are guarded and may decline to issue at all.
+                //
+                // TWO EXISTENCE PROOFS, and what they share. The mini bar's cover (applyCurrent, :934) has
+                // never had this bug, and neither did art_probe. Both load from THIS collector by identity
+                // into a non-recycled view; both use loadWithThumb's lambda target, so NEITHER gets
+                // requestManager coalescing - which rules coalescing out as the discriminator. The property
+                // they share with each other and not with the ViewHolder is issuance from `current`.
+                //
+                // CLEAR OF THE RESUME-TIME TRAP. Two prior resume-time re-commits made things worse, a
+                // permanent one-behind rather than an intermittent one (Jul 28/30 doOnPreDraw, aecc6700,
+                // reverted 3 Aug by 25fae92a). This is not one: it writes no page position, touches no
+                // ViewPager state, and is not a resume-time action - it runs when `current` changes.
+                //
+                // COST is one decode per advance into a ~38MB memory cache. Deliberately not engineered
+                // around: the 1032/1039 OOMs were the service-restart loop, not bitmaps, and toMaxRes's
+                // 1920x1920 rewrite is TV only.
+                //
+                // ⚠️ IF THIS FAILS, the next suspect is NOT the cache. It is that the holder declines to
+                // issue at wake - retryLoad returns early on `coverDrawable != null`, bind on
+                // `item?.mediaId == lastBoundMediaId` - in which case a warm cache is never consulted and
+                // this refutes for a reason unrelated to warming.
+                context?.let { ctx -> it.mediaItem.track.cover.warmMemoryCache(ctx) }
             }
         }
 
@@ -854,7 +905,16 @@ class PlayerFragment : Fragment() {
             binding.playerCollapsedContainer.run {
                 collapsedPlayingIndicator.setIndicatorColor(colors.accent)
                 collapsedSeekbar.setIndicatorColor(colors.accent)
-                collapsedBuffer.setIndicatorColor(colors.accent)
+                // collapsedBuffer.setIndicatorColor is DELIBERATELY ABSENT - do not restore it without
+                // also changing the layout. collapsedBuffer's indicator is transparent in XML, and a
+                // runtime setIndicatorColor here would override that and paint the buffer line straight
+                // back. Only the rail is tinted now. Same treatment as bufferBar below and tvBufferBar in
+                // PlayerTvFragment; keep all three in step.
+                // BUFFERING IS NOW SHOWN NOWHERE IN THE APP - the full screen and TV players lost it in
+                // 1055 for the wavy seek bar, and this was the last surface still drawing one. See the
+                // note on collapsed_buffer in item_player_collapsed_controls.xml for the full reasoning
+                // and for why this view still exists (it carries the rail, its 0.5 alpha and its zero
+                // gap size, none of which can move to collapsed_seekbar).
                 collapsedBuffer.trackColor = colors.onBackground
                 collapsedTrackTitle.setTextColor(colors.onBackground)
                 collapsedTrackArtist.setTextColor(colors.onBackground)

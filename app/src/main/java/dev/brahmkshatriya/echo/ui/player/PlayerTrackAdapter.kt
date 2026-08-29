@@ -204,11 +204,77 @@ class PlayerTrackAdapter(
         // CORRECT - coverDrawable and lastBoundMediaId both refer to the right track - so every recovery
         // path is correctly disarmed while the pixels are wrong, permanently, until something rebinds.
         // That is why guarding the paint matters and why the sealing fix alone could not have caught it.
+        //
+        // ═══ WHAT BUILD 1059 ESTABLISHED - the overwrite family is REFUTED ═══
+        // The paint guard below and a resume-time belt (forceReloadCover / refreshCovers, re-issuing the
+        // cover load unconditionally from PlayerFragment.onResume) were written as the two competing
+        // remedies for the two candidate mechanisms, and were meant to ship one at a time so the result
+        // would attribute. They did not: BOTH landed in f2b661b0 (build 1057) and both were live in 1058
+        // and 1059. Screen-off natural timeout, auto-advance, wake on 1059 still produced a cover exactly
+        // one track behind, with title, artist and the mini bar all correct.
+        // So the pair is refuted together, and each half separately:
+        //   * suppressing a stale paint does not cure it -> the failure is NOT a superseded delivery
+        //     overwriting a correct one, which was the whole overwrite hypothesis;
+        //   * re-issuing the load at ON_START does not cure it either, and the belt ran at FULL WIDTH
+        //     (every attached holder, three decodes per wake) for two generations before removal.
+        // The live family is therefore: the CORRECT load does not deliver while the screen is dark.
+        // The strongest evidence for it predates both and still stands - the GONE test, where an
+        // art_probe ImageView that was never visible still issued its Coil request and the art came back
+        // correct after five dark advances. The cure was the REQUEST, not the pixels. Why that request
+        // worked where forceReloadCover's did not is the open question, and it is a difference between
+        // the two call sites, not between the two images.
+        //
+        // The belt was removed in full rather than narrowed: a change with a failed experiment behind it
+        // and no mechanism in front of it is not worth a full size decode per wake on a tree that OOM'd
+        // at builds 1032 and 1039. NOTHING SPECULATIVE REMAINS IN THE TREE for this bug, so the next
+        // experiment on it starts clean and its result will attribute. Do not reintroduce an unconditional
+        // re-issue without a mechanism; that one has been run.
+        //
+        // The guard below STAYS regardless. A superseded load must not paint, whether or not that is the
+        // bug - it is correct on its own terms and it costs nothing.
 
         // The mediaId this holder is currently trying to show. A late delivery from a superseded load
         // must not write bookkeeping for a track the holder has already moved off, or the next bind for
         // the real track would see a mismatch and re-issue. Compared by value inside onDelivered.
         private var pendingMediaId: String? = null
+
+        // TRACE (2026-08-29, temporary, GladixArt). What the LAST cover decision on this holder was, so a
+        // screen-off wake can be read after the fact instead of guessed. Three outcomes:
+        //   declined:<guard>  - no request issued at all, and which early return stopped it. THIS IS THE
+        //                       EXPECTED failure: a stale load has already satisfied coverDrawable and
+        //                       lastBoundMediaId, so both entry points decline and a warm cache is never
+        //                       consulted. Without this line a negative result is unreadable.
+        //   issued:<site>     - a request went out, source appended when it lands (MEMORY_CACHE = the warm
+        //                       worked; NETWORK = the warm missed or the key did not match).
+        // REMOVE WITH THE TRACE.
+        var lastCoverDecision: String = "none"
+            private set
+        private var coverDecisionSealed = false
+
+        // FIRST WRITE WINS within a generation. bind (onBindViewHolder) and retryLoad
+        // (onViewAttachedToWindow) can BOTH run on the same holder in one wake traversal, in either order,
+        // and last-write-wins made a wake where bind issued and retryLoad then declined log the DECLINE -
+        // precisely the confusion this trace exists to remove. The generation is opened by
+        // beginCoverTrace() from PlayerFragment.onResume, which runs before the wake traversal, so what
+        // gets reported is the first decision taken during that traversal.
+        fun resetCoverDecision() {
+            lastCoverDecision = "none"
+            coverDecisionSealed = false
+        }
+
+        private fun recordCoverDecision(decision: String) {
+            if (coverDecisionSealed) return
+            lastCoverDecision = decision
+            coverDecisionSealed = true
+        }
+
+        // The one write allowed THROUGH the seal, because a source is not a competing decision - it is the
+        // completion of the one already recorded. Guarded on an exact match so a load from the site that
+        // LOST the race cannot relabel the winner: if the sealed decision is a decline, or an issue from
+        // the other site, this no-ops.
+        private fun upgradeCoverDecision(site: String, src: String) {
+            if (lastCoverDecision == "issued:$site") lastCoverDecision = "issued:$site/$src"
+        }
 
         fun applyDrawable() {
             val index = bindingAdapterPosition.takeIf { it != RecyclerView.NO_POSITION } ?: return
@@ -220,44 +286,17 @@ class PlayerTrackAdapter(
         }
 
         fun retryLoad(item: MediaItem?) {
-            if (coverDrawable != null) return
+            if (coverDrawable != null) {
+                recordCoverDecision("declined:coverDrawable@retryLoad")
+                return
+            }
             val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
             val boundId = item?.mediaId
             pendingMediaId = boundId
+            recordCoverDecision("issued:retryLoad")
             item?.track?.cover.loadWithThumb(
                 binding.playerTrackCover, old,
-                onDelivered = { drawable ->
-                    if (pendingMediaId == boundId) {
-                        coverDrawable = drawable
-                        lastBoundMediaId = boundId
-                    }
-                }
-            ) {
-                if (pendingMediaId != boundId) return@loadWithThumb
-                val image = it
-                    ?: ResourcesCompat.getDrawable(resources, R.drawable.art_music, context.theme)
-                setImageDrawable(image)
-                paintedDrawable = it
-                applyDrawable()
-            }
-        }
-
-        // Belt for the screen-off wake case, driven from PlayerFragment.onResume. Re-issues the cover load
-        // UNCONDITIONALLY, ignoring the coverDrawable / lastBoundMediaId guards, because in the overwrite
-        // scenario those are correctly SATISFIED: the right cover did deliver and set them, and a stale
-        // delivery then repainted over it. Nothing else can notice that, so nothing else re-issues.
-        // This is a belt, not the fix. Its ordering is not guaranteed - it can still lose to a slower
-        // in-flight stale request - which is exactly why the paint guard above is the real remedy. It is
-        // here because the two candidate mechanisms have different fixes and this covers the other one:
-        // if the failure is a load that never delivers, a fresh load in a live window is what recovers it.
-        fun forceReloadCover() {
-            val index = bindingAdapterPosition.takeIf { it != RecyclerView.NO_POSITION } ?: return
-            val item = getItem(index) ?: return
-            val boundId = item.mediaId
-            pendingMediaId = boundId
-            val old = item.unloadedCover?.getCachedDrawable(binding.root.context)
-            item.track.cover.loadWithThumb(
-                binding.playerTrackCover, old,
+                onSource = { src -> upgradeCoverDecision("retryLoad", src) },
                 onDelivered = { drawable ->
                     if (pendingMediaId == boundId) {
                         coverDrawable = drawable
@@ -279,6 +318,7 @@ class PlayerTrackAdapter(
                 collapsedTrackTitle.text = item?.track?.title
                 collapsedTrackArtist.text = item?.track?.artists?.joinToString(", ") { it.name }
             }
+            if (item?.mediaId == lastBoundMediaId) recordCoverDecision("declined:lastBoundMediaId@bind")
             if (item?.mediaId != lastBoundMediaId) {
                 // lastBoundMediaId is deliberately NOT assigned here — see its declaration. Until a
                 // terminal outcome arrives this holder stays rebindable, so a rebind of the same track
@@ -286,10 +326,12 @@ class PlayerTrackAdapter(
                 // the disk cache with no delivery required.
                 val boundId = item?.mediaId
                 pendingMediaId = boundId
+                recordCoverDecision("issued:bind")
                 coverDrawable = null
                 val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
                 item?.track?.cover.loadWithThumb(
                     binding.playerTrackCover, old,
+                    onSource = { src -> upgradeCoverDecision("bind", src) },
                     onDelivered = { drawable ->
                         if (pendingMediaId == boundId) {
                             coverDrawable = drawable
@@ -372,10 +414,15 @@ class PlayerTrackAdapter(
     fun insetsUpdated() = onEachViewHolder { updateInsets() }
     fun playerControlsHeightUpdated() = onEachViewHolder { updateInsets() }
     fun onColorsUpdated() = onEachViewHolder { updateColors() }
-    // Called from PlayerFragment.onResume - see forceReloadCover for why this exists and why it is a belt
-    // rather than the fix. Hits every ATTACHED holder, not just the visible one: neighbouring pages are
-    // equally exposed to a stale delivery and equally invisible to the guards.
-    fun refreshCovers() = onEachViewHolder { forceReloadCover() }
+    // TRACE (2026-08-29, temporary). Reads the visible page's last cover decision. No request, no paint,
+    // no state written - purely a read, so it cannot repeat the resume-time re-commit mistakes.
+    // REMOVE WITH THE TRACE.
+    // Opens a trace generation on every ATTACHED holder, not just the visible one: which holder ends up
+    // visible is decided by the traversal that has not run yet. REMOVE WITH THE TRACE.
+    fun beginCoverTrace() = onEachViewHolder { resetCoverDecision() }
+
+    fun coverDecision(position: Int): String? =
+        (recyclerView?.findViewHolderForAdapterPosition(position) as? ViewHolder)?.lastCoverDecision
 
     fun onCurrentUpdated() {
         onEachViewHolder { applyDrawable() }

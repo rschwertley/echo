@@ -91,6 +91,27 @@
 
     </LinearLayout>
 
+    <!-- Despite the id, this now draws ONLY the inactive rail: its buffer indicator is deliberately
+         transparent, matching bufferBar in item_player_controls.xml and tv_buffer_bar in
+         fragment_player_tv.xml. Keep all three in step.
+         BUFFERING IS NOW SHOWN NOWHERE IN THE APP. The full screen and TV players lost it in build 1055
+         because DeterminateDrawable never assigns startFraction (it stays 0f), so a LinearProgressIndicator
+         can only fill from the LEFT EDGE: with buffered >= position that painted a solid accent line under
+         the whole played portion, which showed through the wavy seek bar wherever the band swung clear of
+         the centre line. The mini bar has no wave, so it kept drawing its buffer line and was the only
+         surface still showing one. That inconsistency is what this removes.
+         If you restore it, restore it on ALL THREE surfaces or none, and read the note on bufferBar first:
+         the artefact it causes on the wavy bar is real and there is no way to draw only the useful
+         playhead->buffered segment from one indicator (ProgressBar.min rescales the fraction, it does not
+         offset the start).
+         THIS VIEW STAYS. It is the rail carrier, and it owns three things collapsed_seekbar does not:
+         android:alpha 0.5 (the rail is half opacity), indicatorTrackGapSize 0dp (no break at the playhead),
+         and the trackColor that PlayerFragment tints at runtime. alpha in particular CANNOT move to
+         collapsed_seekbar, because android:alpha is view level and would dim the position line with it.
+         fillTrack() is called with (0f, 1f) unconditionally, so the rail stays continuous across the full
+         width with the indicator transparent - no gap where the fill used to be.
+         progress and max are still written in PlayerFragment (:621, :646); they are inert while the
+         indicator is transparent and are kept so a one line colour change brings the display back. -->
     <com.google.android.material.progressindicator.LinearProgressIndicator
         android:id="@+id/collapsed_buffer"
         android:layout_width="match_parent"
@@ -98,7 +119,7 @@
         android:layout_gravity="bottom"
         android:alpha="0.5"
         android:progress="40"
-        app:indicatorColor="?attr/colorTertiary"
+        app:indicatorColor="@android:color/transparent"
         app:indicatorTrackGapSize="0dp"
         app:trackColor="?attr/colorOnSurface"
         app:trackThickness="2dp" />

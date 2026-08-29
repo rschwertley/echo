@@ -113,10 +113,20 @@ object ImageUtils {
         // leaves the view untouched and no bookkeeping is recorded — which is the correct outcome, since
         // the caller's retry path must stay armed.
         onDelivered: (T.(Drawable?) -> Unit)? = null,
+        // TRACE (2026-08-29, temporary). Reports the Coil DataSource of a terminal outcome -
+        // MEMORY_CACHE / MEMORY / DISK / NETWORK, or "ERROR". Null at every other call site, so the
+        // request built below is byte-identical for them: `listener` is only attached when non-null.
+        // Exists because the target lambdas receive an Image, not an ImageResult, so the DataSource is
+        // otherwise unreachable from a caller. REMOVE WITH THE TRACE.
+        onSource: ((String) -> Unit)? = null,
         onDrawable: T.(Drawable?) -> Unit
     ) = tryWith(true) {
         tryWith(false) { onDrawable(view, thumbnail) }
         val request = createRequest(view.context, null, error)
+        if (onSource != null) request.listener(
+            onSuccess = { _, result -> tryWith(false) { onSource(result.dataSource.name) } },
+            onError = { _, _ -> tryWith(false) { onSource("ERROR") } }
+        )
         fun setDrawable(image: Image?) {
             val drawable = image?.asDrawable(view.resources)
             tryWith(false) { onDrawable(view, drawable) }
@@ -238,6 +248,28 @@ object ImageUtils {
             is ImageHolder.ResourceIdImageHolder -> builder.data(resId)
             is ImageHolder.HexColorImageHolder -> builder.data(hex.toColorInt().toDrawable())
         }
+    }
+
+    // Warm the memory cache for a cover, by IDENTITY, with NO target. Nothing is painted; the only effect
+    // is that the decoded bitmap is in Coil's memory cache when somebody else asks for it.
+    //
+    // WHY IT MATCHES: the request is built by the SAME private createRequest(context, null, null) that
+    // loadWithThumb uses (:119 passes a null error at both PlayerTrackAdapter call sites), so data,
+    // diskCacheKey, headers and transformations are identical. With no target, Coil resolves Size.ORIGINAL,
+    // which is also what loadWithThumb's LAMBDA target resolves - so the memory-cache keys agree. That key
+    // agreement IS the mechanism; if createRequest ever diverges per call site, this stops working silently.
+    //
+    // ⚠️ PASS AN ACTIVITY/FRAGMENT CONTEXT, NOT applicationContext. Coil resolves
+    // `request.lifecycle ?: findLifecycle(context)`; an Activity context parks this request on the Activity
+    // lifecycle exactly like every other load in this file (see the note at :140), so it does NOT execute
+    // while the screen is off - it sits AT THE GATE and is released at ON_START. That is deliberate, and it
+    // is the property being tested. An applicationContext would escape the gate and decode while
+    // backgrounded, which buys an earlier warm but costs decoding when the system is trying to reclaim, and
+    // a request that is no longer cancelled when the Activity dies. It would also stop reproducing the
+    // configuration that was actually observed to work.
+    fun ImageHolder?.warmMemoryCache(context: Context) = tryWith {
+        if (this == null) return@tryWith
+        context.imageLoader.enqueue(createRequest(context, null, null).build())
     }
 
     private fun ImageHolder?.createRequest(
