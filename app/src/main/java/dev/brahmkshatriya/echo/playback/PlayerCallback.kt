@@ -700,39 +700,79 @@ class PlayerCallback(
         SessionResult(RESULT_SUCCESS)
     }
 
+    // THE SINGLE LIKE WRITE PATH. Body of BOTH onSetRating overloads below. It takes the target item and
+    // ITS index rather than reading currentMediaItem / currentMediaItemIndex, which is the whole reason the
+    // mediaId overload can be correct for a track that is not the current one.
+    // `index` is a Player-level index into the CURRENT timeline - the same space replaceMediaItem uses - so
+    // ShufflePlayer's original-list update still keys off it exactly as it did when this read
+    // currentMediaItemIndex.
+    // The Track comes from item.track, i.e. mediaMetadata.extras (MediaItemUtils:260). That is why this
+    // cannot be called without a MediaItem, and why the mediaId overload must return rather than "like
+    // anyway" when the id is not in the timeline - there would be no Track to hand to likeItem.
+    private suspend fun applyRating(
+        session: MediaSession, item: MediaItem, index: Int, liked: Boolean,
+    ): SessionResult {
+        val track = item.track
+        runCatching {
+            val extension = extensions.music.getExtensionOrThrow(item.extensionId)
+            // Any? (not Unit): the result is discarded below; an extension whose likeItem drifted to
+            // return a value would otherwise crash with "String cannot be cast to Unit".
+            extension.getAs<LikeClient, Any?> {
+                likeItem(track, liked)
+            }
+        }.getOrElse {
+            if (it is CancellationException) throw it
+            throwableFlow.emit(PlayerException(item, it))
+            // ERROR_UNKNOWN, deliberately NOT ERROR_BAD_VALUE: the sheet treats BAD_VALUE as "not in the
+            // timeline, retry via the extension path", so returning it here would like the track twice.
+            return SessionResult(SessionError.ERROR_UNKNOWN)
+        }
+        val newItem = item.run {
+            buildUpon().setMediaMetadata(
+                mediaMetadata.buildUpon().setUserRating(ThumbRating(liked)).build()
+            )
+        }.build()
+        session.with { replaceMediaItem(index, newItem) }
+        return SessionResult(RESULT_SUCCESS, Bundle().apply { putBoolean("liked", liked) })
+    }
+
     override fun onSetRating(
         session: MediaSession, controller: MediaSession.ControllerInfo, rating: Rating,
     ): ListenableFuture<SessionResult> {
         return if (rating !is ThumbRating) super.onSetRating(session, controller, rating)
         else scope.future {
-            val item = session.with { currentMediaItem }
+            val target = session.with { currentMediaItem?.let { it to currentMediaItemIndex } }
                 ?: return@future SessionResult(SessionError.ERROR_UNKNOWN)
-            val track = item.track
-            runCatching {
-                val extension = extensions.music.getExtensionOrThrow(item.extensionId)
-                // Any? (not Unit): the result is discarded below; an extension whose likeItem drifted to
-                // return a value would otherwise crash with "String cannot be cast to Unit".
-                extension.getAs<LikeClient, Any?> {
-                    likeItem(track, rating.isThumbsUp)
+            applyRating(session, target.first, target.second, rating.isThumbsUp)
+        }
+    }
+
+    // mediaId-scoped rating. Exists so the player's overflow sheet can like the track it is showing without
+    // duplicating the buildUpon/replaceMediaItem write: before this, the sheet called LikeClient directly
+    // and never touched the player, so trackHeart (driven by MediaItem.isLiked, i.e. userRating metadata)
+    // stayed stale until something else rebuilt the item.
+    // Media3 declares this overload (MediaSession.Callback:1787) and MediaController.setRating(mediaId,
+    // rating) (:1134); the default returns ERROR_NOT_SUPPORTED, which is why it did nothing before.
+    //
+    // ⚠️ RESULT_ERROR_BAD_VALUE IS LOAD-BEARING CONTROL FLOW, not just a status. The caller falls back to
+    // the extension-only path on it, so it must be unambiguous. Verified against media3 1.11.0:
+    // MediaSessionStub.sendSessionResult (:174) hands our SessionResult to the controller UNMODIFIED, and
+    // the only codes the transport substitutes are RESULT_INFO_SKIPPED (cancellation), ERROR_NOT_SUPPORTED
+    // (an UnsupportedOperationException cause) and ERROR_UNKNOWN (any other execution failure), plus
+    // ERROR_PERMISSION_DENIED rejected before the callback runs. BAD_VALUE can therefore only originate
+    // here. Do not reuse it for any other outcome in this file.
+    override fun onSetRating(
+        session: MediaSession, controller: MediaSession.ControllerInfo, mediaId: String, rating: Rating,
+    ): ListenableFuture<SessionResult> {
+        return if (rating !is ThumbRating) super.onSetRating(session, controller, mediaId, rating)
+        else scope.future {
+            val target = session.with {
+                (0 until mediaItemCount).firstNotNullOfOrNull { i ->
+                    val mediaItem = getMediaItemAt(i)
+                    if (mediaItem.mediaId == mediaId) mediaItem to i else null
                 }
-            }.getOrElse {
-                if (it is CancellationException) throw it
-                throwableFlow.emit(PlayerException(item, it))
-                return@future SessionResult(SessionError.ERROR_UNKNOWN)
-            }
-            val liked = rating.isThumbsUp
-            val newItem = item.run {
-                buildUpon().setMediaMetadata(
-                    mediaMetadata.buildUpon().setUserRating(ThumbRating(liked)).build()
-                )
-            }.build()
-            session.with {
-                // Current index so the like replaces the CURRENT track. replaceMediaItem keys the
-                // original-list update off this index too.
-                val fullIndex = currentMediaItemIndex
-                replaceMediaItem(fullIndex, newItem)
-            }
-            SessionResult(RESULT_SUCCESS, Bundle().apply { putBoolean("liked", liked) })
+            } ?: return@future SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+            applyRating(session, target.first, target.second, rating.isThumbsUp)
         }
     }
 

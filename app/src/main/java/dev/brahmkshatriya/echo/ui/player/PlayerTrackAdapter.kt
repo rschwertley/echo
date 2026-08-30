@@ -249,6 +249,12 @@ class PlayerTrackAdapter(
         // REMOVE WITH THE TRACE.
         var lastCoverDecision: String = "none"
             private set
+        // The mediaId the decision above was ABOUT. Sealed with it, so the wake line can be compared
+        // against the current track instead of inferring identity from a page number. If they differ, the
+        // pager is showing the wrong page and every image-layer hypothesis is aimed at the wrong layer;
+        // if they match and the load still went to network, it is a cache problem. REMOVE WITH THE TRACE.
+        var lastCoverItemId: String? = null
+            private set
         private var coverDecisionSealed = false
 
         // FIRST WRITE WINS within a generation. bind (onBindViewHolder) and retryLoad
@@ -259,12 +265,14 @@ class PlayerTrackAdapter(
         // gets reported is the first decision taken during that traversal.
         fun resetCoverDecision() {
             lastCoverDecision = "none"
+            lastCoverItemId = null
             coverDecisionSealed = false
         }
 
-        private fun recordCoverDecision(decision: String) {
+        private fun recordCoverDecision(decision: String, itemId: String?) {
             if (coverDecisionSealed) return
             lastCoverDecision = decision
+            lastCoverItemId = itemId
             coverDecisionSealed = true
         }
 
@@ -287,13 +295,13 @@ class PlayerTrackAdapter(
 
         fun retryLoad(item: MediaItem?) {
             if (coverDrawable != null) {
-                recordCoverDecision("declined:coverDrawable@retryLoad")
+                recordCoverDecision("declined:coverDrawable@retryLoad", item?.mediaId)
                 return
             }
             val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
             val boundId = item?.mediaId
             pendingMediaId = boundId
-            recordCoverDecision("issued:retryLoad")
+            recordCoverDecision("issued:retryLoad", boundId)
             item?.track?.cover.loadWithThumb(
                 binding.playerTrackCover, old,
                 onSource = { src -> upgradeCoverDecision("retryLoad", src) },
@@ -318,7 +326,8 @@ class PlayerTrackAdapter(
                 collapsedTrackTitle.text = item?.track?.title
                 collapsedTrackArtist.text = item?.track?.artists?.joinToString(", ") { it.name }
             }
-            if (item?.mediaId == lastBoundMediaId) recordCoverDecision("declined:lastBoundMediaId@bind")
+            if (item?.mediaId == lastBoundMediaId)
+                recordCoverDecision("declined:lastBoundMediaId@bind", item?.mediaId)
             if (item?.mediaId != lastBoundMediaId) {
                 // lastBoundMediaId is deliberately NOT assigned here — see its declaration. Until a
                 // terminal outcome arrives this holder stays rebindable, so a rebind of the same track
@@ -326,7 +335,7 @@ class PlayerTrackAdapter(
                 // the disk cache with no delivery required.
                 val boundId = item?.mediaId
                 pendingMediaId = boundId
-                recordCoverDecision("issued:bind")
+                recordCoverDecision("issued:bind", boundId)
                 coverDrawable = null
                 val old = item?.unloadedCover?.getCachedDrawable(binding.root.context)
                 item?.track?.cover.loadWithThumb(
@@ -421,8 +430,11 @@ class PlayerTrackAdapter(
     // visible is decided by the traversal that has not run yet. REMOVE WITH THE TRACE.
     fun beginCoverTrace() = onEachViewHolder { resetCoverDecision() }
 
-    fun coverDecision(position: Int): String? =
-        (recyclerView?.findViewHolderForAdapterPosition(position) as? ViewHolder)?.lastCoverDecision
+    // Decision and the mediaId it was about, in one lookup so the two cannot come from different holders.
+    // REMOVE WITH THE TRACE.
+    fun coverTrace(position: Int): Pair<String, String?>? =
+        (recyclerView?.findViewHolderForAdapterPosition(position) as? ViewHolder)
+            ?.let { it.lastCoverDecision to it.lastCoverItemId }
 
     fun onCurrentUpdated() {
         onEachViewHolder { applyDrawable() }

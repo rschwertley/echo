@@ -14,6 +14,8 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
@@ -313,6 +315,22 @@ class PlayerViewModel(
         }
     }
 
+    // mediaId-scoped like, for the player's overflow sheet. Same transport as likeCurrent above, but it
+    // targets a NAMED track and surfaces the result CODE, because RESULT_ERROR_BAD_VALUE ("that id is not
+    // in the timeline") is the caller's signal to fall back to the extension-only path. See the note on
+    // PlayerCallback.onSetRating(mediaId) for why that code is unambiguous.
+    fun likeById(mediaId: String, isLiked: Boolean, onResult: (Int) -> Unit) = withBrowser { controller ->
+        val future = controller.setRating(mediaId, ThumbRating(isLiked))
+        app.context.listenFuture(future) { sessionResult ->
+            onResult(
+                sessionResult.getOrElse {
+                    createException(it)
+                    SessionResult(SessionError.ERROR_UNKNOWN)
+                }.resultCode
+            )
+        }
+    }
+
     fun setSleepTimer(timer: Long) {
         withBrowser { it.sendCustomCommand(sleepTimer, Bundle().apply { putLong("ms", timer) }) }
     }
@@ -510,12 +528,32 @@ class PlayerViewModel(
     val repeatMode = MutableStateFlow(0)
     val shuffleMode = MutableStateFlow(false)
 
-    val tracksFlow = MutableStateFlow<Tracks?>(null)
-    val serverAndTracks = tracksFlow.combine(playerState.serverChanged) { tracks, _ -> tracks }
-        .combine(playerState.current) { tracks, current ->
-            val server = playerState.servers[current?.mediaItem?.mediaId]?.getOrNull()
+    // Tracks STAMPED with the mediaId they belong to. Written only by PlayerUiListener, which reads both
+    // halves in one expression. The stamp turns "are these tracks for the item on screen?" from a timing
+    // assumption into a checkable one, which is the point: the previous shape emitted the PREVIOUS track's
+    // formats for the whole gap between an item transition and its onTracksChanged, because `current`
+    // emits immediately while tracksFlow still holds the old value. On an all-320 queue that is invisible;
+    // the moment quality varies it silently mislabels the new track for 2.4-3.8s (measured resolve window).
+    val tracksFlow = MutableStateFlow<Pair<String?, Tracks?>>(null to null)
+    val serverAndTracks = tracksFlow.combine(playerState.serverChanged) { stamped, _ -> stamped }
+        .combine(playerState.current) { (stampedId, tracks), current ->
+            val currentId = current?.mediaItem?.mediaId
+            val server = playerState.servers[currentId]?.getOrNull()
             val index = current?.mediaItem?.sourceIndex
-            Triple(tracks, server, index)
+            // null unless the stamp matches. Consumers already null-guard `tracks`, so a mismatch renders
+            // as "not known yet" rather than as the wrong track's format. `server` and `index` are NOT
+            // gated: they come from `current` itself and are always about the right item, which is what
+            // keeps the quality sheet's source chips populated during the gap.
+            //
+            // FAILURE MODE, AND HOW TO RECOGNISE IT. If a stamp never matches - a transition race, or a
+            // reconnect that re-seeds with an id the UI has moved off - the pill hides PERMANENTLY rather
+            // than showing something wrong. That is the safe direction, but it is silent, so know the
+            // signature: a track that genuinely has no readable format hides the pill for THAT TRACK ONLY,
+            // while a stamp mismatch hides it for EVERY track. The quality sheet is the discriminator -
+            // its source chips come from `server`, which is never gated, so "chips present, details line
+            // absent, on every track" means the stamp is not matching and this gate is the place to look.
+            // "Chips present, details absent, on one track" is the legitimate case.
+            Triple(if (stampedId != null && stampedId == currentId) tracks else null, server, index)
         }.stateIn(viewModelScope, SharingStarted.Lazily, Triple(null, null, null))
 
     companion object {

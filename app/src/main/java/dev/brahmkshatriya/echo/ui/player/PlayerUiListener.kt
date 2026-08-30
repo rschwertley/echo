@@ -17,7 +17,11 @@ class PlayerUiListener(
     init {
         updateList()
         with(viewModel) {
-            tracksFlow.value = player.currentTracks
+            // STAMPED. Both halves are read in ONE expression, in one main-thread turn with no suspension
+            // between them, so the id and the tracks describe the same instant. Reading them separately is
+            // the bug this pair exists to prevent: at a transition the two reads can straddle the item
+            // change and stamp the new id onto the old track's formats.
+            tracksFlow.value = player.currentMediaItem?.mediaId to player.currentTracks
             isPlaying.value = player.isPlaying
             playWhenReady.value = player.playWhenReady
             buffering.value = player.playbackState == Player.STATE_BUFFERING
@@ -84,6 +88,21 @@ class PlayerUiListener(
 
             Player.STATE_READY -> {
                 viewModel.buffering.value = false
+                // FIRST-TRACK RE-SEED. onTracksChanged for track 1 can fire BEFORE this listener is
+                // attached: it is added in getController's callback (PlayerViewModel:155), i.e. on
+                // controller connect, which on a cold start with a resumed queue happens after the first
+                // item has already reported its tracks. The init seed above then captures a freshly
+                // connected controller's empty Tracks, and nothing re-fires until the NEXT item change -
+                // which is exactly why the pill read "Unknown quality" for the whole first track and was
+                // correct from the second one on.
+                // STATE_READY fires per track, so this also covers a reconnect after process death.
+                // CHEAP IN FACT, not just in principle: MediaControllerImplBase.getCurrentTracks() (:2143)
+                // is `return playerInfo.currentTracks` - a field read of the controller's locally cached
+                // PlayerInfo, no binder transaction. And it is idempotent: tracksFlow is a StateFlow and
+                // Tracks has value equality, so re-seeding the same pair on later tracks emits nothing.
+                // Same one-expression read as the init seed, for the same reason.
+                viewModel.tracksFlow.value =
+                    player.currentMediaItem?.mediaId to player.currentTracks
             }
 
             else -> Unit
@@ -143,6 +162,8 @@ class PlayerUiListener(
     }
 
     override fun onTracksChanged(tracks: Tracks) {
-        viewModel.tracksFlow.value = tracks
+        // Stamped with the item these tracks belong to. media3 delivers this with the player already at
+        // the new item, so currentMediaItem is the right owner, and both reads are in one turn.
+        viewModel.tracksFlow.value = player.currentMediaItem?.mediaId to tracks
     }
 }

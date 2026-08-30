@@ -300,9 +300,15 @@ class PlayerTvFragment : Fragment() {
 
         // Quality subtitle
         observe(viewModel.serverAndTracks) { (tracks, server, index) ->
-            binding.tvTrackSubtitle.text =
-                tracks?.getDetailsFormatFirst(requireContext(), server, index)
-                    ?.joinToString(" ⦿ ")?.takeIf { it.isNotBlank() }
+            // Same hide-don't-blank rule as the phone pill - see the note there. TV matters slightly
+            // more: these observers are flowWithLifecycle(STARTED) and serverAndTracks is a stateIn
+            // StateFlow, so every ON_START replays the latest value. Under the old always-write shape a
+            // stale value re-appeared on each return to the player; under this one an ungated (null)
+            // value replays as hidden.
+            val details = tracks?.getDetailsFormatFirst(requireContext(), server, index)
+                ?.joinToString(" ⦿ ")?.takeIf { it.isNotBlank() }
+            if (details != null) binding.tvTrackSubtitle.text = details
+            binding.tvTrackSubtitle.isVisible = details != null
         }
 
         // Overflow → the same media "more" sheet the phone player opens for the current track

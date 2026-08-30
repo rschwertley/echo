@@ -13,6 +13,7 @@ import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.FollowClient
 import dev.brahmkshatriya.echo.common.clients.HideClient
+import androidx.media3.session.SessionResult
 import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.clients.PlaylistEditClient
 import dev.brahmkshatriya.echo.common.clients.RadioClient
@@ -207,6 +208,39 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
         return buttons
     }
 
+    // The like action. Every NON-player surface (feed, history, item page) keeps calling vm.likeItem
+    // unchanged - the whole change is behind fromPlayer, which was already plumbed and previously ignored.
+    //
+    // WHY THE PLAYER PATH IS DIFFERENT: vm.likeItem calls LikeClient and then refresh()es THIS sheet's own
+    // itemResultFlow. That is correct everywhere else, because the sheet is the only surface showing the
+    // liked state. From the player it is not: PlayerFragment's trackHeart (and PlayerTvFragment's
+    // tvTrackHeart) read MediaItem.isLiked, i.e. the userRating on the player's own metadata, which
+    // vm.likeItem never writes. The heart therefore stayed stale until something else rebuilt the item.
+    //
+    // The player path routes through setRating(mediaId), which lands in PlayerCallback.applyRating and does
+    // the LikeClient call AND the metadata write as one operation - so there is exactly one like per tap
+    // and one write path, not a duplicated buildUpon/replaceMediaItem.
+    //
+    // The refresh() is NOT optional: the sheet's own button label and icon come from state.isLiked, which
+    // only moves when itemResultFlow re-emits. Dropping it would fix the heart and break the sheet, trading
+    // one desync for another. Extension-call count is unchanged from before: one likeItem plus one refresh,
+    // exactly as vm.likeItem did.
+    //
+    // The BAD_VALUE fallback covers a target that is not in the player's timeline. applyRating cannot like
+    // it - it needs the Track from the MediaItem - so the extension-only path takes over and the like still
+    // happens. The two paths are mutually exclusive: BAD_VALUE is returned BEFORE applyRating runs, so no
+    // double like is possible.
+    private fun likeFromSheet(liked: Boolean) {
+        if (!fromPlayer) {
+            vm.likeItem(liked)
+            return
+        }
+        playerViewModel.likeById(item.id, liked) { resultCode ->
+            if (resultCode == SessionResult.RESULT_ERROR_BAD_VALUE) vm.likeItem(liked)
+            else vm.refresh()
+        }
+    }
+
     private fun getPlayerButtons() = if (fromPlayer) listOf(
         button("audio_fx", R.string.audio_fx, R.drawable.ic_equalizer) {
             AudioEffectsBottomSheet().show(parentFragmentManager, null)
@@ -383,7 +417,7 @@ class MediaMoreBottomSheet : BottomSheetDialogFragment(R.layout.dialog_media_mor
             state?.isLiked != null -> button(
                 "like", if (state.isLiked) R.string.unlike else R.string.like,
                 if (state.isLiked) R.drawable.ic_heart_filled_40dp else R.drawable.ic_heart_outline_40dp
-            ) { vm.likeItem(!state.isLiked) }
+            ) { likeFromSheet(!state.isLiked) }
             state == null && client is LikeClient && item.isLikeable -> placeholderButton(
                 "like", R.string.like, R.drawable.ic_heart_outline_40dp
             )

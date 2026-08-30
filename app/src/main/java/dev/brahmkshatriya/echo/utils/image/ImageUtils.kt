@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.utils.image
 
 import android.content.Context
+import java.util.concurrent.atomic.AtomicInteger
 import android.graphics.drawable.Drawable
 import android.view.View
 import android.widget.ImageView
@@ -267,9 +268,28 @@ object ImageUtils {
     // backgrounded, which buys an earlier warm but costs decoding when the system is trying to reclaim, and
     // a request that is no longer cancelled when the Activity dies. It would also stop reproducing the
     // configuration that was actually observed to work.
+    // TRACE (2026-08-29, temporary). Two counters, because "the warm did not help" has three causes and
+    // the wake line could not tell them apart:
+    //   warmIssued == 0            -> NEVER RAN. The collector did not reach warmMemoryCache at all.
+    //   warmIssued > warmDone      -> RAN AND PARKED. Enqueued, still waiting on the lifecycle gate (or
+    //                                 in flight). enqueue() resolves findLifecycle = true
+    //                                 (RealImageLoader:98), so an Activity context parks until ON_START.
+    //   warmDone == warmIssued > 0 -> RAN AND COMPLETED. The entry should be in the memory cache, so a
+    //                                 NETWORK read at bind is a KEY MISMATCH, not a missing entry.
+    // Absolute counters rather than per-wake deltas: they only ever grow, so any two consecutive wake
+    // lines give the delta, and there is no reset to get wrong. REMOVE WITH THE TRACE.
+    val warmIssued = AtomicInteger(0)
+    val warmDone = AtomicInteger(0)
+
     fun ImageHolder?.warmMemoryCache(context: Context) = tryWith {
         if (this == null) return@tryWith
-        context.imageLoader.enqueue(createRequest(context, null, null).build())
+        val request = createRequest(context, null, null)
+        request.listener(
+            onSuccess = { _, _ -> warmDone.incrementAndGet() },
+            onError = { _, _ -> warmDone.incrementAndGet() }
+        )
+        warmIssued.incrementAndGet()
+        context.imageLoader.enqueue(request.build())
     }
 
     private fun ImageHolder?.createRequest(

@@ -90,6 +90,7 @@ import dev.brahmkshatriya.echo.ui.player.quality.QualitySelectionBottomSheet
 import dev.brahmkshatriya.echo.utils.ContextUtils.emit
 import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
+import dev.brahmkshatriya.echo.utils.image.ImageUtils
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.getCachedDrawable
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadAsCircle
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadBlurred
@@ -201,9 +202,20 @@ class PlayerFragment : Fragment() {
             adapter.beginCoverTrace()
             b.viewPager.post {
                 val pos = b.viewPager.currentItem
+                val trace = adapter.coverTrace(pos)
+                val boundId = trace?.second
+                val curId = viewModel.playerState.current.value?.mediaItem?.mediaId
+                // bound vs cur is the question this line exists to settle, so BOTH are printed and the
+                // comparison is made here rather than left to be inferred from the page number. A mismatch
+                // means the pager is a page behind and the stale cover is a symptom of that, not of any
+                // image load; a match with a NETWORK decision means the cache was not consulted or the key
+                // did not agree. warm=issued/done separates never-ran / parked / completed - see the
+                // counters in ImageUtils.
                 Log.d(
                     "GladixArt",
-                    "wake: page=$pos decision=${adapter.coverDecision(pos) ?: "no-holder"}"
+                    "wake: page=$pos bound=$boundId cur=$curId match=${boundId == curId} " +
+                        "decision=${trace?.first ?: "no-holder"} " +
+                        "warm=${ImageUtils.warmIssued.get()}/${ImageUtils.warmDone.get()}"
                 )
             }
         }
@@ -806,8 +818,17 @@ class PlayerFragment : Fragment() {
                 QualitySelectionBottomSheet().show(parentFragmentManager, null)
             }
             observe(viewModel.serverAndTracks) { (tracks, server, index) ->
-                trackSubtitle.text = tracks?.getDetailsFormatFirst(requireContext(), server, index)
+                // HIDE, DO NOT BLANK, and do not clear the text. Between an item transition and its
+                // onTracksChanged `tracks` is null (the stamp does not match yet), and this window is the
+                // full resolve time - 2.4-3.8s measured. Writing "Unknown quality" there would flash it on
+                // every advance, which is worse than the stale value it replaced. Blanking is no better:
+                // this view has a 40dp minHeight and a shape_pill background, so an empty string leaves an
+                // empty capsule that reads as a failure. Absent reads as "not known yet", which is true.
+                // The text is deliberately left in place while hidden so a re-show does not repaint.
+                val details = tracks?.getDetailsFormatFirst(requireContext(), server, index)
                     ?.joinToString(" ⦿ ")?.takeIf { it.isNotBlank() }
+                if (details != null) trackSubtitle.text = details
+                trackSubtitle.isVisible = details != null
             }
         }
     }
