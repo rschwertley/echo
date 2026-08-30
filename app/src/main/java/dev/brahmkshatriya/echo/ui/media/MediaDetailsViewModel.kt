@@ -14,6 +14,7 @@ import dev.brahmkshatriya.echo.common.clients.LikeClient
 import dev.brahmkshatriya.echo.common.clients.SaveClient
 import dev.brahmkshatriya.echo.common.clients.ShareClient
 import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
@@ -25,6 +26,7 @@ import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getIf
 import dev.brahmkshatriya.echo.extensions.MediaState
+import dev.brahmkshatriya.echo.extensions.cache.Cached.bustAlbumTracksCache
 import dev.brahmkshatriya.echo.extensions.cache.Cached.bustPlaylistTracksCache
 import dev.brahmkshatriya.echo.extensions.cache.Cached.getFeed
 import dev.brahmkshatriya.echo.extensions.cache.Cached.getTracks
@@ -143,7 +145,13 @@ abstract class MediaDetailsViewModel(
     // 24h short-circuit) then refresh. Gated to pull-to-refresh + edit "reload" — NOT like/save/follow/hide,
     // which call refresh() and must keep serving the cached tracks. No-op for non-playlist items.
     fun refreshTracks() = viewModelScope.launch {
-        (getItem()?.second as? Playlist)?.let { bustPlaylistTracksCache(app, it.id) }
+        when (val i = getItem()?.second) {
+            is Playlist -> bustPlaylistTracksCache(app, i.id)
+            // Albums are cached durably too as of this change, so pull-to-refresh has to bust theirs or the
+            // gesture does nothing for 24h on an album page.
+            is Album -> bustAlbumTracksCache(app, i.id)
+            else -> {}
+        }
         refreshFlow.emit(Unit)
     }
 

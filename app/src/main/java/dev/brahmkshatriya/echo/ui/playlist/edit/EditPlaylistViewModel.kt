@@ -18,6 +18,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getAs
+import dev.brahmkshatriya.echo.extensions.cache.Cached.bustPlaylistTracksCache
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getIf
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getOrThrow
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.isClient
@@ -186,6 +187,14 @@ class EditPlaylistViewModel(
                 onEnterPlaylistEditor(playlist, tracks)
             }.getOrThrow()
 
+            // Busted BEFORE the actions run, not after: the entry is about to be wrong either way, and
+            // clearing it up front means a PARTIALLY applied edit (some actions committed, then a failure)
+            // also leaves no stale entry behind. The cost of busting on an edit that then fails entirely is
+            // one refetch, which is the correct outcome anyway.
+            // The editor's "reload" fragment result already refreshes the page you came from, but only if
+            // you are on that playlist's own page - it does nothing for the durable entry when you got here
+            // any other way.
+            if (newActions.isNotEmpty()) bustPlaylistTracksCache(app, playlist.id)
             extension.getAs<PlaylistEditClient, Any?> {
                 newActions.forEach { action ->
                     when (action) {

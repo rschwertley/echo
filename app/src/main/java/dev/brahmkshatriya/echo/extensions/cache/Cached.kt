@@ -45,10 +45,12 @@ import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
 import dev.brahmkshatriya.echo.utils.CacheUtils.saveToCache
 import dev.brahmkshatriya.echo.utils.Serializer.toData
 import dev.brahmkshatriya.echo.utils.Serializer.toJson
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.Serializable
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
 data class CachedPlaylistTracks(val savedAtMs: Long, val tracks: List<Track>)
@@ -57,19 +59,43 @@ object Cached {
     class NotFound(id: String) : Exception("Cache not found for $id")
 
     private const val DURABLE_PLAYLIST_FOLDER = "playlist-tracks"
-    private const val PLAYLIST_TRACKS_TTL_MS = 24L * 60 * 60 * 1000  // 24h
+    // SEPARATE FOLDER, not a shared one with a prefixed key. Both stores key on "<id>-tracks", and an album
+    // id and a playlist id are different namespaces that can collide on the same string - Deezer numbers
+    // both. A shared folder would therefore need the key itself to carry the type, which would invalidate
+    // every existing playlist entry for no gain. Two folders cost nothing and cannot collide.
+    private const val DURABLE_ALBUM_FOLDER = "album-tracks"
+    // Shared by both stores: the reasoning is identical (people reopen the same lists across days, and the
+    // things that change underneath - a playlist edited elsewhere, an album's catalog metadata - change far
+    // more slowly than that). Every in-app mutation busts its own entry, so this bounds only EXTERNAL edits.
+    private const val TRACKS_TTL_MS = 24L * 60 * 60 * 1000  // 24h
 
     // History's toSlim drops ALL extras; a playlist track's NEXT / playlist_id are read by DeezerUtil.log
     // (play-logging context), so preserve exactly those two while dropping streamables + everything heavy.
     private fun Track.toPlaylistSlim(): Track =
         toSlim().copy(extras = extras.filterKeys { it == "NEXT" || it == "playlist_id" })
 
+    // Album tracks carry "album_id" where playlist tracks carry "playlist_id" (see DeezerAlbumClient's
+    // loadTracks, which stamps it alongside "NEXT"). Keeping the wrong key would silently drop the context
+    // a restored track needs, so the two slim forms cannot be merged.
+    private fun Track.toAlbumSlim(): Track =
+        toSlim().copy(extras = extras.filterKeys { it == "NEXT" || it == "album_id" })
+
     // Invalidate the durable playlist-tracks entry so the next loadTracks re-fetches (via the canonical
     // re-resolve path) instead of short-circuiting within TTL. Wired to pull-to-refresh + edit "reload".
-    fun bustPlaylistTracksCache(app: App, playlistId: String) {
+    fun bustPlaylistTracksCache(app: App, playlistId: String) =
+        bustTracksCache(app, playlistId, DURABLE_PLAYLIST_FOLDER)
+
+    // Albums have no in-app mutation path (you cannot edit an album's track list), so unlike the playlist
+    // one this exists for a single caller: pull-to-refresh. Without it, refreshTracks() would bust nothing
+    // on an album page and the gesture would silently do nothing for 24h - the same failure the playlist
+    // store had until the mutation sites were wired up.
+    fun bustAlbumTracksCache(app: App, albumId: String) =
+        bustTracksCache(app, albumId, DURABLE_ALBUM_FOLDER)
+
+    private fun bustTracksCache(app: App, id: String, folder: String) {
         runCatching {
-            val dir = CacheUtils.cacheDir(app.context, DURABLE_PLAYLIST_FOLDER, durable = true)
-            File(dir, "$playlistId-tracks".hashCode().toString()).delete()
+            val dir = CacheUtils.cacheDir(app.context, folder, durable = true)
+            File(dir, "$id-tracks".hashCode().toString()).delete()
         }
     }
 
@@ -227,9 +253,14 @@ object Cached {
         val itemId = item.id
         // Playlist tracks live in an isolated durable store (canonical re-resolve is expensive). Instant
         // cached read, age-agnostic; loadTracks owns the TTL/revalidate decision.
-        if (item is Playlist) {
+        val durableFolder = when (item) {
+            is Playlist -> DURABLE_PLAYLIST_FOLDER
+            is Album -> DURABLE_ALBUM_FOLDER
+            else -> null
+        }
+        if (durableFolder != null) {
             val cached = app.context.getFromCache<CachedPlaylistTracks>(
-                "$itemId-tracks", DURABLE_PLAYLIST_FOLDER, durable = true
+                "$itemId-tracks", durableFolder, durable = true
             )
             if (cached != null) return@runCatching cached.tracks.toFeed()
         }
@@ -238,14 +269,70 @@ object Cached {
 
     suspend fun loadTracks(app: App, extension: Extension<*>, item: EchoMediaItem) = runCatching {
         if (item is Playlist) return@runCatching loadPlaylistTracksCached(app, extension, item)
+        if (item is Album) return@runCatching loadAlbumTracksCached(app, extension, item)
         val feed = when (item) {
-            is Album -> extension.getAs<AlbumClient, Feed<Track>?> { loadTracks(item) }
+            is Album -> null // handled above
             is Radio -> extension.getAs<RadioClient, Feed<Track>> { loadTracks(item) }
             is Artist -> null
             is Track -> null
             is Playlist -> null // handled above
         }?.getOrThrow() ?: return@runCatching null
         savingFeed(app, extension, "${item.id}-tracks", feed)
+    }
+
+    // ══ SHARED IN-FLIGHT / SHORT-TTL LAYER ══
+    // One map serving two jobs that are the same object at different points in its life:
+    //   a RUNNING Deferred  -> in-flight dedup. A second caller for the same key joins it instead of
+    //                          issuing an identical second request.
+    //   a COMPLETED Deferred -> a short-lived memory cache. await() on a finished Deferred returns its
+    //                          value immediately.
+    // Before this, Cached had no dedup at all: two concurrent callers for one playlist both fetched. That
+    // is a real sequence, not a theoretical one - it is exactly what a prefetch warm followed by the user
+    // tapping the item produces, and without this the tap would race a second identical request and make
+    // the warmed case SLOWER than the unwarmed one.
+    //
+    // Owned by app.scope, NOT the caller's scope. The whole point is that the work outlives whichever
+    // caller happened to start it: a caller cancelled mid-flight (collectLatest restarting, a fragment
+    // going away) must not take the shared result down with it. app.scope carries a SupervisorJob and an
+    // exception handler, so a failed child cannot escalate.
+    //
+    // ⚠️ EVICTION ON FAILURE IS DELIBERATE, AND IT IS THE ONE PLACE THE TWO JOBS DISAGREE. Read before
+    // "simplifying" it away:
+    //   a CONCURRENT caller SHOULD share a failure - it is awaiting the same Deferred, it asked at the
+    //     same time, and issuing a second request for something that just failed helps nobody;
+    //   a LATER caller MUST NOT inherit it - a five-minute-old failure is not evidence about now, and
+    //     caching it would turn one transient network error into five minutes of a dead playlist with no
+    //     way for the user to retry except pull-to-refresh.
+    // So the entry is removed the moment it completes exceptionally, via invokeOnCompletion. Anyone already
+    // awaiting still gets the throw (dedup half); anyone arriving afterwards finds nothing and starts fresh
+    // (cache half). Removing by VALUE (`remove(key, fresh)`) so a newer entry that replaced this one is
+    // never clobbered.
+    // This reads like a bug - "why does the cache drop failures immediately?" - which is why it is spelled
+    // out here rather than left to be inferred from a one-line remove().
+    private const val MEMORY_TTL_MS = 5L * 60 * 1000
+
+    private val inFlightTracks = ConcurrentHashMap<String, Pair<Long, Deferred<List<Track>>>>()
+
+    private suspend fun coalescedTracks(
+        app: App, key: String, block: suspend () -> List<Track>,
+    ): List<Track> {
+        val now = System.currentTimeMillis()
+        // Opportunistic sweep. No timer, no eviction thread: the map only ever holds keys somebody asked
+        // for recently, and it is swept on every call, so it cannot grow unbounded.
+        inFlightTracks.entries.removeIf { now - it.value.first > MEMORY_TTL_MS }
+        var created: Pair<Long, Deferred<List<Track>>>? = null
+        val entry = inFlightTracks.compute(key) { _, existing ->
+            if (existing != null && now - existing.first <= MEMORY_TTL_MS) existing
+            else (now to app.scope.async { block() }).also { created = it }
+        }!!
+        // Registered OUTSIDE compute: compute holds the bin lock, and a completion handler that mutates the
+        // same map from inside it is a deadlock waiting for a fast-failing block.
+        created?.let { fresh ->
+            fresh.second.invokeOnCompletion { cause ->
+                if (cause != null) inFlightTracks.remove(key, fresh)
+            }
+        }
+        return entry.second.await()
     }
 
     // Durable SWR on top of the canonical re-resolve. Within TTL: pure short-circuit (no fetch, no
@@ -257,15 +344,93 @@ object Cached {
         val cached = app.context.getFromCache<CachedPlaylistTracks>(
             "${item.id}-tracks", DURABLE_PLAYLIST_FOLDER, durable = true
         )
-        if (cached != null && System.currentTimeMillis() - cached.savedAtMs < PLAYLIST_TRACKS_TTL_MS)
+        if (cached != null && System.currentTimeMillis() - cached.savedAtMs < TRACKS_TTL_MS)
             return cached.tracks.toFeed()
 
-        val feed = extension.getAs<PlaylistClient, Feed<Track>> { loadTracks(item) }.getOrThrow()
-        val tracks = feed.loadAll()
+        // canonicalId for the MEMORY key, raw item.id for the DURABLE key, and the difference is
+        // load-bearing. Some extensions return a canonicalized id from loadItem - YouTube Music strips a
+        // "VL" playlist prefix - so the same playlist reaches us as "VLPLaJ..." from a feed row and
+        // "PLaJ..." after loading. The durable entry is only ever written from a real open, which always
+        // carries the loaded id, so it is self-consistent on the raw value. The memory entry is the one a
+        // prefetch warm (unloaded id) and a user tap (loaded id) must BOTH hit, so it has to normalize or
+        // every warm would silently miss and the feature would do nothing at all.
+        val tracks = coalescedTracks(app, "playlist:${canonicalId(item.id)}") {
+            val feed = extension.getAs<PlaylistClient, Feed<Track>> { loadTracks(item) }.getOrThrow()
+            feed.loadAll()
+        }
         app.context.saveToCache(
             "${item.id}-tracks",
             CachedPlaylistTracks(System.currentTimeMillis(), tracks.map { it.toPlaylistSlim() }),
             DURABLE_PLAYLIST_FOLDER, durable = true
+        )
+        return tracks.toFeed()
+    }
+
+    // PREFETCH ENTRY POINT. Fills the shared in-flight / memory layer for a playlist the user has not
+    // opened, so a subsequent tap joins a running request or reads a completed one instead of starting its
+    // own.
+    //
+    // (!) IT DELIBERATELY DOES NOT WRITE THE DURABLE STORE, and that asymmetry is the whole safety
+    // argument. A warm is handed the UNLOADED feed-row item, because that is all a feed row has. Every
+    // PLAYLIST loadTracks implementation checked reads only the id and routing extras - Deezer, Offline,
+    // Unified, Spotify, Tidal - so a warm is safe for them. But third-party extensions are sideloaded and
+    // unbounded, and Spotify's ALBUM loadTracks is a live example of the failure shape: handed an unloaded
+    // item it SUCCEEDS and returns plausible-but-thinner data rather than throwing. If a warm could write
+    // the durable store, one such extension would poison a 24h entry and the user would see a wrong or
+    // empty track list for a day, with pull-to-refresh as the only escape.
+    // Confining a warm to the 5-minute memory layer bounds that to one session while still delivering the
+    // whole benefit, because the sequence this exists to serve - pause, then tap - happens in seconds. Only
+    // a REAL open, which always passes the loaded item, writes the durable entry.
+    //
+    // Errors are swallowed: a warm that fails is a wasted request and nothing more, and must never surface
+    // to a user who did not ask for it. coalescedTracks evicts the failed entry, so the tap that follows
+    // starts clean rather than inheriting the failure.
+    suspend fun warmPlaylistTracks(app: App, extension: Extension<*>, item: Playlist) {
+        // Skip if the durable entry already covers it - warming something cached for 24h is pure waste.
+        // Checked on the RAW id, because that is what the durable store is keyed on. For an extension that
+        // canonicalizes (YouTube Music's "VL" prefix) this check can miss and warm unnecessarily, costing
+        // one request; the result still lands correctly in the memory layer, which IS canonical-keyed.
+        val cached = app.context.getFromCache<CachedPlaylistTracks>(
+            "${item.id}-tracks", DURABLE_PLAYLIST_FOLDER, durable = true
+        )
+        if (cached != null && System.currentTimeMillis() - cached.savedAtMs < TRACKS_TTL_MS) return
+        runCatching {
+            coalescedTracks(app, "playlist:${canonicalId(item.id)}") {
+                extension.getAs<PlaylistClient, Feed<Track>> { loadTracks(item) }.getOrThrow().loadAll()
+            }
+        }
+    }
+
+    // Album equivalent of loadPlaylistTracksCached. Same shape deliberately, with three differences that
+    // are real rather than cosmetic:
+    //   AlbumClient.loadTracks returns a NULLABLE Feed - an album may legitimately have no track list at
+    //     all. That is a structural property, not an empty result, so a null is returned WITHOUT caching:
+    //     writing it as an empty list would make "this client does not expose tracks" indistinguishable
+    //     from "this album has none", and the 24h TTL would make the confusion sticky.
+    //   toAlbumSlim, not toPlaylistSlim - different context extra (see there).
+    //   a separate durable folder - album and playlist ids share a string namespace (see the constants).
+    private suspend fun loadAlbumTracksCached(
+        app: App, extension: Extension<*>, item: Album,
+    ): Feed<Track>? {
+        val cached = app.context.getFromCache<CachedPlaylistTracks>(
+            "${item.id}-tracks", DURABLE_ALBUM_FOLDER, durable = true
+        )
+        if (cached != null && System.currentTimeMillis() - cached.savedAtMs < TRACKS_TTL_MS)
+            return cached.tracks.toFeed()
+
+        // "album:" prefix for the same reason the folders are separate: coalescedTracks is ONE map, and an
+        // album and a playlist sharing an id string would otherwise share an in-flight entry and serve each
+        // other's tracks. canonicalId for the same reason as the playlist path.
+        val tracks = coalescedTracks(app, "album:${canonicalId(item.id)}") {
+            val feed = extension.getAs<AlbumClient, Feed<Track>?> { loadTracks(item) }.getOrThrow()
+                ?: return@coalescedTracks emptyList()
+            feed.loadAll()
+        }
+        if (tracks.isEmpty()) return null
+        app.context.saveToCache(
+            "${item.id}-tracks",
+            CachedPlaylistTracks(System.currentTimeMillis(), tracks.map { it.toAlbumSlim() }),
+            DURABLE_ALBUM_FOLDER, durable = true
         )
         return tracks.toFeed()
     }

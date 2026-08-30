@@ -34,12 +34,22 @@ import dev.brahmkshatriya.echo.ui.feed.FeedClickListener.Companion.getFeedListen
 import dev.brahmkshatriya.echo.ui.main.MainFragment.Companion.applyPlayerBg
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
+import dev.brahmkshatriya.echo.ui.player.PlayerViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
 import org.koin.androidx.viewmodel.ext.android.viewModel
 
 class FeedFragment : Fragment(R.layout.fragment_generic_collapsable) {
     companion object {
+        // Prefetch debounce. Below ~400ms a fling that momentarily settles starts warming; above ~600ms a
+        // genuine pause gets missed. 500 is the point where a fast scroll costs zero requests.
+        const val WARM_DEBOUNCE_MS = 500L
+
         fun getBundle(title: String, subtitle: String?) = Bundle().apply {
             putString("title", title)
             putString("subtitle", subtitle)
@@ -136,6 +146,46 @@ class FeedFragment : Fragment(R.layout.fragment_generic_collapsable) {
             (recyclerView as? TvAwareRecyclerView)?.navRailView =
                 requireActivity().findViewById(R.id.navRailContainer)
             getTouchHelper(listener).attachToRecyclerView(recyclerView)
+
+            // ══ PREFETCH TRIGGER ══ See FeedData.warmTracks for the gates and the reasoning.
+            // Scroll-settle, not long-press: what predicts opening an item is looking at it. A long-press
+            // opens the more-menu and is used to queue, to check the artist, or by accident - it does not
+            // predict an open, and it was only ever considered because the listener already existed.
+            //
+            // The debounce is what makes a fling cost ZERO: every state change cancels the pending job, so
+            // a scroll that never settles for the full delay warms nothing. It also cancels a settle that
+            // is immediately scrolled away from.
+            //
+            // Cancelling the JOB does not cancel a warm already in flight, and that is deliberate: once
+            // started, the request is owned by app.scope inside coalescedTracks, so it completes and fills
+            // the memory layer. Cancelling mid-response would waste the bytes already transferred AND cache
+            // nothing, turning a partially-useful request into a wholly wasted one.
+            //
+            // CENTRE-WEIGHTED MIDDLE THREE rather than every visible row: the middle of the viewport is
+            // what someone who stopped scrolling is looking at, and three keeps a deliberate pause at about
+            // three requests instead of six. The visible width is the tuning knob if that needs adjusting.
+            val playerViewModel by activityViewModel<PlayerViewModel>()
+            var warmJob: Job? = null
+            recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                    warmJob?.cancel()
+                    if (newState != RecyclerView.SCROLL_STATE_IDLE) return
+                    warmJob = viewLifecycleOwner.lifecycleScope.launch {
+                        delay(WARM_DEBOUNCE_MS)
+                        // GridLayoutManager extends LinearLayoutManager, so this covers both feed layouts.
+                        val lm = rv.layoutManager as? LinearLayoutManager ?: return@launch
+                        val first = lm.findFirstVisibleItemPosition()
+                        val last = lm.findLastVisibleItemPosition()
+                        if (first < 0 || last < first) return@launch
+                        val centre = (first + last) / 2
+                        val visible = (centre - 1..centre + 1)
+                            .filter { it in first..last }
+                            // peek, never get: reading an item must not trigger a Paging load.
+                            .mapNotNull { runCatching { feedAdapter.peek(it) }.getOrNull() }
+                        feedData.warmTracks(visible, playerViewModel.isPlaying.value)
+                    }
+                }
+            })
             swipeRefresh = binding.swipeRefresh
             binding.swipeRefresh.run {
                 configure()

@@ -165,22 +165,21 @@ data class App(
                 // the shortName derived from SimplifyBooleanWithConstantsInspection (no explicit shortName in
                 // the Kotlin plugin's registration → class name minus "Inspection"), confirmed against the
                 // plugin jar — not guessed.
-                // ⚠️ KNOWN GAP, deliberately not fixed here (recorded 2026-08-20): this block is NOT
-                // runCatching-wrapped, unlike CrashKeys.set(), which is guarded precisely because a
-                // not-yet-initialised Crashlytics can throw (FirebaseCrashlytics.getInstance() ->
-                // FirebaseApp.getInstance() throws when the default app is absent, and getInstance()
-                // itself throws NPE if the component is missing). If anything in here throws, it
-                // propagates out of collectLatest, kills this collector for the life of the process, and
-                // every later throwFlow.emit then suspends FOREVER on the 0-buffer MutableSharedFlow —
-                // silencing both the Crashlytics non-fatals and the snackbars, with no error anywhere.
-                // A wholesale silencer waiting to happen; the fix is a runCatching around the apply.
-                // runCatching is the fix the KNOWN GAP note above has been asking for since 2026-08-20.
+                // ⚠️ THIS BLOCK MUST STAY runCatching-WRAPPED. Recorded as a KNOWN GAP on
+                // 2026-08-20 and CLOSED in build 1057 (f2b661b0); the note is kept rather than deleted
+                // because the failure it prevents is completely invisible and the wrap looks removable.
                 // FirebaseCrashlytics.getInstance() throws when the default FirebaseApp is absent, and
-                // getInstance() itself NPEs if the component is missing - and this block has no suspension
-                // point, so collectLatest cannot cancel it. Unwrapped, a throw here propagates out of
-                // collectLatest and kills this collector for the life of the process, silencing every later
-                // non-fatal. Swallowing is correct: failing to RECORD an error must never escalate into
-                // losing all subsequent ones. Pairs with the DROP_OLDEST buffer above - that stops a stuck
+                // getInstance() itself NPEs if the component is missing - most likely AT STARTUP, before
+                // Firebase has initialised, which is exactly when early errors are emitted. This block has
+                // no suspension point, so collectLatest cannot cancel it: unwrapped, a throw propagates out
+                // of collectLatest, kills this collector for the life of the process, and silences every
+                // later non-fatal AND every snackbar with no error anywhere.
+                // Before 1057 it was worse: emit then suspended FOREVER on the then-0-buffer
+                // MutableSharedFlow, so one early failure took the whole process's reporting down
+                // permanently. That is a plausible reason some classes of startup error (a DNS failure on
+                // an extension call, say) were under-reported on builds before 1057.
+                // Swallowing is correct here: failing to RECORD an error must never escalate into losing
+                // all subsequent ones. Pairs with the DROP_OLDEST buffer above - that stops a stuck
                 // collector blocking emitters, this stops a throwing one disappearing entirely.
                 @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants", "SwallowedException")
                 if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) runCatching {

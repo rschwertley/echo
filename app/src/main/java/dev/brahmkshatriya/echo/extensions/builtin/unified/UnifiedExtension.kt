@@ -668,6 +668,16 @@ class UnifiedExtension(
         else removeTracksFromPlaylist(
             likedPlaylist, tracks, listOf(tracks.indexOfFirst { it.id == item.id })
         )
+        // A like MUTATES THE LIKED PLAYLIST, so its durable tracks entry is now stale. No app-side call
+        // site can do this: only this extension knows which playlist db.getLikedPlaylist resolved to, and
+        // the app's like path (PlayerCallback.onSetRating / MediaDetailsViewModel.likeItem) sees only a
+        // Track. Without it, liking a song left the Liked playlist missing that song for up to 24h.
+        // Reaching into the app cache from an extension is a layering inversion in general; it is
+        // acceptable HERE because UnifiedExtension is a built-in, lives in the app module, and already
+        // holds `app`. A third-party extension cannot do this and must not need to - every OTHER mutation
+        // path is busted app-side (SaveToPlaylistViewModel, EditPlaylistViewModel), which covers all
+        // extensions. This site exists only because the target playlist is chosen inside the extension.
+        Cached.bustPlaylistTracksCache(app, likedPlaylist.id)
     }
 
     override suspend fun isItemLiked(item: EchoMediaItem): Boolean {

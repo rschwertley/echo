@@ -21,6 +21,7 @@ import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getAs
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtension
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtensionOrThrow
+import dev.brahmkshatriya.echo.extensions.cache.Cached.bustPlaylistTracksCache
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -90,6 +91,14 @@ class SaveToPlaylistViewModel(
                     listener?.onEnterPlaylistEditor(loaded, playlistTracks)
                     addTracksToPlaylist(loaded, playlistTracks, playlistTracks.size, tracks)
                     listener?.onExitPlaylistEditor(loaded, playlistTracks + tracks)
+                    // The durable playlist-tracks entry for THIS playlist is now stale. Nothing else will
+                    // clear it: bustPlaylistTracksCache had exactly one caller before this
+                    // (MediaDetailsViewModel.refreshTracks), reachable only from pull-to-refresh and the
+                    // editor's "reload" fragment result - and that result is keyed to the page you are
+                    // LOOKING AT, which is never the playlist you just saved into from here. So without
+                    // this line the added tracks stayed invisible for the full 24h TTL, on a change the
+                    // user made deliberately and would expect to see immediately.
+                    bustPlaylistTracksCache(app, loaded.id)
                     true
                 }.getOrElse { e ->
                     if (e is CancellationException) throw e

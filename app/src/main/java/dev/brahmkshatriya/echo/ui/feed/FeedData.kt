@@ -12,7 +12,9 @@ import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
+import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtensionOrThrow
+import dev.brahmkshatriya.echo.extensions.cache.Cached
 import dev.brahmkshatriya.echo.extensions.builtin.offline.MediaStoreUtils.searchBy
 import dev.brahmkshatriya.echo.ui.common.PagedSource
 import dev.brahmkshatriya.echo.ui.feed.FeedType.Companion.toFeedType
@@ -41,6 +43,7 @@ import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 
@@ -56,6 +59,46 @@ data class FeedData(
     private val noVideos: Boolean,
     private val extraLoadFlow: Flow<*>
 ) {
+    // ══ PREFETCH ══ Warm the track lists of playlists the user is looking at, so a tap that follows is a
+    // cache hit rather than a fresh round trip. FeedFragment owns the trigger (scroll-settle + debounce and
+    // which rows are visible); this half owns the gates, the extension lookup and the cap.
+    //
+    // PLAYLISTS ONLY. Every playlist loadTracks implementation read - Deezer, Offline, Unified, plus
+    // Spotify and Tidal - uses only the id and routing extras, all set when the item is parsed into a
+    // shelf. Albums are excluded because that is where both known failure shapes live: Tidal's album
+    // loadTracks does album.extras["json"]!! on a field written by loadAlbum, so an unloaded item throws;
+    // Spotify's passes the album object into toTrack, so an unloaded item silently degrades every track's
+    // metadata. Albums get their speed from the durable cache and the Deezer results() handoff instead.
+    //
+    // NOT WHILE PLAYING is doing real work, not defensive boilerplate: the 2026-05-27 per-track
+    // api.track() lookup was reverted because a speculative network call competing with playback caused
+    // battery drain and cellular playback problems. This is the same shape, so it carries the same guard.
+    // UNMETERED covers the cellular half.
+    //
+    // PROCESS-WIDE CAP, not per feed or per tab: a per-tab reset would let a user defeat it by cycling
+    // tabs. The durable cache means an item is warmed at most once per TTL, so the cap is rarely
+    // approached. When it is, prefetch silently stops and the user gets exactly today's behaviour - a
+    // degradation to the status quo rather than a failure, which is the right trade for something
+    // speculative, but silent, so it is written down here rather than left to be discovered in a profiler.
+    fun warmTracks(items: List<FeedType>, isPlaying: Boolean) {
+        if (isPlaying || !app.isUnmetered) return
+        scope.launch {
+            for (feedItem in items) {
+                if (warmsIssued.get() >= MAX_WARMS_PER_PROCESS) return@launch
+                val playlist = when (feedItem) {
+                    is FeedType.Media -> feedItem.item
+                    is FeedType.MediaGrid -> feedItem.item
+                    else -> null
+                } as? Playlist ?: continue
+                warmsIssued.incrementAndGet()
+                // getExtension throws for an unknown id; a warm must never surface anything.
+                runCatching {
+                    Cached.warmPlaylistTracks(app, getExtension(feedItem.extensionId), playlist)
+                }
+            }
+        }
+    }
+
     val current = extensionLoader.current
     val usersFlow = extensionLoader.db.currentUsersFlow
     suspend fun getExtension(id: String) =
@@ -269,6 +312,10 @@ data class FeedData(
     }
 
     private companion object {
+        // See warmTracks. Process-wide by construction: a companion val outlives every FeedData instance.
+        const val MAX_WARMS_PER_PROCESS = 20
+        val warmsIssued = AtomicInteger(0)
+
         // Sort/search materialization bound — the non-paged analog of PagedSource maxSize=100. Bounds the
         // sources×shelves×items explosion (Combine can reach 100k–400k+ items → ~1 GB → OOM). Set well above
         // any legit feed (large playlists/libraries top out ~10–15k), so it only bites on would-OOM feeds;
