@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Invisible track for the fast scroller (see FastScrollerHelper). Replaces AndroidFastScroll's
+    afs_md2_track, which draws a full-height 8dp bar down the edge of the list.
+
+    ⚠️ TRANSPARENT, NOT ABSENT - and it must stay a <shape> with an explicit <size>.
+
+    1. The track cannot be removed. FastScroller.onTouchEvent hit-tests mThumbView first (-> drag),
+       then falls through to mTrackView (-> scrollToThumbOffset + setDragging), so the track IS the
+       tap-to-jump target. Drop it and you lose tap-to-jump; pass null and getIntrinsicWidth() NPEs.
+
+    2. It cannot be a ColorDrawable. The FastScroller constructor runs
+           requireNonNegative(trackDrawable.getIntrinsicWidth(), "trackDrawable.getIntrinsicWidth() < 0")
+       and ColorDrawable's intrinsic width is -1, so setTrackDrawable(ColorDrawable(TRANSPARENT))
+       throws IllegalArgumentException at build time - on every list at once. The explicit <size>
+       below is what makes the intrinsic width valid.
+
+    Width stays 8dp to match afs_md2_track, because mTrackWidth feeds the scroller's layout and the
+    thumb is positioned against it. Height is deliberately unset (intrinsic height -1 is fine here -
+    only the track's WIDTH is range-checked, and afs_md2_track omits height too).
+
+    NOTE ON TOUCH: making this invisible does NOT change hit-testing. FastScroller.onTouchEvent is
+    gated on mScrollbarEnabled, which updateScrollbarState sets purely from `getScrollOffsetRange() > 0`
+    - i.e. "is this list scrollable". Auto-hide only fades the views; the flag stays true. So the
+    ~48dp live zone along the edge (isInTouchTarget expands to afs_min_touch_target_size) is present
+    on every scrollable list already, with or without this file. See FastScrollerHelper for the
+    escape hatch if that ever needs reducing.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <size android:width="8dp" />
+
+    <solid android:color="@android:color/transparent" />
+
+</shape>

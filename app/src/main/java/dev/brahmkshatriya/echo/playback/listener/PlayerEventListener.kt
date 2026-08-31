@@ -636,10 +636,31 @@ class PlayerEventListener(
     private val maxConsecutiveUnavailableSkips = 3
     private var consecutiveUnavailableSkips = 0
     // The safeCause() of each skip in the current run, oldest→newest, bounded to maxConsecutiveUnavailableSkips.
-    // Moves in lockstep with consecutiveUnavailableSkips: recordSkip() appends as it increments and
-    // resetConsecutiveSkips() clears as it zeroes — the two are never mutated apart, so a reported run can
-    // never carry a cause from a previous run.
+    // Moves in lockstep with consecutiveUnavailableSkips AND recentSkipRunHadError below: recordSkip()
+    // advances all three, resetConsecutiveSkips() clears all three — they are never mutated apart, so a
+    // reported run can never carry a cause, a count or a family from a previous run.
     private val recentSkipCauses = ArrayDeque<String>()
+
+    // Picks the HealthException FAMILY for this run: false -> ConsecutiveSkipStallException (every skip was
+    // the buffering watchdog's recordSkip(null)), true -> ConsecutiveSkipErrorException. Crashlytics groups
+    // on the class, so this is what lets a stall storm be muted without hiding a real error — see the long
+    // note on HealthMonitor.ConsecutiveSkipException.
+    //
+    // A FLAG, NOT A SCAN OF recentSkipCauses. Deriving it by looking for "StuckBuffering" in the joined
+    // string would reintroduce exactly the message-parsing fragility that HealthException's `val` fields
+    // exist to remove: the first reformat of safeCause() would silently misfile every report.
+    //
+    // Sticky over the run, which is exact rather than approximate here: every recordSkip() call site is
+    // immediately followed by the `>= maxConsecutiveUnavailableSkips` trip check, so the counter never
+    // reaches 4 and the deque's removeFirst() never actually evicts. The flag therefore always describes
+    // the same set of skips that recentSkipCauses reports. If a future skip site ever omits that trip
+    // check, an early error could scroll out of the causes while this stayed true — reinstate the check
+    // rather than weakening this.
+    //
+    // Third member of the reset trio. consecutiveUnavailableSkips, recentSkipCauses and this MUST be
+    // mutated together (recordSkip advances all three, resetConsecutiveSkips clears all three) or a report
+    // can carry one run's count with another run's family.
+    private var recentSkipRunHadError = false
 
     // True once a track has resolved to STATE_READY since the queue was last set fresh (reset below on a
     // PLAYLIST_CHANGED media-item transition). Removed-extension tracks fail during resolution and never
@@ -761,6 +782,10 @@ class PlayerEventListener(
     ) {
         consecutiveUnavailableSkips++
         recentSkipCauses.addLast(safeCause(cause, playbackError, detail))
+        // Mirrors safeCause's own test: `cause == null` is what renders as "StuckBuffering", so the two can
+        // never disagree about which family a skip belongs to. playbackError is included because a skip
+        // carrying only a PlaybackException is still a real error, not a stall.
+        if (cause != null || playbackError != null) recentSkipRunHadError = true
         if (recentSkipCauses.size > maxConsecutiveUnavailableSkips) recentSkipCauses.removeFirst()
     }
 
@@ -769,6 +794,7 @@ class PlayerEventListener(
     private fun resetConsecutiveSkips() {
         consecutiveUnavailableSkips = 0
         recentSkipCauses.clear()
+        recentSkipRunHadError = false
         lastWatchdogSkipMediaId = null
     }
 
@@ -853,10 +879,15 @@ class PlayerEventListener(
                 "(ext=${extensionId ?: "unknown"}, outcome=$outcome): " +
                 recentSkipCauses.joinToString(" | ")
         )
+        // Family picks the CLASS, which is what Crashlytics groups on — a stall storm and a real error no
+        // longer share an issue. Both carry the identical message, so lastCauses and its probe fields are
+        // unchanged and the dedupe partitioning is the same as before the split.
+        val causes = recentSkipCauses.joinToString(",")
+        val skips = consecutiveUnavailableSkips
+        val ext = extensionId ?: "unknown"
         healthMonitor?.report(
-            HealthMonitor.ConsecutiveSkipException(
-                consecutiveUnavailableSkips, extensionId ?: "unknown", recentSkipCauses.joinToString(",")
-            ),
+            if (recentSkipRunHadError) HealthMonitor.ConsecutiveSkipErrorException(skips, ext, causes)
+            else HealthMonitor.ConsecutiveSkipStallException(skips, ext, causes),
             HealthMonitor.Scope.MEMORY_ONLY, 10 * 60 * 1000L
         )
         resetConsecutiveSkips()

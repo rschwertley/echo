@@ -116,6 +116,35 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
+// The fraction of the player-sheet drag that each chrome fade occupies. The collapsed mini-bar fades
+// OUT over the first CHROME_FADE_FRACTION of the drag; the expanded toolbar and controls fade IN over
+// the last CHROME_FADE_FRACTION. At 1/3 that leaves a chrome-free middle third carried by the cover
+// morph alone (PlayerTrackAdapter.updateCollapsed scales the cover linearly across the whole drag) —
+// the shared element owns the handoff and the chrome clears at both ends.
+//
+// RETUNE HERE AND ONLY HERE. Both curves in updateCollapsed derive from this one value:
+//   collapsed bar   : min(1, max(0, (collapsedOffset - (1 - F)) / F))   -> 1 at p=0,   0 from p=F
+//   expanded chrome : 1 - min(1, collapsedOffset / F)                   -> 0 until p=1-F, 1 at p=1
+// where p = playerSheetOffset (0 collapsed .. 1 expanded) and collapsedOffset = 1 - p in the drag arm.
+// Larger F = longer fades and a smaller gap; F = 1/2 closes the gap and the curves cross at p = 0.5.
+// Avoid that: the two layouts put their text in different places, so blending both at 50% is
+// double-exposure — the same artefact this replaced.
+//
+// WHAT THIS FIXED: the outgoing curve was `collapsedOffset * 2`, which fades over the WRONG HALF. The
+// bar held FULL opacity for p in [0, 0.5] while the sheet and cover travelled half their distance, then
+// overlapped the incoming toolbar over p in [2/3, 1]. Both directions ran it — the drag-down fix in
+// e0a3e5df/f2b661b0 put collapse onto the same arm expand already used — which is why the morph read as
+// the collapsed bar OVERLAYING the expanded player rather than morphing into it, in BOTH directions.
+//
+// ⚠️ DO NOT "fix" the `* 2` translation parallax that accompanies these fades. It is deliberate and
+// consistent across all four animated groups (bar, bgCollapsed, toolbar, controls): the outgoing element
+// clears its slot faster than the container moves. It looks like a retuning candidate now that the alpha
+// has changed, and it is not — the old artefact (an opaque bar sitting ~64dp above its slot at mid-drag)
+// was an ALPHA problem wearing a translation costume. With the fade ending at p = F the bar is never
+// seen further than 2 * collapseHeight * F from its slot and reads as a normal slide-and-fade exit.
+// Retune F, not the 2.
+private const val CHROME_FADE_FRACTION = 1f / 3f
+
 class PlayerFragment : Fragment() {
     private var binding by autoClearedNullable<FragmentPlayerBinding>()
     private val viewModel by activityViewModel<PlayerViewModel>()
@@ -307,8 +336,12 @@ class PlayerFragment : Fragment() {
             // one animates the real collapsed bar, bgCollapsed, the toolbar and playerControls. Fixing one
             // fixes half the morph - that is exactly what happened on 2026-08-26, and why the cover
             // morphed while the header did not. Change them together.
+            // Hoisted so the branch below and currTop at the bottom of this function test the SAME value.
+            // Reading playerSheetOffset separately at each site would let them disagree: `observe` collects
+            // a CONFLATED StateFlow off a coroutine resumption, not synchronously inside onSlide's frame.
+            val playerFullyExpanded = uiViewModel.playerSheetOffset.value >= 1f
             val (collapsedY, offset, collapsedOffset) = uiViewModel.run {
-                if (playerSheetState.value == STATE_EXPANDED && playerSheetOffset.value >= 1f) {
+                if (playerSheetState.value == STATE_EXPANDED && playerFullyExpanded) {
                     val offset = moreSheetOffset.value
                     Triple(systemInsets.value.top, offset, if (isLandscape) 0f else offset)
                 } else {
@@ -317,16 +350,29 @@ class PlayerFragment : Fragment() {
                 }
             }
             val collapsedInv = 1 - collapsedOffset
+            // Outgoing chrome. collapsedOffset counts DOWN from 1 as the sheet expands, so the drag-space
+            // window [0, F] maps to [1, 1 - F] here. Derived from CHROME_FADE_FRACTION - retune there.
+            val collapsedAlpha = min(
+                1f, max(0f, (collapsedOffset - (1f - CHROME_FADE_FRACTION)) / CHROME_FADE_FRACTION)
+            )
             binding.playerCollapsedContainer.root.run {
+                // The `* 2` parallax is deliberate and is NOT a retuning candidate now that the alpha
+                // curve has moved - see the warning on CHROME_FADE_FRACTION before touching it.
                 translationY = collapsedY - collapseHeight * collapsedInv * 2
-                alpha = collapsedOffset * 2
+                alpha = collapsedAlpha
+                // Mirrors the `isVisible = offset < 1` on the expanded chrome below. Without it the bar
+                // keeps translating (invisibly) for the remaining 1 - F of the drag after its fade ends.
+                isVisible = collapsedAlpha > 0f
                 translationZ = -1f * collapsedInv
             }
             binding.bgCollapsed.run {
                 translationY = collapsedY - collapseHeight * collapsedInv * 2
-                alpha = min(1f, collapsedOffset * 2) - 0.5f
+                // Scrim ceiling stays 0.5 (was `min(1f, collapsedOffset * 2) - 0.5f`, which clamped its
+                // negative tail to 0). Only the window moves, so the scrim cannot outlive the bar above it.
+                alpha = 0.5f * collapsedAlpha
             }
-            val alphaInv = 1 - min(1f, offset * 3)
+            // Incoming chrome - the mirror of collapsedAlpha, fading in over the LAST CHROME_FADE_FRACTION.
+            val alphaInv = 1 - min(1f, offset / CHROME_FADE_FRACTION)
             binding.expandedToolbar.run {
                 translationY = collapseHeight * offset * 2
                 alpha = alphaInv
@@ -339,7 +385,19 @@ class PlayerFragment : Fragment() {
                 isVisible = offset < 1
             }
             currTop = uiViewModel.run {
-                val top = if (playerSheetState.value != STATE_EXPANDED) 0
+                // Same conjunct as the branch above, same reason: on a collapse drag playerSheetState still
+                // reads EXPANDED for the whole gesture, so keying on state alone fed the ramp below the
+                // EXPANDED inset for the last quarter of the drag and then SNAPPED it to 0 when the flow
+                // finally settled to COLLAPSED. Drag-up, starting from COLLAPSED, always read 0 - the jump
+                // was collapse-only.
+                //
+                // ⚠️ NOT DEAD CODE. Keying reachability on the player sheet alone concludes this arm is
+                // unused, because the ramp is non-zero only for collapsedOffset > 0.75 while the conjunct
+                // needs playerSheetOffset >= 1f (collapsedOffset -> 0). It is reachable via UP NEXT: in the
+                // EXPANDED arm collapsedOffset is moreSheetOffset, so dragging Up Next past 75% open over a
+                // fully expanded player lands here. Portrait only - the EXPANDED arm pins collapsedOffset to
+                // 0f in landscape. Do not collapse this to a constant 0.
+                val top = if (playerSheetState.value != STATE_EXPANDED || !playerFullyExpanded) 0
                 else collapsedTopPadding + systemInsets.value.top
                 (top * max(0f, (collapsedOffset - 0.75f) * 4)).toInt()
             }

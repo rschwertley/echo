@@ -28,11 +28,60 @@ class HealthMonitor(private val app: App) {
     class ExtensionResolutionTimeout(extensionId: String, val durationMs: Long) :
         HealthException("extensionId=$extensionId durationMs=$durationMs", extensionId)
 
-    class ConsecutiveSkipException(
+    /**
+     * Split into two concrete families ON PURPOSE — do not collapse it back.
+     *
+     * Crashlytics groups a non-fatal on the exception CLASS plus the top stack frames, and this had
+     * exactly one construction site (PlayerEventListener.reportAndResetConsecutiveSkips), so every trip
+     * produced an identical class and byte-identical frames. A 403 storm from one extension and a
+     * buffering stall from another landed in ONE issue, and there was no way to mute the expected family
+     * without also hiding the one being watched for. The differing MESSAGE does not help: it is the issue
+     * subtitle, and subtitles are not part of the grouping key. Neither is a custom key — keys are
+     * per-event metadata, while mute/close act on the issue.
+     *
+     * ⚠️ NAMES ARE DELIBERATELY FLAT, NOT NESTED. `report()` derives both the Crashlytics issue identity
+     * and the `health_report_type` key from `javaClass.simpleName`, and for a nested class that returns
+     * ONLY the inner name — declaring these as `ConsecutiveSkipException.Stall` would title the issue
+     * "Stall" with no context. Keep any future family a sibling with a fully-qualifying name.
+     *
+     * The family comes from PlayerEventListener's `recentSkipRunHadError` flag, NOT from string-matching
+     * [lastCauses] for "StuckBuffering" — see the note on this file's [HealthException] about why parsing
+     * the message back is the thing these `val`s exist to prevent.
+     *
+     * The MESSAGE FORMAT IS UNCHANGED, and must stay that way: [lastCauses] carries the probe fields, and
+     * `report()`'s dedupe signature is simpleName + message. The two families already produced different
+     * messages (a stall run reads `StuckBuffering loaded=… …`, an error run reads `CODE ext:… Class …`),
+     * so prefixing a different class name changes the signature STRING without changing the PARTITIONING —
+     * the 10-minute cooldown was already per-family and still is. Scope is MEMORY_ONLY, so the only cost of
+     * the renamed signatures is that the first trip after an update reports instead of being suppressed,
+     * once. (A PERSISTENT report renamed this way would instead strand dead keys in the prefs forever and
+     * restart every cooldown — relevant if ResumptionUtils' or StreamableLoader's reports are ever split.)
+     *
+     * NOT split on extension-attributability. That sounds like the natural axis and is the wrong one: the
+     * `ext:` field in a cause comes from an AppException in the chain, and an HTTP 403 on a STREAM URL is a
+     * Media3 `InvalidResponseCodeException` from the datasource carrying no AppException — so an
+     * extension-attributable split would not separate a 403 storm from a stall at all. If the error family
+     * later needs subdividing, do it on HTTP-code presence.
+     */
+    sealed class ConsecutiveSkipException(
         val skipCount: Int, val lastExtensionId: String, val lastCauses: String
     ) : HealthException(
         "skipCount=$skipCount lastExtensionId=$lastExtensionId lastCauses=$lastCauses", lastExtensionId
     )
+
+    /** Every skip in the run came from the buffering watchdog — `recordSkip(null)`, no error object. */
+    class ConsecutiveSkipStallException(
+        skipCount: Int, lastExtensionId: String, lastCauses: String
+    ) : ConsecutiveSkipException(skipCount, lastExtensionId, lastCauses)
+
+    /**
+     * At least one skip in the run carried a real throwable. Mixed runs land here deliberately: a genuine
+     * error present is the actionable half, and burying it in the mutable stall family is the failure this
+     * split exists to prevent.
+     */
+    class ConsecutiveSkipErrorException(
+        skipCount: Int, lastExtensionId: String, lastCauses: String
+    ) : ConsecutiveSkipException(skipCount, lastExtensionId, lastCauses)
 
     class OrphanedSessionException(val savedTrackCount: Int, val firstTrackId: String) :
         HealthException("savedTrackCount=$savedTrackCount firstTrackId=$firstTrackId", null)

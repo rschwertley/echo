@@ -1,4 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    ☠️ THIS LAYOUT IS A GHOST. IT NEVER PAINTS. Do not debug the mini-player morph through it.
+
+    Its only content, collapsedPlayerInfo below, is hardcoded android:visibility="invisible", and nothing
+    un-hides it: `collapsedPlayerInfo` occurs exactly once in the entire source tree - as its own id
+    declaration on the next element. There is no runtime reference of any kind.
+
+    History: 01dc43b8 (2026-06-09, "Fix shuffle start position, mini player scroll, and extension settings
+    crash") moved the mini-player out of the swipeable ViewPager page and into the fixed overlay. That same
+    commit added the real cover, title, artist and play/pause to item_player_collapsed_controls.xml and hid
+    this copy. THE LIVE MINI-BAR IS item_player_collapsed_controls.xml, included as player_collapsed_container
+    in fragment_player.xml and animated by PlayerFragment.updateCollapsed. This one was left behind.
+
+    PlayerTrackAdapter still writes to it every frame from four sites - translationY/alpha in
+    updateCollapsed, applyHorizontalInsets in updateInsets, text colours in updateColors, and title/artist
+    in bind. ALL FOUR ARE INERT and are commented as such at each site. Nothing reads this subtree's
+    geometry either: the cover morph derives targetX/targetY from the cover and insets, and extraX/extraY
+    from playerControlsPlaceholder, never from here. It reserves no space for its siblings, because
+    item_player_track.xml is a FrameLayout - this and constraint_layout overlap rather than stack.
+
+    KEPT DELIBERATELY, NOT FORGOTTEN. Removing it means deleting the <include> in item_player_track.xml and
+    fixing the four binding.playerCollapsed references in PlayerTrackAdapter, which is a compile-breaking
+    change worth doing on its own rather than folded into a morph fix. The reason to bother, when someone
+    does: android:focusable="true" (from @style/Selectable) on a contentless view in every queue page.
+-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     style="@style/Selectable"

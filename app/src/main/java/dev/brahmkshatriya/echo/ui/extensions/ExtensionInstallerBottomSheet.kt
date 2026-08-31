@@ -95,7 +95,24 @@ class ExtensionInstallerBottomSheet : BottomSheetDialogFragment() {
             .loadAsCircle(binding.extensionIcon, R.drawable.ic_extension_32dp) {
                 binding.extensionIcon.setImageDrawable(it)
             }
-        binding.extensionDetails.text = metadata.version
+        // THIS SHEET IS SHARED, so the label has to be resolved here rather than passed in. installPromptFlow
+        // has two emitters and they mean different things: updateExt (ExtensionsViewModel:196) only ever
+        // fires for something already installed - it is the auto-update prompt - while installWithPrompt
+        // (:213) is the manual add path (file picker, share intent, the Add sheet) and is usually a fresh
+        // install. Hardcoding either label is wrong for the other caller.
+        // all.value rather than a suspending lookup: getExtension() does first { it.isNotEmpty() } and would
+        // hang the sheet if the list were empty. `all` is a started StateFlow by this point (ExtensionsViewModel
+        // collects it for manageExtListFlow), and AddViewModel:97 already reads it exactly this way to work
+        // out which extensions are installed.
+        val installed = viewModel.extensionLoader.all.value.find { it.id == metadata.id }
+        // Showing both versions is what makes a REPLACEMENT legible - the sheet previously showed only the
+        // incoming version, so an update was indistinguishable from a first install. It also covers the
+        // same-or-older case a manual re-pick can produce without needing a third label: "Update" with
+        // "vb4c9ec7 -> vb4c9ec7" reads correctly as "nothing new", which a bare "Update" would not.
+        binding.extensionDetails.text = installed
+            ?.let { "${it.metadata.version} → ${metadata.version}" }
+            ?: metadata.version
+        binding.installButton.setText(if (installed != null) R.string.update else R.string.install)
 
         val byAuthor = getString(R.string.by_x, metadata.author)
         val type = getType(metadata.type)

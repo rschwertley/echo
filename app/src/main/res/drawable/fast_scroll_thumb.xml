@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Small circular thumb for the fast scroller (see FastScrollerHelper). Replaces AndroidFastScroll's
+    afs_md2_thumb, which is an 8dp x 52dp rounded rect.
+
+    Circle geometry: radius is HALF of width/height. If you retune the size, retune the radius with it
+    or it stops being round. Both dimensions must be present and non-negative - the FastScroller
+    constructor range-checks thumbDrawable's intrinsic width AND height (unlike the track, which is
+    checked on width only).
+
+    12dp is wider than the 8dp track, so the thumb sits ~4dp further in from the edge than afs_md2_thumb
+    did. That is fine and intentional now that the track is invisible (fast_scroll_track.xml).
+
+    No <padding>: afs_md2_thumb carries top/bottom 4dp to inset itself inside its 52dp box, which would
+    squash a circle this size.
+
+    Tint mirrors afs_md2_thumb's ?colorControlActivated rather than a hardcoded colour. The app theme is
+    Theme.Material3Expressive.DynamicColors.DayNight.NoActionBar, so that attr resolves into the dynamic
+    scheme and stays correct in both light and dark. Load this via AppCompatResources.getDrawable with a
+    themed (Activity) context so the attr resolves - FastScrollerHelper does.
+
+    TOUCH TARGET IS NOT AFFECTED by shrinking this. FastScroller.isInViewTouchTarget expands every hit
+    area to afs_min_touch_target_size (48dp in the AAR), so a 12dp thumb still gets a 48dp grab area.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle"
+    android:tint="?attr/colorControlActivated">
+
+    <corners android:radius="6dp" />
+
+    <size
+        android:width="12dp"
+        android:height="12dp" />
+
+    <solid android:color="@android:color/white" />
+
+</shape>

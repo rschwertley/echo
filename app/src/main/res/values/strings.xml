@@ -168,6 +168,7 @@
     <string name="check_for_updates_summary">Look for new updates of both app and extensions, when you open the app.</string>
 
     <string name="install">Install</string>
+    <string name="update">Update</string>
     <string name="app">App</string>
     <string name="file">File</string>
     <string name="installation_type">Installation Type</string>

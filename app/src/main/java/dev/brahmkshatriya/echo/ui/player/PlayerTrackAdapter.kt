@@ -76,12 +76,30 @@ class PlayerTrackAdapter(
         private var currCoverRound = 0f
         private val isLandscape = context.isLandscape()
         fun updateCollapsed() = uiViewModel.run {
+            // Hoisted above targetPosY so that line and the branch further down test the SAME value.
+            // Reading playerSheetOffset separately at each site would let them disagree: `observe` collects
+            // a CONFLATED StateFlow off a coroutine resumption, not synchronously inside onSlide's frame.
+            val playerFullyExpanded = playerSheetOffset.value >= 1f
             val insets = if (!isLandscape) systemInsets.value else getCombined()
             // Full-width mini-bar: land the morphed cover flush at insets.start (matching the overlay
             // collapsedTrackCover), NOT collapsedPadding+insets.start — otherwise the two covers sit
             // 8dp apart and the duplicate shows. Both now stack at the same flush position.
             val targetPosX = if (context.isRTL()) insets.end else insets.start
-            val targetPosY = if (playerSheetState.value != STATE_EXPANDED) 0
+            // Same conjunct as the branch below, and for the same reason: on a collapse drag
+            // playerSheetState still reads EXPANDED for the whole gesture, so keying on state alone aimed
+            // the cover at the EXPANDED landing point (collapsedPadding + status bar) for every frame and
+            // then SNAPPED it to 0 by roughly that distance once the flow settled to COLLAPSED. Drag-up,
+            // starting from COLLAPSED, always aimed at 0 - the jump was collapse-only, and it survived the
+            // e0a3e5df/f2b661b0 fix because that only reached the offset branch, not this line.
+            //
+            // ⚠️ NOT DEAD CODE. Keying reachability on the player sheet alone concludes the EXPANDED arm is
+            // unused, because targetY is multiplied by `offset` below and offset is 0 at the expanded rest.
+            // It is reachable via UP NEXT: dragging that sheet open over a fully expanded player leaves
+            // playerSheetOffset at 1f (so the conjunct holds) while offset becomes moreSheetOffset > 0, and
+            // this value multiplies through. The conjunct IS the discrimination between "Up Next moving over
+            // a fully expanded player" (keep this arm) and "the player sheet itself being dragged" (take the
+            // else arm). Do not collapse it to a constant 0.
+            val targetPosY = if (playerSheetState.value != STATE_EXPANDED || !playerFullyExpanded) 0
             else collapsedPadding + systemInsets.value.top
             targetX = targetPosX - cover.left
             targetY = targetPosY - cover.top
@@ -116,13 +134,19 @@ class PlayerTrackAdapter(
             // reach every other observer of that flow — PlayerFragment's bgImage.pause(), the
             // emit(playerBgVisible, false) on COLLAPSED and the applyPlayer() re-run are all unguarded —
             // and would undo 1bff9b02's setState crash fix. One consumer was wrong; one consumer is fixed.
-            val playerFullyExpanded = playerSheetOffset.value >= 1f
+            // (playerFullyExpanded is hoisted to the top of this function - targetPosY needs it too.)
             val (collapsedY, offset) =
                 if (playerSheetState.value == STATE_EXPANDED && playerFullyExpanded)
                     systemInsets.value.top to if (isLandscape) 0f else moreSheetOffset.value
                 else -collapsedPadding to 1 - max(0f, playerSheetOffset.value)
 
             val inv = 1 - offset
+            // ☠️ INERT - see the note on item_player_collapsed.xml's root. That subtree's only content
+            // (collapsedPlayerInfo) is hardcoded android:visibility="invisible" and NOTHING un-hides it:
+            // `collapsedPlayerInfo` appears exactly once in the whole tree, as its own id declaration. So
+            // this alpha paints nothing at any value. The LIVE mini-bar is item_player_collapsed_controls
+            // in the fragment overlay, animated by PlayerFragment.updateCollapsed. Changing these two
+            // lines has no visible effect; do not chase a morph bug through here.
             binding.playerCollapsed.root.run {
                 translationY = collapsedY - size * inv * 2
                 alpha = offset
@@ -151,6 +175,7 @@ class PlayerTrackAdapter(
             val (v, h) = if (!isLandscape) 64 to 0 else 0 to 24
             binding.constraintLayout.applyInsets(systemInsets.value, v, h)
             val insets = if (isLandscape) getCombined() else systemInsets.value
+            // ☠️ INERT - permanently invisible subtree, see item_player_collapsed.xml's root note.
             binding.playerCollapsed.root.applyHorizontalInsets(insets)
             binding.playerControlsPlaceholder.run {
                 updateLayoutParams {
@@ -166,6 +191,9 @@ class PlayerTrackAdapter(
         }
 
         fun updateColors() {
+            // ☠️ INERT - these TextViews are inside the permanently invisible collapsedPlayerInfo. The
+            // colours that reach the screen are set on item_player_collapsed_controls in PlayerFragment.
+            // See item_player_collapsed.xml's root note.
             binding.playerCollapsed.run {
                 val colors = uiViewModel.playerColors.value ?: context.defaultPlayerColors()
                 collapsedTrackTitle.setTextColor(colors.onBackground)
@@ -322,6 +350,9 @@ class PlayerTrackAdapter(
         }
 
         fun bind(item: MediaItem?) {
+            // ☠️ INERT - these TextViews are inside the permanently invisible collapsedPlayerInfo, so this
+            // text is never seen. The mini-bar title/artist the user reads are written in PlayerFragment
+            // onto item_player_collapsed_controls. See item_player_collapsed.xml's root note.
             binding.playerCollapsed.run {
                 collapsedTrackTitle.text = item?.track?.title
                 collapsedTrackArtist.text = item?.track?.artists?.joinToString(", ") { it.name }
