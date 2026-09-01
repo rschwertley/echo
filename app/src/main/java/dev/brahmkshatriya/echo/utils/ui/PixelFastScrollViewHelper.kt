@@ -103,28 +103,73 @@ import me.zhanghai.android.fastscroll.Predicate
  * ## Accepted residual
  *
  * The average still varies with item heights, so thumb travel is non-linear — faster through tall
- * sections. It does not jump, pin or stop short, because range and offset come from one window in one
- * call and [scrollTo] is a self-correcting delta rather than an absolute mapping.
+ * sections. It does not pin or stop short: range and offset come from one window in one call, and a
+ * repeated target is never re-applied (see [scrollTo]). Whether the thumb still visibly leaves the
+ * finger mid-drag is the open question — see [getScrollOffset] for the one remedy, and why it is not
+ * carried pre-emptively.
  */
 class PixelFastScrollViewHelper(
     private val view: RecyclerView
 ) : FastScroller.ViewHelper {
 
+    private companion object {
+        /** No FastScroller-driven scroll outstanding. Not a valid offset. */
+        const val NO_PENDING = Int.MIN_VALUE
+    }
+
+    /** Offset [scrollTo] was last asked for, or [NO_PENDING]. See both accessors for why it exists. */
+    private var pendingOffset = NO_PENDING
+
+    /** True only inside [scrollTo]'s own scrollBy, so its onScrolled does not clear [pendingOffset]. */
+    private var selfScrolling = false
+
     override fun getScrollRange() =
         view.computeVerticalScrollRange() + view.paddingTop + view.paddingBottom
 
+    /**
+     * Plain measurement — deliberately NOT the requested offset.
+     *
+     * An earlier revision replayed [pendingOffset] here so the drawn thumb would exactly follow the
+     * finger, on the argument that it restores what `SimpleViewHelper` gets free (`View.scrollTo` sets
+     * `mScrollY` literally, so its round trip is exact). That argument still holds, but it addresses a
+     * DIFFERENT symptom from the flash — the library uses this value only for
+     * `mThumbOffset = thumbOffsetRange * getScrollOffset() / scrollOffsetRange`, i.e. where the thumb is
+     * PAINTED — and it can never affect whether a scroll happens. Since much of the visible thumb jumping
+     * was driven by the scroll loop that [scrollTo]'s guard now removes, it is not carried unless the
+     * thumb is still seen leaving the finger on a mixed-height feed. Re-add it here if so; do not add it
+     * speculatively, because it makes this method stop reporting the truth.
+     */
     override fun getScrollOffset() = view.computeVerticalScrollOffset()
 
     /**
-     * A DELTA, not an absolute seek — RecyclerView has no "set pixel scroll" to mirror
-     * `View.scrollTo`. Each call moves by the measured error, so a shifting estimate produces a small
-     * correction on the next frame instead of the divergence an absolute position mapping gave.
-     * scrollBy also clamps at both ends on its own, which is the other half of why no end anchor is
+     * A DELTA, not an absolute seek — RecyclerView has no "set pixel scroll" to mirror `View.scrollTo`.
+     *
+     * ⚠️ THE IDEMPOTENCE GUARD IS LOAD-BEARING, and this is exactly why. `View.scrollTo` early-returns
+     * when the position is unchanged. `RecyclerView.scrollBy` has no such guard, and worse,
+     * scrollByInternal (RecyclerView.java:2266-2268) does
+     * ```java
+     * if (!mItemDecorations.isEmpty()) { invalidate(); }
+     * ```
+     * UNCONDITIONALLY, before any consumed-check — while `dispatchOnScrolled` at :2296 IS guarded by
+     * `consumedX != 0 || consumedY != 0`. addOnPreDrawListener below installs an ItemDecoration, so that
+     * list is never empty once the scroller exists. Therefore **every scrollBy repaints the whole
+     * RecyclerView, including scrollBy(0, 0)**.
+     *
+     * That is the held-finger flash, and note the loop CONVERGES rather than oscillating: the finger is
+     * still, so FastScroller re-delivers the same target, the delta reaches zero — and then scrollBy(0,0)
+     * is called on every MOVE sample forever, each one invalidating the entire list. Not applying an
+     * unchanged target is the whole fix; there is no delta small enough to be free.
+     *
+     * scrollBy also clamps at both ends by itself, which is the other half of why no end anchor is
      * needed. stopScroll() first, matching RecyclerViewHelper.
      */
     override fun scrollTo(offset: Int) {
+        if (offset == pendingOffset) return
+        pendingOffset = offset
+        selfScrolling = true
         view.stopScroll()
         view.scrollBy(0, offset - view.computeVerticalScrollOffset())
+        selfScrolling = false
     }
 
     // The three registrations mirror RecyclerViewHelper's own shapes (verified against the 1.3.0 AAR):
@@ -140,6 +185,9 @@ class PixelFastScrollViewHelper(
     override fun addOnScrollChangedListener(onScrollChanged: Runnable) {
         view.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                // Anything that moves the list other than us invalidates the replay, so a finger scroll,
+                // a fling or a programmatic scroll immediately puts getScrollOffset back on measurement.
+                if (!selfScrolling) pendingOffset = NO_PENDING
                 onScrollChanged.run()
             }
         })
@@ -151,10 +199,24 @@ class PixelFastScrollViewHelper(
     // it is the line to look at if that swap ever happens.
     override fun addOnTouchEventListener(onTouchEvent: Predicate<MotionEvent>) {
         view.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
-            override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent) = onTouchEvent.test(e)
+            override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent) =
+                onTouchEvent.test(e).also { clearPendingOnGestureEnd(e) }
+
             override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
                 onTouchEvent.test(e)
+                clearPendingOnGestureEnd(e)
             }
         })
+    }
+
+    /**
+     * The gesture end is the ONLY reliable point to stop replaying. FastScroller's ACTION_UP path calls
+     * setDragging(false) and does not call [scrollTo], so without this the last requested offset would be
+     * replayed indefinitely and the thumb would stick where the finger left it.
+     */
+    private fun clearPendingOnGestureEnd(event: MotionEvent) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> pendingOffset = NO_PENDING
+        }
     }
 }

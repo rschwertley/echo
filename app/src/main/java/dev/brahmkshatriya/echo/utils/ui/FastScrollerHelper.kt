@@ -60,9 +60,20 @@ object FastScrollerHelper {
         this ?: return
         val pad = 8.dpToPx(context)
         val isRtl = context.isRTL()
-        val left = if (!isRtl) insets.start else insets.end
-        val right = if (!isRtl) insets.end else insets.start
-        setPadding(Rect(left + pad, insets.top + pad, right + pad, insets.bottom + extraBottom + pad))
+        // FLUSH ON THE THUMB SIDE. FastScroller lays the thumb at
+        // `isLayoutRtl ? padding.left : viewWidth - padding.right - mThumbWidth`, so the thumb rides the
+        // END padding in both directions — the swap below is what keeps that true in RTL. It gets the
+        // window inset only, with NO 8dp: the inset is real (nav rail, cutout) but the 8dp was a cosmetic
+        // gap, and at 40dp wide against a carousel it read as the thumb floating off the edge.
+        //
+        // TOP AND BOTTOM ARE UNCHANGED and must stay so — they are not cosmetic. insets.top clears the
+        // status bar / app bar, and insets.bottom + extraBottom carries the nav bar and the mini-player,
+        // which is what stops the track running underneath it.
+        val edge = insets.end
+        val far = insets.start + pad
+        val left = if (!isRtl) far else edge
+        val right = if (!isRtl) edge else far
+        setPadding(Rect(left, insets.top + pad, right, insets.bottom + extraBottom + pad))
     }
 
     /**
@@ -114,8 +125,11 @@ object FastScrollerHelper {
             // attempt could not. RecyclerView ONLY — the NestedScrollView overload below keeps the
             // library's default helper, which is already this shape there.
             setViewHelper(PixelFastScrollViewHelper(view))
+            // Pre-inset default; applyInsets overwrites it on the first inset pass. Flush on the thumb
+            // side here too so the first frame does not show the gap and then close it.
             val pad = 8.dpToPx(view.context)
-            setPadding(pad, pad, pad, pad)
+            val isRtl = view.context.isRTL()
+            setPadding(if (isRtl) 0 else pad, pad, if (isRtl) pad else 0, pad)
         }.build()
     }
 
