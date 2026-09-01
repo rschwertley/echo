@@ -11,6 +11,7 @@ import dev.brahmkshatriya.echo.ui.common.UiViewModel
 import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.dpToPx
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.isRTL
+import dev.brahmkshatriya.echo.utils.ui.UiUtils.isTv
 import me.zhanghai.android.fastscroll.FastScroller
 import me.zhanghai.android.fastscroll.FastScrollerBuilder
 
@@ -18,6 +19,53 @@ import me.zhanghai.android.fastscroll.FastScrollerBuilder
 object FastScrollerHelper {
     const val SCROLL_BAR = "scroll_bar"
     fun View.isScrollBarEnabled() = context.getSettings().getBoolean(SCROLL_BAR, false)
+
+    /**
+     * The fast scroller is a DRAG-TO-SCROLL affordance, so it is never applied on TV regardless of the
+     * setting: D-pad is the only input there and there is no pointer to grab the thumb with. Without this
+     * a TV user who found the switch got a thumb that drew and auto-hid on scroll but could never be
+     * touched - FastScroller drives everything from an OnItemTouchListener, and a D-pad generates no
+     * MotionEvents.
+     *
+     * SettingsLookFragment hides the preference on TV too. Both are needed: the preference hide stops it
+     * being turned on, this stops an already-set value (or one synced from a phone) taking effect.
+     *
+     * Focus safety was NOT the reason - it was checked and is a non-issue. FastScroller adds its thumb,
+     * track and popup through ViewGroupOverlay.add(), not addView(), so they are never children of the
+     * RecyclerView, never enter the focus tree, and cannot fight TvAwareRecyclerView's establishFeedFocus
+     * / anchorFocusAt anchoring on the same recyclers. (That is also why PositionFastScrollViewHelper's
+     * getChildAt(0) can never pick one up instead of an item.)
+     */
+    private fun View.isFastScrollUsable() = !context.isTv() && isScrollBarEnabled()
+
+    /**
+     * Keeps the scroller's TRACK inside the real window insets. Call from the same inset block that pads
+     * the RecyclerView, so the two move together.
+     *
+     * `applyTo` sets a flat 8dp on all four sides once, and that is all a call site gets if it throws the
+     * returned [FastScroller] away — which every direct caller did, so on those screens the track ran under
+     * the mini-player and the nav bar. `MainFragment.applyInsets` was the only place that kept the handle
+     * and re-padded it, which is exactly why the four tab screens were correct and the other seven were
+     * not. This is that block, extracted so both routes share one implementation.
+     *
+     * ⚠️ THIS MOVES WHERE THE TRACK IS DRAWN. IT DOES NOT CHANGE THE SCROLL RANGE. If a screen scrolls
+     * past its last row into blank space, that is a metrics problem and this will not fix it - see
+     * PositionFastScrollViewHelper, whose range is derived from adapter positions and so does not include
+     * the recycler's padding at all.
+     *
+     * Null-receiver tolerant: `applyTo` returns null whenever the scroller is not applied (setting off, or
+     * on TV), so call sites can wire this unconditionally instead of guarding.
+     */
+    fun FastScroller?.applyInsets(
+        context: Context, insets: UiViewModel.Insets, extraBottom: Int = 0
+    ) {
+        this ?: return
+        val pad = 8.dpToPx(context)
+        val isRtl = context.isRTL()
+        val left = if (!isRtl) insets.start else insets.end
+        val right = if (!isRtl) insets.end else insets.start
+        setPadding(Rect(left + pad, insets.top + pad, right + pad, insets.bottom + extraBottom + pad))
+    }
 
     /**
      * Echo's fast-scroller look: a small circular thumb and no visible track, in place of
@@ -50,35 +98,6 @@ object FastScrollerHelper {
      *   no fork required. It shrinks the THUMB's grab area too, and takes it under the 48dp
      *   accessibility floor, so do not apply it pre-emptively.
      */
-    /**
-     * Keeps the scroller's TRACK inside the real window insets. Call from the same inset block that pads
-     * the RecyclerView, so the two move together.
-     *
-     * `applyTo` sets a flat 8dp on all four sides once, and that is all a call site gets if it throws the
-     * returned [FastScroller] away — which every direct caller did, so on those screens the track ran under
-     * the mini-player and the nav bar. `MainFragment.applyInsets` was the only place that kept the handle
-     * and re-padded it, which is exactly why the four tab screens were correct and the other seven were
-     * not. This is that block, extracted so both routes share one implementation.
-     *
-     * ⚠️ THIS MOVES WHERE THE TRACK IS DRAWN. IT DOES NOT CHANGE THE SCROLL RANGE. If a screen scrolls
-     * past its last row into blank space, that is a metrics problem and this will not fix it - see
-     * PositionFastScrollViewHelper, whose range is derived from adapter positions and so does not include
-     * the recycler's padding at all.
-     *
-     * Null-receiver tolerant: `applyTo` returns null whenever the SCROLL_BAR setting is off, so call sites
-     * can wire this unconditionally instead of guarding.
-     */
-    fun FastScroller?.applyInsets(
-        context: Context, insets: UiViewModel.Insets, extraBottom: Int = 0
-    ) {
-        this ?: return
-        val pad = 8.dpToPx(context)
-        val isRtl = context.isRTL()
-        val left = if (!isRtl) insets.start else insets.end
-        val right = if (!isRtl) insets.end else insets.start
-        setPadding(Rect(left + pad, insets.top + pad, right + pad, insets.bottom + extraBottom + pad))
-    }
-
     private fun FastScrollerBuilder.applyEchoStyle(context: Context) {
         setTrackDrawable(AppCompatResources.getDrawable(context, R.drawable.fast_scroll_track)!!)
         setThumbDrawable(AppCompatResources.getDrawable(context, R.drawable.fast_scroll_thumb)!!)
@@ -86,7 +105,7 @@ object FastScrollerHelper {
 
     fun applyTo(view: RecyclerView): FastScroller? {
         view.isVerticalScrollBarEnabled = false
-        if (!view.isScrollBarEnabled()) return null
+        if (!view.isFastScrollUsable()) return null
         return FastScrollerBuilder(view).apply {
             useMd2Style()
             applyEchoStyle(view.context)
@@ -104,7 +123,7 @@ object FastScrollerHelper {
 
     fun applyTo(view: NestedScrollView): FastScroller? {
         view.isVerticalScrollBarEnabled = false
-        if (!view.isScrollBarEnabled()) return null
+        if (!view.isFastScrollUsable()) return null
         return FastScrollerBuilder(view).apply {
             useMd2Style()
             applyEchoStyle(view.context)

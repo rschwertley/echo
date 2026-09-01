@@ -29,6 +29,7 @@ import dev.brahmkshatriya.echo.utils.ContextUtils.SETTINGS_NAME
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.ANIMATIONS_KEY
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.SCROLL_ANIMATIONS_KEY
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.SCROLL_BAR
+import dev.brahmkshatriya.echo.utils.ui.UiUtils.isTv
 import dev.brahmkshatriya.echo.utils.ui.prefs.ColorListPreference
 import dev.brahmkshatriya.echo.utils.ui.prefs.MaterialListPreference
 
@@ -151,7 +152,14 @@ class SettingsLookFragment : BaseSettingsFragment() {
                     addPreference(this)
                 }
 
-                SwitchPreferenceCompat(context).apply {
+                // TV-ONLY HIDE, and the first conditional preference in this screen - follow this shape
+                // if another is ever needed. The fast scroller is a drag-to-scroll affordance and TV is
+                // D-pad only, so there is no pointer to grab the thumb with; offering the switch there
+                // would only let a user turn on a thumb they cannot touch. FastScrollerHelper.applyTo
+                // refuses on TV as well, which is the half that matters for a value already in prefs (set
+                // before this hide shipped, or restored onto a TV) - hiding the switch alone would leave
+                // such a device stuck with a scroller and no way to turn it off.
+                if (!context.isTv()) SwitchPreferenceCompat(context).apply {
                     key = SCROLL_BAR
                     title = getString(R.string.scroll_bar)
                     summary = getString(R.string.scroll_bar_summary)

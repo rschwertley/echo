@@ -96,6 +96,39 @@ class PositionFastScrollViewHelper(
 
     private fun itemCount() = view.layoutManager?.itemCount ?: 0
 
+    /** Last [extent] sampled while the list was settled. 0 until the first sample. */
+    private var cachedExtent = 0
+
+    /** True while the user is dragging the THUMB (as opposed to flinging or dragging the list). */
+    private var thumbDragging = false
+
+    /**
+     * How many items fit on screen, in item units — the `extent` of the scrollbar.
+     *
+     * ⚠️ RESAMPLED ONLY WHEN SETTLED. This is the fix for the drag jumping. `childCount` moves
+     * continuously while scrolling (more children on compact rows, fewer on tall cards), and it sits in
+     * the denominator FastScroller divides by (`getScrollRange() - view.height`). Reading it live made
+     * dragging a feedback loop: finger moves thumb -> scrollTo -> content moves -> childCount changes ->
+     * the same finger position now maps to a different offset -> content jumps again. On Home the swing
+     * was 30-40% (childCount ~2 on shelf cards vs ~10 on compact rows); on History ~4%, which is why it
+     * read as "jumpy on Home and Search, mild elsewhere".
+     *
+     * Freezing it during motion breaks the loop, and resampling at rest keeps it accurate — including at
+     * the bottom, where the sample becomes the TRUE visible count and the thumb therefore lands at exactly
+     * 100% with no snap on release.
+     *
+     * `view.scrollState` alone is NOT enough to detect a thumb drag: FastScroller drives it through
+     * scrollToPositionWithOffset, which requests layout rather than starting a scroll, so scrollState
+     * stays IDLE throughout. Hence [thumbDragging], tracked off the touch predicate's own return value.
+     */
+    private fun extent(): Int {
+        if (!thumbDragging && view.scrollState == RecyclerView.SCROLL_STATE_IDLE) {
+            val live = view.childCount
+            if (live > 0) cachedExtent = live
+        }
+        return if (cachedExtent > 0) cachedExtent else view.childCount
+    }
+
     /**
      * ⚠️ THE `+ view.height` IS LOAD-BEARING — DO NOT SIMPLIFY THIS TO `itemCount * UNIT`.
      *
@@ -124,14 +157,18 @@ class PositionFastScrollViewHelper(
     override fun getScrollRange(): Int {
         val itemCount = itemCount()
         if (itemCount == 0) return 0
-        val childCount = view.childCount
-        // Short-list gate. If every item is laid out there is nothing to scroll, so report 0 and let
-        // FastScroller's `mScrollbarEnabled = getScrollOffsetRange() > 0` disable the thumb outright.
-        // O(1) and exact, and — unlike the library's `itemCount * child0Height vs viewHeight` test — it
-        // cannot flicker with item heights, so a short list shows NO thumb rather than one that appears
-        // and vanishes.
-        if (childCount >= itemCount) return 0
-        return (itemCount - childCount) * UNIT + view.height
+        // Short-list gate. Deliberately on the LIVE childCount, not [extent]: if every item is laid out
+        // there is nothing to scroll, so report 0 and let FastScroller's
+        // `mScrollbarEnabled = getScrollOffsetRange() > 0` disable the thumb outright. O(1) and exact,
+        // and — unlike the library's `itemCount * child0Height vs viewHeight` test — it cannot flicker
+        // with item heights, so a short list shows NO thumb rather than one that appears and vanishes.
+        // KEEP THIS ON THE LIVE VALUE. A short list has childCount == itemCount at all times, so there is
+        // nothing to stabilise here, and routing it through the cached extent would let one stale sample
+        // decide whether the thumb exists at all.
+        if (view.childCount >= itemCount) return 0
+        // The denominator, and the reason [extent] is cached rather than live — see its note.
+        val extent = extent().coerceIn(1, itemCount - 1)
+        return (itemCount - extent) * UNIT + view.height
     }
 
     override fun getScrollOffset(): Int {
@@ -166,6 +203,17 @@ class PositionFastScrollViewHelper(
         if (itemCount == 0) return
         val layoutManager = view.layoutManager as? LinearLayoutManager ?: return
         view.stopScroll()
+        // END ANCHOR. At the bottom of the track, target the LAST item instead of `itemCount - extent`.
+        // extent is a sample of how many items fit wherever the list happened to be, so whenever the tail
+        // is taller than the sampled screen it names a position too early and the drag stops short — that
+        // was "Home stops two sections short" and "History leaves about 5 items below". Anchoring the last
+        // position instead lets LinearLayoutManager fill backwards from it (fixLayoutEndGap) and settle at
+        // true maximum scroll, which needs no estimate of anything.
+        val maxOffset = (getScrollRange() - view.height).coerceAtLeast(0)
+        if (offset >= maxOffset) {
+            layoutManager.scrollToPositionWithOffset(itemCount - 1, 0)
+            return
+        }
         val position = (offset / UNIT).coerceIn(0, itemCount - 1)
         val within = offset - position * UNIT
         // Convert the sub-item fraction back to pixels with the current first child's height. It is only
@@ -205,10 +253,27 @@ class PositionFastScrollViewHelper(
     // happens.
     override fun addOnTouchEventListener(onTouchEvent: Predicate<MotionEvent>) {
         view.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
-            override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent) = onTouchEvent.test(e)
+            override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent) =
+                onTouchEvent.test(e).also { trackThumbDrag(e, it) }
+
             override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
-                onTouchEvent.test(e)
+                trackThumbDrag(e, onTouchEvent.test(e))
             }
         })
+    }
+
+    /**
+     * Drives [thumbDragging] off whether FastScroller CONSUMED the event, which is the only honest signal
+     * available: it consumes exactly when the touch landed on the thumb or the track, i.e. exactly when it
+     * is about to drive [scrollTo] itself. Needed because RecyclerView's own scrollState stays IDLE for
+     * the whole of a thumb drag — FastScroller moves the list with scrollToPositionWithOffset, which
+     * requests layout rather than starting a scroll — so [extent] would otherwise resample mid-drag and
+     * reintroduce the feedback loop it exists to break.
+     */
+    private fun trackThumbDrag(event: MotionEvent, consumed: Boolean) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> if (consumed) thumbDragging = true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> thumbDragging = false
+        }
     }
 }
