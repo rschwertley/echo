@@ -33,8 +33,7 @@ object FastScrollerHelper {
      * Focus safety was NOT the reason - it was checked and is a non-issue. FastScroller adds its thumb,
      * track and popup through ViewGroupOverlay.add(), not addView(), so they are never children of the
      * RecyclerView, never enter the focus tree, and cannot fight TvAwareRecyclerView's establishFeedFocus
-     * / anchorFocusAt anchoring on the same recyclers. (That is also why PositionFastScrollViewHelper's
-     * getChildAt(0) can never pick one up instead of an item.)
+     * / anchorFocusAt anchoring on the same recyclers.
      */
     private fun View.isFastScrollUsable() = !context.isTv() && isScrollBarEnabled()
 
@@ -50,8 +49,7 @@ object FastScrollerHelper {
      *
      * ⚠️ THIS MOVES WHERE THE TRACK IS DRAWN. IT DOES NOT CHANGE THE SCROLL RANGE. If a screen scrolls
      * past its last row into blank space, that is a metrics problem and this will not fix it - see
-     * PositionFastScrollViewHelper, whose range is derived from adapter positions and so does not include
-     * the recycler's padding at all.
+     * PixelFastScrollViewHelper.
      *
      * Null-receiver tolerant: `applyTo` returns null whenever the scroller is not applied (setting off, or
      * on TV), so call sites can wire this unconditionally instead of guarding.
@@ -109,13 +107,13 @@ object FastScrollerHelper {
         return FastScrollerBuilder(view).apply {
             useMd2Style()
             applyEchoStyle(view.context)
-            // Replaces the library's RecyclerViewHelper, whose scroll metrics extrapolate the whole list
-            // from the height of ONE child and so make the thumb race, snap back and vanish on any screen
-            // with mixed row heights. See PositionFastScrollViewHelper for the full mechanism and for why
-            // the row-counting alternative was rejected. RecyclerView ONLY — the NestedScrollView overload
-            // below keeps the library's default helper, which is correct there (a single scrolling child
-            // has a real pixel range, so there is nothing to extrapolate).
-            setViewHelper(PositionFastScrollViewHelper(view))
+            // Replaces the library's RecyclerViewHelper, which estimates every item's height from
+            // getChildAt(0) alone and so makes the thumb race, snap back and vanish on any screen with
+            // mixed row heights. See PixelFastScrollViewHelper for the ViewHelper contract, for why
+            // RecyclerView's own averaged estimates satisfy it, and for why the earlier position-based
+            // attempt could not. RecyclerView ONLY — the NestedScrollView overload below keeps the
+            // library's default helper, which is already this shape there.
+            setViewHelper(PixelFastScrollViewHelper(view))
             val pad = 8.dpToPx(view.context)
             setPadding(pad, pad, pad, pad)
         }.build()
