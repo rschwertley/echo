@@ -1,37 +1,70 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Small circular thumb for the fast scroller (see FastScrollerHelper). Replaces AndroidFastScroll's
-    afs_md2_thumb, which is an 8dp x 52dp rounded rect.
+    Fast-scroller thumb (see FastScrollerHelper): a circle with its right side cut off flat so it sits
+    against the screen edge, with stacked up/down triangles centred inside.
 
-    Circle geometry: radius is HALF of width/height. If you retune the size, retune the radius with it
-    or it stops being round. Both dimensions must be present and non-negative - the FastScroller
-    constructor range-checks thumbDrawable's intrinsic width AND height (unlike the track, which is
-    checked on width only).
+    GEOMETRY - derived, not eyeballed. Full circle r=26 centred at (26,26), so it spans x 0..52; the flat
+    right edge cuts it at x=40, keeping 40/52 = 77% of the width ("roughly three-quarters of a circle").
+    The chord at x=40 is at dx=14 from the centre, so its half-height is sqrt(26^2 - 14^2) = sqrt(480) =
+    21.909 - hence the arc endpoints at y = 26 +/- 21.909 = 4.091 and 47.909. The arc is large-arc-flag=1
+    (it wraps the left side, well over half the circle) and sweep-flag=0 (counterclockwise on screen from
+    top-right, through the leftmost point, to bottom-right). `Z` closes it with the flat right edge.
+    ⚠️ If you change the width, recompute the endpoints - they are not free parameters. Changing
+    viewportWidth alone moves the cut without moving the arc, and the shape stops closing cleanly.
 
-    12dp is wider than the 8dp track, so the thumb sits ~4dp further in from the edge than afs_md2_thumb
-    did. That is fine and intentional now that the track is invisible (fast_scroll_track.xml).
+    The drawable is ONLY the visible shape: viewport == the visible bounds, no overhang and no negative
+    padding, so it lays out at the edge exactly like the shape it replaced. Both intrinsic dimensions are
+    declared, which the FastScroller constructor requires (it range-checks the thumb's intrinsic width AND
+    height; the track is checked on width only).
 
-    No <padding>: afs_md2_thumb carries top/bottom 4dp to inset itself inside its 52dp box, which would
-    squash a circle this size.
+    NOT FLUSH TO THE PHYSICAL EDGE, by inheritance: applyTo sets 8dp padding on all four sides, and
+    MainFragment.applyInsets re-pads with insets + 8dp, so the flat edge stops 8dp short. That is
+    unchanged from the previous thumb. Zero the RIGHT padding in both places if true flush is wanted -
+    it is a value change, not a geometry change here.
 
-    Tint mirrors afs_md2_thumb's ?colorControlActivated rather than a hardcoded colour. The app theme is
-    Theme.Material3Expressive.DynamicColors.DayNight.NoActionBar, so that attr resolves into the dynamic
-    scheme and stays correct in both light and dark. Load this via AppCompatResources.getDrawable with a
-    themed (Activity) context so the attr resolves - FastScrollerHelper does.
+    TRIANGLES centred at x=21: that is the optical centre, not the arithmetic one. The bounding box's
+    middle is x=20 and the shape's mass centre is near x=24 (the cut only removes a thin right cap of a
+    circle centred at 26), and 21 balances the 16dp of curve on the left against 14dp to the flat edge.
+    10dp wide, 6dp tall, 6dp apart, so the pair spans y 17..35 inside a 52dp body.
 
-    TOUCH TARGET IS NOT AFFECTED by shrinking this. FastScroller.isInViewTouchTarget expands every hit
-    area to afs_min_touch_target_size (48dp in the AAR), so a 12dp thumb still gets a 48dp grab area.
+    COLOURS are semantic tokens, not literals - the theme is Theme.Material3Expressive.DynamicColors.
+    DayNight, so a hardcoded white body would be right in light and wrong in dark.
+    colorSurfaceContainerHighest reads near-white in light and stays distinct from the page background in
+    dark, which is what "white fill" means here in a DayNight app. Theme attrs resolve in a vector's
+    fillColor from API 21 when inflated with a theme; minSdk is 24 and FastScrollerHelper loads this
+    through AppCompatResources with an Activity context.
+
+    Triangles use colorOnSurfaceVariant - their OWN token, deliberately NOT a translucent surface colour.
+    The body is opaque, so a translucent triangle composites against the body rather than the content,
+    which means its apparent grey shifts every time the body token changes and has to be re-tuned per
+    theme. colorOnSurfaceVariant IS the M3 token for muted content on a surface and is guaranteed legible
+    against colorSurface* in both modes; alpha would lose contrast in dark, where surface-on-surface has
+    much less headroom to work with.
+
+    The 1dp outline is what carries the shape over busy cover art - the same reason the previous thumb
+    grew one. At this size it is a refinement rather than the load-bearing element it was at 12dp.
 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle"
-    android:tint="?attr/colorControlActivated">
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="40dp"
+    android:height="52dp"
+    android:viewportWidth="40"
+    android:viewportHeight="52">
 
-    <corners android:radius="6dp" />
+    <!-- Body: chopped circle, flat edge on the right. -->
+    <path
+        android:fillColor="?attr/colorSurfaceContainerHighest"
+        android:pathData="M40,4.091 A26,26 0 1 0 40,47.909 Z"
+        android:strokeColor="?attr/colorOutlineVariant"
+        android:strokeWidth="1" />
 
-    <size
-        android:width="12dp"
-        android:height="12dp" />
+    <!-- Up triangle. -->
+    <path
+        android:fillColor="?attr/colorOnSurfaceVariant"
+        android:pathData="M21,17 L26,23 L16,23 Z" />
 
-    <solid android:color="@android:color/white" />
+    <!-- Down triangle. -->
+    <path
+        android:fillColor="?attr/colorOnSurfaceVariant"
+        android:pathData="M21,35 L26,29 L16,29 Z" />
 
-</shape>
+</vector>

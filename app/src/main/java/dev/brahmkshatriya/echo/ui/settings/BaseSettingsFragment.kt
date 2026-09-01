@@ -18,6 +18,7 @@ import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadAsCircle
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.setupTransition
 import dev.brahmkshatriya.echo.utils.ui.AutoClearedValue.Companion.autoCleared
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.configureAppBar
 
 abstract class BaseSettingsFragment : Fragment() {
@@ -63,9 +64,14 @@ abstract class BaseSettingsFragment : Fragment() {
         fun PreferenceFragmentCompat.configure() {
             listView?.apply {
                 clipToPadding = false
-                applyInsets { applyContentInsets(it) }
+                // Handle kept and re-padded in the same inset block that pads the list, rather than left
+                // on applyTo's flat 8dp.
+                val scroller = FastScrollerHelper.applyTo(this)
+                applyInsets {
+                    applyContentInsets(it)
+                    scroller.applyInsets(context, it)
+                }
                 isVerticalScrollBarEnabled = false
-                FastScrollerHelper.applyTo(this)
             }
         }
     }

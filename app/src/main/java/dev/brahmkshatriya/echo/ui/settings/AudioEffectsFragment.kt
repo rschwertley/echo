@@ -19,6 +19,7 @@ import dev.brahmkshatriya.echo.ui.player.audiofx.AudioEffectsBottomSheet.Compani
 import dev.brahmkshatriya.echo.ui.player.audiofx.AudioEffectsBottomSheet.Companion.onEqualizerClicked
 import dev.brahmkshatriya.echo.utils.ui.AutoClearedValue.Companion.autoCleared
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 
 class AudioEffectsFragment : Fragment() {
 
@@ -69,9 +70,14 @@ class AudioEffectsFragment : Fragment() {
             bind()
             binding.root.apply {
                 clipToPadding = false
-                applyInsets { applyContentInsets(it) }
+                // Handle kept and re-padded in the same inset block that pads the list, rather than left
+                // on applyTo's flat 8dp.
+                val scroller = FastScrollerHelper.applyTo(this)
+                applyInsets {
+                    applyContentInsets(it)
+                    scroller.applyInsets(context, it)
+                }
                 isVerticalScrollBarEnabled = false
-                FastScrollerHelper.applyTo(this)
             }
         }
     }

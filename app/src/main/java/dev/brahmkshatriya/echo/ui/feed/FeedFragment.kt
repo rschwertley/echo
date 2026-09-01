@@ -34,6 +34,7 @@ import dev.brahmkshatriya.echo.ui.feed.FeedClickListener.Companion.getFeedListen
 import dev.brahmkshatriya.echo.ui.main.MainFragment.Companion.applyPlayerBg
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import dev.brahmkshatriya.echo.ui.player.PlayerViewModel
@@ -134,11 +135,14 @@ class FeedFragment : Fragment(R.layout.fragment_generic_collapsable) {
             val binding = FragmentRecyclerWithRefreshBinding.bind(view)
             val recyclerView = binding.recyclerView as RecyclerView
             val uiViewModel by activityViewModel<UiViewModel>()
+            // Hoisted above the inset block so the handle exists when the block first runs; it is kept and
+            // re-padded there rather than left on applyTo's flat 8dp.
+            val scroller = FastScrollerHelper.applyTo(recyclerView)
             applyInsets(uiViewModel.tvMiniPlayerVisible) {
                 val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(recyclerView.context) else 0
                 recyclerView.applyContentInsets(it, 20, 8, 16 + miniExtra)
+                scroller.applyInsets(recyclerView.context, it)
             }
-            FastScrollerHelper.applyTo(recyclerView)
             configureGridLayout(
                 recyclerView,
                 feedAdapter.withLoading(this),

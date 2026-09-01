@@ -24,6 +24,7 @@ import dev.brahmkshatriya.echo.utils.Serializer.putSerialized
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.setupTransition
 import dev.brahmkshatriya.echo.utils.ui.AutoClearedValue.Companion.autoCleared
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.configureAppBar
 import kotlinx.coroutines.flow.combine
 import org.koin.androidx.viewmodel.ext.android.viewModel
@@ -68,8 +69,12 @@ class EditPlaylistFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         setupTransition(view)
+        // Hoisted above the inset block so the handle exists when it first runs; kept and re-padded there
+        // rather than left on applyTo's flat 8dp.
+        val scroller = FastScrollerHelper.applyTo(binding.recyclerView)
         applyInsetsWithChild(binding.appBarLayout, binding.recyclerView, 96) {
             binding.fabContainer.applyInsets(it)
+            scroller.applyInsets(binding.recyclerView.context, it)
         }
 
         applyBackPressCallback()
@@ -110,8 +115,6 @@ class EditPlaylistFragment : Fragment() {
                 )
             )
         }
-
-        FastScrollerHelper.applyTo(binding.recyclerView)
 
         val headerAdapter = EditPlaylistHeaderAdapter(this, vm)
         val tabAdapter = TabsAdapter<Tab>({ title }) { v, index, tab ->

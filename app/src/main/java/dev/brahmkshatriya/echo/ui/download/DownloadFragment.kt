@@ -30,6 +30,7 @@ import dev.brahmkshatriya.echo.ui.media.LineAdapter
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.setupTransition
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.configureAppBar
 import org.koin.androidx.viewmodel.ext.android.viewModel
 
@@ -73,11 +74,14 @@ class DownloadFragment : Fragment(R.layout.fragment_download) {
         binding.toolBar.setNavigationOnClickListener {
             parentFragmentManager.popBackStack()
         }
+        // Hoisted above the inset block so the handle exists when the block first runs; kept and re-padded
+        // there rather than left on applyTo's flat 8dp.
+        val scroller = FastScrollerHelper.applyTo(binding.recyclerView)
         applyInsets {
             binding.recyclerView.applyContentInsets(it, 20, 8, 72)
             binding.fabContainer.applyFabInsets(it, systemInsets.value)
+            scroller.applyInsets(binding.recyclerView.context, it)
         }
-        FastScrollerHelper.applyTo(binding.recyclerView)
         val lineAdapter = LineAdapter()
         binding.fabCancel.setOnClickListener {
             vm.cancelAll()

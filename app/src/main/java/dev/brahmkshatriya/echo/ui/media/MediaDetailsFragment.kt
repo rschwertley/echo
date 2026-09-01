@@ -31,6 +31,7 @@ import dev.brahmkshatriya.echo.ui.feed.FeedViewModel
 import dev.brahmkshatriya.echo.ui.media.MediaHeaderAdapter.Companion.getMediaHeaderListener
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import kotlinx.coroutines.flow.combine
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
 import org.koin.androidx.viewmodel.ext.android.viewModel
@@ -100,11 +101,14 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val binding = FragmentMediaDetailsBinding.bind(view)
-        FastScrollerHelper.applyTo(binding.recyclerView)
+        // Handle KEPT and re-padded below. Discarding it left the track on applyTo's flat 8dp forever,
+        // running under the mini-player and nav bar.
+        val scroller = FastScrollerHelper.applyTo(binding.recyclerView)
         val uiViewModel by activityViewModel<UiViewModel>()
         applyInsets(viewModel.uiResultFlow, uiViewModel.tvMiniPlayerVisible) {
             val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(binding.recyclerView.context) else 0
             binding.recyclerView.applyContentInsets(it, 20, 0, 16 + miniExtra)
+            scroller.applyInsets(binding.recyclerView.context, it)
         }
         val lineAdapter = LineAdapter()
         observe(trackFeedData.shouldShowEmpty) {
