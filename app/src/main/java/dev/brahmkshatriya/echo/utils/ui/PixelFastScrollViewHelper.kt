@@ -115,6 +115,9 @@ class PixelFastScrollViewHelper(
     private companion object {
         /** No FastScroller-driven scroll outstanding. Not a valid offset. */
         const val NO_PENDING = Int.MIN_VALUE
+
+        /** No gesture in progress, so [getScrollRange] measures live. Not a valid range. */
+        const val NO_FREEZE = Int.MIN_VALUE
     }
 
     /** Offset [scrollTo] was last asked for, or [NO_PENDING]. See both accessors for why it exists. */
@@ -123,8 +126,60 @@ class PixelFastScrollViewHelper(
     /** True only inside [scrollTo]'s own scrollBy, so its onScrolled does not clear [pendingOffset]. */
     private var selfScrolling = false
 
-    override fun getScrollRange() =
+    /**
+     * True while FastScroller is driving the list from a touch it consumed. NOT `view.scrollState`: that
+     * stays IDLE for the whole of a thumb drag, because FastScroller moves the list itself rather than
+     * through RecyclerView's touch handling. Driven off whether the touch predicate consumed the event,
+     * which is true exactly when FastScroller has the thumb or track — see [trackGesture].
+     */
+    private var gestureActive = false
+
+    /** [liveRange] captured at the start of the current gesture, or [NO_FREEZE]. See [getScrollRange]. */
+    private var frozenRange = NO_FREEZE
+
+    private fun liveRange() =
         view.computeVerticalScrollRange() + view.paddingTop + view.paddingBottom
+
+    /**
+     * FROZEN FOR THE DURATION OF A THUMB DRAG. This is the fix for the two-images-at-different-speeds
+     * effect on Home and Search.
+     *
+     * `computeVerticalScrollRange` is an estimate: ScrollbarHelper extrapolates from
+     * `avgSizePerRow = laidOutArea / itemRange`, and `itemRange` counts ITEMS, not rows. On a mixed-span
+     * grid — which is Home and Search, where configureGridLayout gives shelves the full span and grid
+     * items 1 — that average swings by about spanCount between a shelf region and a 2-up region, on top of
+     * the ordinary height variation. History is a LinearLayoutManager with one item per row, has no such
+     * term, and has always been correct: that contrast is the evidence this is the right place to act.
+     *
+     * Why it matters HERE and not in the thumb position: in `mThumbOffset = thumbOffsetRange *
+     * getScrollOffset() / scrollOffsetRange` the average appears in numerator and denominator and largely
+     * CANCELS, so the drawn thumb was never the unstable part. It does not cancel in [scrollTo]'s delta:
+     * `target = scrollOffsetRange * thumbFrac` scales with `avg * itemCount` while the subtrahend
+     * `computeVerticalScrollOffset()` scales with `avg * itemsBefore`, so
+     * `delta ∝ avg * (itemCount*thumbFrac - itemsBefore)` — the average MULTIPLIES the error. With a live
+     * range the target moves as the content moves, so there is no fixed point to converge on and the
+     * scroll oscillates frame to frame. Freezing makes the target constant for the gesture, so the same
+     * iteration converges on it.
+     *
+     * ⚠️ NOTHING HERE BECOMES A STALE CEILING — the failure that pinned the thumb last time. That came
+     * from a frozen value feeding OUR own `coerceIn(0, max)` in getScrollOffset; there is no clamp of ours
+     * left. FastScroller derives `scrollOffsetRange = getScrollRange() - view.height` and uses it in two
+     * places, and a wrong frozen value degrades rather than pins:
+     *   - frozen TOO SMALL (grabbed over compact rows, dragged into tall shelves): the live offset outgrows
+     *     the frozen denominator, so `mThumbOffset` can exceed `thumbOffsetRange` and the thumb is drawn
+     *     past the track end, clipped by the RecyclerView overlay; and the finger maps to a smaller scroll
+     *     span than reality, so a full-track drag lands short of the end of the list.
+     *   - frozen TOO LARGE (the reverse): the thumb lags the finger and never reaches the track bottom, and
+     *     a full-track drag overruns the end — harmlessly, since scrollBy clamps there.
+     * Neither can pin, and neither can make the thumb vanish: `mScrollbarEnabled = scrollOffsetRange > 0`
+     * is evaluated against the frozen value, and a gesture can only begin on a visible thumb, so it stays
+     * true for the whole drag. That is strictly safer than the live behaviour it replaces.
+     */
+    override fun getScrollRange(): Int {
+        if (!gestureActive) return liveRange()
+        if (frozenRange == NO_FREEZE) frozenRange = liveRange()
+        return frozenRange
+    }
 
     /**
      * Plain measurement — deliberately NOT the requested offset.
@@ -262,23 +317,43 @@ class PixelFastScrollViewHelper(
     override fun addOnTouchEventListener(onTouchEvent: Predicate<MotionEvent>) {
         view.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
             override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent) =
-                onTouchEvent.test(e).also { clearPendingOnGestureEnd(e) }
+                onTouchEvent.test(e).also { trackGesture(e, it) }
 
             override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
-                onTouchEvent.test(e)
-                clearPendingOnGestureEnd(e)
+                trackGesture(e, onTouchEvent.test(e))
             }
         })
     }
 
     /**
-     * The gesture end is the ONLY reliable point to stop replaying. FastScroller's ACTION_UP path calls
-     * setDragging(false) and does not call [scrollTo], so without this the last requested offset would be
-     * replayed indefinitely and the thumb would stick where the finger left it.
+     * Opens and closes the [getScrollRange] freeze, and clears [pendingOffset], around a
+     * FastScroller-driven gesture.
+     *
+     * ⚠️ DRIVEN OFF WHETHER FASTSCROLLER CONSUMED THE EVENT, NOT `view.scrollState`. FastScroller moves
+     * the list itself via its own scroll call, so RecyclerView's scrollState stays IDLE for the entire
+     * thumb drag and would never open the freeze. FastScroller.onTouchEvent returns `mDragging`, so a
+     * consumed event means exactly "it has the thumb or the track and is about to drive scrollTo".
+     *
+     * The range is captured LAZILY on the first [getScrollRange] read after [gestureActive] goes true,
+     * not here, so it cannot go stale sitting unused. One consequence: on the track-TAP path FastScroller
+     * calls scrollToThumbOffset from inside the same ACTION_MOVE being wrapped, so that first jump is
+     * computed against a live range and only the drag that follows is frozen. That is the right value
+     * anyway — it is the range as it stands when the gesture begins.
+     *
+     * The gesture end is also the only reliable point to stop replaying [pendingOffset]: FastScroller's
+     * ACTION_UP path calls setDragging(false) and does not call [scrollTo], so without this the last
+     * requested offset would be held indefinitely.
      */
-    private fun clearPendingOnGestureEnd(event: MotionEvent) {
+    private fun trackGesture(event: MotionEvent, consumed: Boolean) {
         when (event.actionMasked) {
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> pendingOffset = NO_PENDING
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> if (consumed) gestureActive = true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                gestureActive = false
+                // Thawed together with the flag: leaving a capture behind would survive into the next
+                // gesture as a stale starting range.
+                frozenRange = NO_FREEZE
+                pendingOffset = NO_PENDING
+            }
         }
     }
 }
