@@ -12,6 +12,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.playback.source.StreamableResolver.Companion.copy
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 @UnstableApi
 class StreamableDataSource(
@@ -39,8 +40,13 @@ class StreamableDataSource(
 
     override fun getUri() = source?.uri
 
-    override fun read(buffer: ByteArray, offset: Int, length: Int) =
-        source?.read(buffer, offset, length) ?: throw Exception("Source not opened")
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val read = source?.read(buffer, offset, length) ?: throw Exception("Source not opened")
+        // `> 0` because C.RESULT_END_OF_INPUT is -1 and a 0-length read is not progress; only real bytes
+        // count, so the delta means "bytes actually delivered".
+        if (read > 0) bytesRead.addAndGet(read.toLong())
+        return read
+    }
 
     override fun close() {
         source?.close()
@@ -87,6 +93,19 @@ class StreamableDataSource(
         // also unresolved the uri reference in open() - the failure reads as two unrelated errors.
         // REMOVE WITH THE PROBE. This is diagnostic scaffolding, not a feature.
         val openCount = AtomicInteger(0)
+
+        // PROBE (2026-09-01). Total bytes DELIVERED through read(), process wide, same rationale and
+        // lifetime as openCount above — diffed against a per-item snapshot by PlayerEventListener.
+        // WHY: `opens` alone cannot separate the two stalls that look identical in a report. A connection
+        // that opens and then delivers nothing, and a stream that opens and delivers fine while the player
+        // never prepares, both produce loaded=true loads=0 buf=0 opens=2+. Bytes is the field that splits
+        // them: ProgressiveMediaPeriod cannot set `prepared` until the extractor calls endTracks(), emits a
+        // seekMap and gives every SampleQueue a Format (ProgressiveMediaPeriod.maybeFinishPrepare), all of
+        // which are driven from inside the read loop — so bytes arriving in quantity with nothing prepared
+        // puts the fault downstream of delivery, and near-zero bytes puts it at the connection.
+        // Long, not Int: a single track is megabytes and this is process-wide across a session.
+        // REMOVE WITH THE PROBE.
+        val bytesRead = AtomicLong(0)
 
         val Streamable.Source.uri
             get() = when (this) {

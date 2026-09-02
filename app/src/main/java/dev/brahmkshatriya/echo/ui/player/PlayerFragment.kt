@@ -422,8 +422,10 @@ class PlayerFragment : Fragment() {
             // gated `insets`: on rotate-while-expanded → collapse, `combined` last emits while EXPANDED
             // (gate picks rail-less `system`) and collapsing never re-emits it, so the bar kept a zero
             // rail inset and overlapped the rail. The container is alpha=0 whenever landscape+expanded
-            // (updateCollapsed line ~222), so carrying the rail inset while expanded is inert. The gate
-            // stays for playerControls below (line 273), which needs `system` for its expanded end-inset.
+            // (configureCollapsing's updateCollapsed pins collapsedOffset to 0f in landscape, so
+            // collapsedAlpha is 0), so carrying the rail inset while expanded is inert. The gate stays for
+            // the playerControls.root.applyHorizontalInsets call just below, which needs `system` for its
+            // expanded end-inset.
             binding.playerCollapsedContainer.root.applyHorizontalInsets(uiViewModel.getCombined())
             binding.playerControls.root.applyHorizontalInsets(
                 insets,
@@ -627,8 +629,11 @@ class PlayerFragment : Fragment() {
         // fire multiple times in quick succession during Activity recreation. This must collect
         // exactly once per Fragment instance since it drives non-idempotent side effects
         // (image load/dispose, page scroll).
-        // PHONE-ONLY sheet-state driver. This is the SOLE sheet show/hide logic on phone (BottomSheet +
-        // PlayerFragment). MainActivity's current-observer does NOT participate here — it is TV-only, gated by
+        // PHONE-ONLY sheet-state driver. This is the sole place the sheet is shown or hidden IN RESPONSE TO
+        // THE CURRENT TRACK on phone. It is NOT the only caller of changePlayerState — FragmentUtils drives
+        // STATE_EXPANDED from notification and intent entry points, and this file does too on user actions —
+        // so if you are chasing an unexpected expand, look there first; what this block owns is the
+        // track-driven show/hide. MainActivity's current-observer does NOT participate here — it is TV-only, gated by
         // R.id.tvMiniPlayer (see MainActivity.setupTvMiniPlayer). TV uses PlayerTvFragment + tvMiniPlayer;
         // Android Auto has no Fragment at all. So changes in this block affect phone only.
         // Verified 2026-08-23, with commit references so this is checkable rather than folklore:
@@ -676,7 +681,8 @@ class PlayerFragment : Fragment() {
                 // (onViewAttachedToWindow), both driven by a layout traversal that a STOPPED Activity never
                 // performs - and at wake both are guarded and may decline to issue at all.
                 //
-                // TWO EXISTENCE PROOFS, and what they share. The mini bar's cover (applyCurrent, :934) has
+                // TWO EXISTENCE PROOFS, and what they share. The mini bar's cover (loaded into
+                // collapsedTrackCover by FragmentPlayerBinding.applyCurrent) has
                 // never had this bug, and neither did art_probe. Both load from THIS collector by identity
                 // into a non-recycled view; both use loadWithThumb's lambda target, so NEITHER gets
                 // requestManager coalescing - which rules coalescing out as the discriminator. The property

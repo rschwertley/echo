@@ -184,8 +184,9 @@ data class App(
                 @Suppress("KotlinConstantConditions", "SimplifyBooleanWithConstants", "SwallowedException")
                 if (BuildConfig.HAS_FIREBASE && !it.isLoginRequired()) runCatching {
                     FirebaseCrashlytics.getInstance().apply {
-                        // extension_id is the PLAYING extension (crashExtensionId, written at
-                        // PlayerService:322 on media-item transition) — NOT the thrower. Most browse/feed
+                        // extension_id is the PLAYING extension (crashExtensionId, written by
+                        // PlayerService's onMediaItemTransition — grep `crashExtensionId =`) — NOT the
+                        // thrower. Most browse/feed
                         // errors come from a non-playing extension, so this systematically mis-attributes
                         // them. Kept unchanged for historical comparability with existing issues, and
                         // duplicated by playing_extension_id. Read throwing_extension_id for attribution.

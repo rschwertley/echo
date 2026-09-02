@@ -118,8 +118,12 @@ object Cached {
     // caller keeps its stale copy, links against the old member, and fails at RUNTIME with
     // NoSuchMethodError. Build 1058 shipped exactly that: `fileCache` went private here, Cached.kt was
     // recompiled, StreamableLoader was not, and every track resolve died calling App.getFileCache().
-    // Callers today: StreamableLoader:84, MediaViewModel:45/48, TrackInfoViewModel:48,
-    // UnifiedExtension:374, and the four *Fragment feedData lambdas.
+    // Callers today — NOTE THE SCOPE: this list is every site that inlines ANY of Cached's inline
+    // functions, not just the one this comment heads, because the stale-inline hazard is per-CALLER, not
+    // per-function. That is why it mixes them: StreamableLoader (loadMedia), MediaViewModel (getMedia and
+    // loadMedia), TrackInfoViewModel (loadMedia), UnifiedExtension (getMedia), and the four *Fragment
+    // feedData lambdas (getFeedShelf). Adding an inline function here adds its callers to this list.
+    // Verified against the tree 2026-09-01.
     // If you edit this body, do a CLEAN build before shipping - app/build.gradle.kts's
     // verifyCleanKotlinOutput enforces that for release/nightly/stable, but it cannot help a local
     // install. `inline` is required here only for `reified T`; if that need ever goes away, drop the
@@ -145,14 +149,35 @@ object Cached {
     @PublishedApi
     internal fun canonicalId(id: String) = id.removePrefix("VL")
 
+    // Ids are EXTENSION-AUTHORED and unbounded, so cap them HERE rather than letting
+    // PlayerEventListener's generic MAX_MSG_LEN absorb an arbitrary one — the same reasoning as
+    // MAX_EXT_NAME_LEN capping extension names independently of the message budget. A Spotify local-file
+    // URI is `spotify:local:{artist}:{album}:{title}:{duration}` fully percent-encoded, so Cyrillic runs
+    // to six characters per letter and one id alone passes 300; two of them will not fit any budget worth
+    // having.
+    //
+    // ELIDED FROM THE MIDDLE, NOT TRUNCATED FROM THE END, because the two failure shapes show up in
+    // different places. A SUBSTITUTION (a different item entirely, e.g. a local file resolving to the
+    // catalogue track it was matched against) is obvious from the head. An ENCODING or ROUND-TRIP
+    // difference keeps the same head and differs only in the tail — end-truncation hides exactly that
+    // case, which is the one worth catching. Keeping both ends distinguishes them at a glance.
+    // 95 chars each, so two ids plus framing land near 240 and fit inside MAX_MSG_LEN.
+    @PublishedApi
+    internal fun idForMessage(id: String) =
+        if (id.length <= 96) id else id.take(47) + "…" + id.takeLast(47)
+
     // ⚠️ PUBLIC INLINE: this body is COPIED into every caller's class file, not called. Changing anything
     // it touches - a member's visibility, its signature, its very existence - silently orphans every
     // caller that is not recompiled in the same run, and neither the compiler nor R8 will say a word. The
     // caller keeps its stale copy, links against the old member, and fails at RUNTIME with
     // NoSuchMethodError. Build 1058 shipped exactly that: `fileCache` went private here, Cached.kt was
     // recompiled, StreamableLoader was not, and every track resolve died calling App.getFileCache().
-    // Callers today: StreamableLoader:84, MediaViewModel:45/48, TrackInfoViewModel:48,
-    // UnifiedExtension:374, and the four *Fragment feedData lambdas.
+    // Callers today — NOTE THE SCOPE: this list is every site that inlines ANY of Cached's inline
+    // functions, not just the one this comment heads, because the stale-inline hazard is per-CALLER, not
+    // per-function. That is why it mixes them: StreamableLoader (loadMedia), MediaViewModel (getMedia and
+    // loadMedia), TrackInfoViewModel (loadMedia), UnifiedExtension (getMedia), and the four *Fragment
+    // feedData lambdas (getFeedShelf). Adding an inline function here adds its callers to this list.
+    // Verified against the tree 2026-09-01.
     // If you edit this body, do a CLEAN build before shipping - app/build.gradle.kts's
     // verifyCleanKotlinOutput enforces that for release/nightly/stable, but it cannot help a local
     // install. `inline` is required here only for `reified T`; if that need ever goes away, drop the
@@ -178,7 +203,8 @@ object Cached {
                 // equality would false-positive this guard. A genuinely different item still mismatches. The
                 // message keeps the RAW ids so a real mismatch stays diagnosable.
                 if (canonicalId(new.id) != canonicalId(state.item.id)) error(
-                    "loadItem returned wrong item: expected ${state.item.id}, got ${new.id}"
+                    "loadItem returned wrong item: expected ${idForMessage(state.item.id)}, " +
+                        "got ${idForMessage(new.id)}"
                 )
                 val isSaved = async {
                     if (new.isSaveable) extension.getIf<SaveClient, Boolean> {

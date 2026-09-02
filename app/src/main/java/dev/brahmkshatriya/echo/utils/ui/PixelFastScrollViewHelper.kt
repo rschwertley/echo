@@ -160,15 +160,77 @@ class PixelFastScrollViewHelper(
      * is called on every MOVE sample forever, each one invalidating the entire list. Not applying an
      * unchanged target is the whole fix; there is no delta small enough to be free.
      *
-     * scrollBy also clamps at both ends by itself, which is the other half of why no end anchor is
-     * needed. stopScroll() first, matching RecyclerViewHelper.
+     * It also clamps at both ends by itself, which is the other half of why no end anchor is needed.
+     * stopScroll() first, matching RecyclerViewHelper.
+     *
+     * ⚠️ nestedScrollBy, NOT scrollBy — THIS IS THE NESTED-PREFETCH PATH, NOT A NESTED-SCROLLING WISH.
+     * `RecyclerView.scrollBy` (RecyclerView.java:2051) calls scrollByInternal DIRECTLY and is the one
+     * public scroll entry point that never posts to GapWorker. All three paths that do post go through
+     * it: nestedScrollByInternal (:2130), onTouchEvent's ACTION_MOVE (:3964) and ViewFlinger (:6006).
+     * GapWorker is what prefetches NESTED RecyclerViews — prefetchInnerRecyclerViewWithDeadline
+     * (GapWorker.java:317), collectPrefetchPositionsFromView(innerView, true) (:332), driven off
+     * `holder.mNestedRecyclerView` (:357).
+     *
+     * So with plain scrollBy, a thumb drag scrolled the outer list while every horizontal carousel it
+     * pulled into view had to create and bind its children synchronously in that layout pass, where a
+     * finger scroll over the same content gets them prefetched a frame ahead. That is why the stutter
+     * appeared only on Home and Search (many nested carousels), never on History or Settings (none), and
+     * why it stopped the instant the finger lifted — lifting stops using this path.
+     *
+     * `nestedScrollBy` is the only public API that reaches nestedScrollByInternal, so it is how a
+     * non-touch scroll source opts into prefetch. The cost is that it now dispatches through the whole
+     * nested-scroll chain with TYPE_NON_TOUCH.
+     *
+     * ⚠️ THE THREE PARENTS THIS REACHES ANSWER DIFFERENTLY. Do not check one and assume the rest.
+     * Verified individually against the pinned versions:
+     *
+     *  1. SwipeRefreshLayout (every feed screen) — REFUSES NON-TOUCH OUTRIGHT.
+     *     onStartNestedScroll returns false for any `type != TYPE_TOUCH`
+     *     (SwipeRefreshLayout.java:918-921, and onNestedScroll bails at :872), so the chain never even
+     *     accepts. It cannot arm the refresh spinner.
+     *
+     *  2. BottomSheetBehavior (MediaDetailsFragment opened from the player, which sits five levels deep:
+     *     BottomSheetBehavior -> LinearLayout -> MaterialCardView -> TrackInfoFragment ->
+     *     MediaDetailsFragment -> SwipeRefreshLayout -> RecyclerView, with nested scrolling
+     *     DELIBERATELY enabled on that recycler) — ACCEPTS NON-TOUCH, THEN CONSUMES NOTHING.
+     *     Its onStartNestedScroll does NOT check type at all — it is just
+     *     `lastNestedScrollDy = 0; nestedScrolled = false; return (axes & SCROLL_AXIS_VERTICAL) != 0`
+     *     — so unlike (1) it does accept. Nothing comes of it:
+     *       - onNestedPreScroll opens with `if (type == TYPE_NON_TOUCH) return;`, so it consumes none of
+     *         the delta, never moves the sheet, and never reaches the line that sets nestedScrolled.
+     *       - onNestedScroll (the 9-arg overload) has a body of exactly `return`, so lastNestedScrollDy
+     *         stays 0.
+     *       - onStopNestedScroll therefore hits
+     *         `if (isNestedScrollingCheckEnabled() && isViewScrollingChild(target) && !nestedScrolled)
+     *         return;` — the first is hardcoded true, the second is true for this recycler, and
+     *         nestedScrolled is still false — and returns before any settle logic.
+     *     So a thumb drag on the player's track list cannot move or dismiss the sheet, and none of the
+     *     delta is eaten before the list sees it.
+     *
+     *     ⚠️ AND THE ONE THING THAT IS NOT INFERABLE FROM READING onStopNestedScroll ALONE: its FIRST
+     *     branch is `if (child.getTop() == getExpandedOffset()) { setStateInternal(STATE_EXPANDED);
+     *     return; }`, which is reached on every release, because the sheet IS at its expanded offset
+     *     whenever that list is visible. That looks like it would fire the BottomSheetCallback — and
+     *     this app's callback drives playerSheetState, whose observers run bgImage.resume(),
+     *     emit(playerBgVisible, false) and applyPlayer(), the last of which detaches and reattaches the
+     *     video surface. Firing that on every drag release would be a real regression. It does not,
+     *     because setStateInternal begins `if (this.state == state) return;` and the sheet is already
+     *     STATE_EXPANDED, so nothing is dispatched. If that early return ever goes away, this becomes a
+     *     bug and the symptom will look nothing like the scroller.
+     *
+     *  3. AppBarLayout.Behavior (fragment_manage_extensions, layout_scrollFlags
+     *     "scroll|enterAlwaysCollapsed|snap"; fragment_playlist_edit, AppBarLayout$ScrollingViewBehavior)
+     *     — ACCEPTS NON-TOUCH AND CONSUMES IT. KNOWN BEHAVIOUR CHANGE: those two toolbars now collapse
+     *     during a thumb drag, where before they sat still. Taken deliberately, because it is what a
+     *     finger scroll on the same screens already does. fragment_search's CoordinatorLayout declares
+     *     no AppBarLayout and no layout_behavior, so it is unaffected.
      */
     override fun scrollTo(offset: Int) {
         if (offset == pendingOffset) return
         pendingOffset = offset
         selfScrolling = true
         view.stopScroll()
-        view.scrollBy(0, offset - view.computeVerticalScrollOffset())
+        view.nestedScrollBy(0, offset - view.computeVerticalScrollOffset())
         selfScrolling = false
     }
 

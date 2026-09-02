@@ -20,7 +20,6 @@ import androidx.media3.datasource.TeeDataSource
 import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.ExoTimeoutException
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import dev.brahmkshatriya.echo.R
@@ -338,12 +337,23 @@ class PlayerEventListener(
         }
         if (playbackState == Player.STATE_READY) {
             // PROBE (2026-08-29) - see the field declarations. This is the only moment the current item's
-            // timeline is final and the shouldLoadNextMediaPeriod gate is being evaluated against it.
-            // `as? ExoPlayer` rather than a hard cast: the probe must never be able to break playback, and
-            // audioFormat is not on the Player interface. Main thread here, so session.player is safe to
-            // touch under 1.11's app-thread enforcement.
+            // timeline is final and the shouldLoadNextMediaPeriod gate is being evaluated against it, which
+            // is why a LAST-READY value is the right subject for `dur`: shouldLoadNextMediaPeriod gates
+            // loading the NEXT period against the CURRENTLY PLAYING one, so the track that reached READY is
+            // exactly the period whose duration the gate reads. Main thread here, so session.player is safe
+            // to touch under 1.11's app-thread enforcement. player.duration is on the Player interface, so
+            // it reads correctly through the ShufflePlayer wrapper - unlike the `mime` field that used to
+            // sit here, which did not (see below).
+            //
+            // ⚠️ DO NOT REINSTATE A `mime` FIELD AS `(player as? ExoPlayer)?.audioFormat` - IT IS DEAD.
+            // `player` is `session.player`, and PlayerService builds the session with
+            // ShufflePlayer(exoPlayer), which is a ForwardingPlayer - NOT an ExoPlayer. The safe cast
+            // therefore always yields null, so the probe reported mime=none in every report it ever
+            // produced, on every path, and read as a finding about the stalled track when it was a constant.
+            // Removed 2026-09-01. A working version would need the wrapper unwrapped AND a per-item capture
+            // point - audioFormat is only populated once decoding begins, so at a stall it can only ever
+            // describe the PREVIOUS track. That is new instrumentation, not a repair.
             lastReadyDurationKnown = player.duration != C.TIME_UNSET
-            lastReadyMime = (player as? ExoPlayer)?.audioFormat?.sampleMimeType
             resetConsecutiveSkips()
             // A track resolved successfully — the queue is not all-dead (removed-extension tracks never reach
             // READY). Suppresses the removed-extension exhaustion message for any queue that played anything.
@@ -377,7 +387,12 @@ class PlayerEventListener(
             coldBufferingStart = System.currentTimeMillis()
             // PROBE (2026-08-29) - baseline for the `opens` delta, taken per ITEM rather than per arm so a
             // watchdog retry on the same track does not reset it. Anything the retries open still counts.
+            // This guard is `coldMediaId != coldBufferingMediaId`, i.e. it fires when the current mediaId
+            // CHANGES - it is not inside the STATE_READY branch above, so the baseline does not depend on a
+            // track ever having reached READY.
             openCountAtItemStart = StreamableDataSource.openCount.get()
+            // PROBE (2026-09-01) - same baseline, same reasoning, for the `bytes` delta.
+            bytesReadAtItemStart = StreamableDataSource.bytesRead.get()
         }
         bufferingWatchdog?.cancel()
         bufferingWatchdog = scope.launch {
@@ -612,7 +627,17 @@ class PlayerEventListener(
         // ever joined, so lastCauses stays ~a few hundred chars regardless of how nested a message is.
         // 140 -> 200 (2026-08-29). safeCause now also carries probeDetail() on the ERROR path, where it
         // competes with code/ext/cls/http/msg for the budget; .take() truncates from the END, so at 140 a
-        // long message lost its tail — and the message is what identifies the fault. 3 x 200 = 600 chars.
+        // long message lost its tail — and the message is what identifies the fault.
+        //
+        // 80/200 -> 256/400 (2026-09-01). ⚠️ THE TWO MUST BE RAISED TOGETHER. The message is nested INSIDE
+        // the cause: safeCause builds `listOfNotNull(code, ext, cls, detail, http, msg).joinToString(" ")`
+        // and then `.take(MAX_CAUSE_LEN)`, so raising MAX_MSG_LEN alone changes nothing — MAX_CAUSE_LEN
+        // clips the joined string regardless. That is what made Cached's wrong-item guard unreadable: it
+        // reports BOTH ids ("expected X, got Y"), but the reports arrived cut at 80 chars, mid-percent-
+        // escape, before ", got" was ever reached — so it read as though only the expected id was logged.
+        // Sizing: the guard now elides each id to 95 chars (Cached.idForMessage), giving a message of
+        // ~240; MAX_MSG_LEN 256 clears that, and MAX_CAUSE_LEN 400 leaves ~140 for code/ext/cls/detail/
+        // http alongside it on the ERROR path. 3 x 400 = 1200 chars for lastCauses.
         // THIS IS A SELF-IMPOSED BUDGET, NOT AN EXTERNAL LIMIT. Verified 2026-08-29: nothing parses these
         // strings, and lastCauses reaches Crashlytics only inside the HealthException MESSAGE — no custom
         // key carries it (the keys are health_report_type / throwing_extension_id / extension_id /
@@ -621,8 +646,8 @@ class PlayerEventListener(
         // (simpleName + message); for ConsecutiveSkipException that is Scope.MEMORY_ONLY, i.e. a HashMap
         // key with no length limit, and a longer string does not change the signature CARDINALITY because
         // identical content still produces an identical signature. Safe to move again if needed.
-        private const val MAX_MSG_LEN = 80
-        private const val MAX_CAUSE_LEN = 200
+        private const val MAX_MSG_LEN = 256
+        private const val MAX_CAUSE_LEN = 400
         // Extension display names are author-declared and unbounded; cap independently so a long one can't
         // eat the MAX_CAUSE_LEN budget the errorCodeName/type/message actually need.
         private const val MAX_EXT_NAME_LEN = 24
@@ -725,7 +750,7 @@ class PlayerEventListener(
     // Sampled at STATE_READY, NOT at the watchdog tick: by the tick the player has been stopped and
     // re-prepared repeatedly and the reading describes the wreckage, not the state that shut the gate.
     private var lastReadyDurationKnown: Boolean? = null
-    private var lastReadyMime: String? = null
+    private var bytesReadAtItemStart = 0L
     private var openCountAtItemStart = 0
 
     // The three probe fields rendered for a detail string. ONE helper, called from EVERY recordSkip site,
@@ -742,15 +767,27 @@ class PlayerEventListener(
             false -> "unset"
             null -> "?"
         }
-        val mimeRaw = lastReadyMime
-        val mime = when {
-            mimeRaw == null -> "none"
-            mimeRaw.endsWith("mpeg") -> "mpeg"
-            mimeRaw.endsWith("flac") -> "flac"
-            mimeRaw.contains("mp4a") -> "mp4a"
-            else -> "other"
+        // Bucketed, not absolute: the question is "did bytes arrive", not how many, and a raw count would
+        // be a continuous value in a string that feeds report()'s dedupe signature - the trap the whole
+        // field set is built to avoid. Thresholds chosen against what the fault actually needs: an audio
+        // extractor declares its tracks from a few KB of header, so 64k already exceeds anything
+        // preparation could be waiting on, and 1M+ with nothing prepared is unambiguous.
+        //   0     -> the source opened and delivered nothing: the connection is the fault
+        //   <64k  -> trickling: too little to prepare, consistent with a dying connection
+        //   <1M   -> substantial delivery; not a connection problem
+        //   1M+   -> plenty arrived and the player still never prepared: the fault is downstream of
+        //            delivery, in the extractor/prepare path (see StreamableDataSource.bytesRead)
+        // Deliberately NOT expressed as a fraction of the source length: that would need the length
+        // threaded out of open(), and the discrimination being asked for does not need it - a megabyte
+        // with nothing prepared already settles it.
+        val delta = (StreamableDataSource.bytesRead.get() - bytesReadAtItemStart).coerceAtLeast(0L)
+        val bytes = when {
+            delta == 0L -> "0"
+            delta < 64 * 1024 -> "<64k"
+            delta < 1024 * 1024 -> "<1M"
+            else -> "1M+"
         }
-        return "dur=$dur opens=${if (opens > 1) "2+" else "$opens"} mime=$mime"
+        return "dur=$dur opens=${if (opens > 1) "2+" else "$opens"} bytes=$bytes"
     }
     private var retried404MediaId: String? = null
     private var retriedSocketMediaId: String? = null
