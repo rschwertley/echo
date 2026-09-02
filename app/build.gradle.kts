@@ -58,6 +58,32 @@ android {
         buildConfigField("boolean", "HAS_FIREBASE", "$hasGoogleServices")
     }
 
+    // ── WHICH VARIANT GOES WHERE. Not derivable from this file, so it is written down: the next
+    // "which variant is that?" question should be answered from here rather than re-inferred.
+    //   release  -> GOOGLE PLAY, via `bundleRelease`.
+    //              ⚠️ ON PLAY THE APP SELF-UPDATER IS OFF; EXTENSION UPDATES STAY ON. Play owns app
+    //              updates. This is not a build-type rule — it is decided by INSTALL SOURCE, so a
+    //              release APK sideloaded from elsewhere does self-update, deliberately.
+    //              AppUpdater.isStoreInstall() is checked at the top of updateApp(), before any network
+    //              work, and is fail-closed twice over: an empty installer list and a thrown exception
+    //              both resolve to "store" (skip). updateApp() has exactly ONE caller
+    //              (ExtensionsViewModel.update), so no entry point can route around it, and `force`
+    //              lifts only the 24h throttle, never the gate. On a store install updateApp returns
+    //              null and control falls into the extension-update branch unchanged — which is how a
+    //              Play user keeps getting extension updates while never being offered an app update.
+    //   stable   -> SIDELOADED APK, self-updated from GitHub releases (AppUpdater's "stable" branch).
+    //   nightly  -> SIDELOADED APK, self-updated from nightly.link artifacts (its "nightly" branch).
+    //   debug    -> local development only, never distributed, never minified.
+    //
+    // ⚠️ ALL THREE MINIFIED VARIANTS SHIP TO REAL USERS. Roughly 95% of users are on a sideloaded APK
+    // (stable/nightly); the rest come through Play (release). So an R8 behaviour change is a
+    // ship-blocker on every one of them, and both build guards below deliberately cover all three.
+    //
+    // ⚠️ DO NOT INFER DISTRIBUTION FROM AppUpdater. It branches on BUILD_TYPE for "stable" and
+    // "nightly" only, and has no "release" branch — that is because a Play build does not SELF-update,
+    // the Store updates it, not because release is undistributed. That inference was actually made and
+    // was wrong (2026-09-02). AppUpdater answers "does this channel publish its own releases", which is
+    // a different question from "does this variant reach users".
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -235,7 +261,9 @@ tasks.register("verifyExtensionAbi") {
     }
 }
 
-// Run the guard whenever R8 runs (release/nightly/stable). A failure in this finalizer fails the build.
+// Run the guard whenever R8 runs — release, nightly AND stable. All three are distributed (see the note
+// on buildTypes above: Play gets release, sideloads get stable/nightly), so all three can break
+// extensions and all three must be verified. A failure in this finalizer fails the build.
 tasks.matching { it.name.matches(Regex("^minify.*WithR8$")) }.configureEach {
     finalizedBy("verifyExtensionAbi")
 }
@@ -275,6 +303,9 @@ tasks.matching { it.name.matches(Regex("^minify.*WithR8$")) }.configureEach {
 // protects nothing. The variant list below must likewise track buildTypes {} above.
 tasks.register("verifyCleanKotlinOutput") {
     description = "Fails a release/nightly/stable build that would compile on top of existing Kotlin output."
+    // All three are shipped variants (see the note on buildTypes) — hence all three guarded, and debug
+    // deliberately not: it is never distributed, and gating it would force a clean build on every
+    // day-to-day compile.
     group = "verification"
     // Resolved at CONFIGURATION time into plain serializable locals so the action below captures no
     // Project reference - same configuration-cache constraint as verifyExtensionAbi.

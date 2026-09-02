@@ -113,11 +113,8 @@ class PixelFastScrollViewHelper(
 ) : FastScroller.ViewHelper {
 
     private companion object {
-        /** Smoothing toward a LARGER per-item estimate. Asymmetric on purpose — see [sampleSpan]. */
-        const val SPAN_ALPHA_RISE = 0.2
-
-        /** Smoothing toward a SMALLER one. Much slower, so the estimate settles near the max observed. */
-        const val SPAN_ALPHA_FALL = 0.02
+        /** Smoothing factor for [perItemSpan]. SYMMETRIC — see [sampleSpan] for why it stopped being biased. */
+        const val SPAN_ALPHA = 0.05
     }
 
     /**
@@ -160,8 +157,8 @@ class PixelFastScrollViewHelper(
      * fast or slow by about 2x. On History, Library and Settings the LinearLayoutManager puts one item per
      * row with near-uniform heights, the figure is the same everywhere, and a single sample was already
      * correct — which is exactly why those three screens have always behaved and these two have not. The
-     * estimate stops depending on the grab point. It is deliberately biased toward the LARGER figure
-     * rather than being a plain mean — see [sampleSpan] for the on-device evidence that requires this.
+     * estimate stops depending on the grab point. It is a PLAIN mean, deliberately — an earlier revision
+     * biased it toward the largest observed figure and overshot; see [sampleSpan].
      *
      * WHICH SECTIONS ARE WHICH is FeedAdapter.getSpanSize: Header and HorizontalList always take the full
      * span, and on a phone (sw < 600dp, `phoneSingleColumn`) Category, Media and Video do too. Only
@@ -179,32 +176,34 @@ class PixelFastScrollViewHelper(
      * Folds one observation into [perItemSpan]. Called from the scroll listener, so it samples wherever
      * the user actually goes rather than wherever they happen to stop.
      *
-     * ⚠️ ASYMMETRIC, AND NOT AS A TUNING CHOICE — A SYMMETRIC MEAN WOULD MAKE THE WORKING CASE WORSE.
-     * On-device testing (2026-09-02) isolated this on one page: grabbing the thumb with carousels filling
-     * the screen reaches the end of the list exactly, with no dead travel; grabbing with tiles filling the
-     * screen lands short. Same page, same content, only the grab position differing. Two things follow
-     * WITHOUT needing to know the feed's composition:
-     *   - reaching the end exactly means the full-span-shelf per-item figure ALREADY EQUALS the true
-     *     item-weighted mean for these feeds
-     *   - landing short means the 2-up tile figure sits below it, roughly halved, because ScrollbarHelper
-     *     divides the window's pixels by ITEMS and a tile row holds two of them
-     * Overshoot has never been observed in either position, so the error is one-directional: the estimate
-     * is correct at the top of its range and too small at the bottom, never too large.
+     * ⚠️ SYMMETRIC. IT WAS ASYMMETRIC (rise 0.2 / fall 0.02) AND THAT WAS A REASONING ERROR — do not
+     * reinstate the bias without re-reading this.
      *
-     * A symmetric mean would therefore converge BETWEEN the two — below the truth — improving tile grabs
-     * but degrading carousel grabs from correct to landing short. Rising fast and decaying slowly settles
-     * near the LARGEST per-item figure observed, which the test says is the right answer: carousel grabs
-     * keep working and tile grabs are lifted to them.
+     * On-device testing (2026-09-02) found that grabbing the thumb with carousels filling the screen
+     * reached the end of the list exactly, while grabbing with tiles filling the screen landed short.
+     * At that time gestureSpan was a LIVE sample of whatever region was under the finger, so the correct
+     * reading of that result is narrow: A CAROUSEL REGION'S per-item figure is approximately the true
+     * item-weighted mean. It was instead generalised to "the LARGEST per-item figure ever observed is the
+     * true mean", and the estimate biased toward that maximum. Those are different quantities and the
+     * second is strictly larger, so every grab then got a span above the truth — each finger pixel bought
+     * too much scroll and the page reached the end before the finger reached the bottom of the track.
+     * The 2026-09-03 build showed exactly that.
      *
-     * The decay is kept rather than latching on a plain running max so that genuinely shorter content
-     * (a feed refresh into different sections) is still tracked, and so one freak window — a single tall
-     * full-span item alone on screen — inflates the estimate only temporarily.
+     * The target is the true ITEM-WEIGHTED mean, `totalContentHeight / itemCount`, and nothing about the
+     * evidence says it sits at the top of the observed range — only that it is near a carousel region's
+     * figure, which tile regions pull down from.
      *
-     * ⚠️ IF OVERSHOOT EVER APPEARS (the list hitting its end with the thumb still mid-track, then dead
-     * travel), this bias is the first suspect: it means the max-ward estimate has gone above the true mean
-     * and RISE should come down toward FALL. That symptom is the signal; nothing else here produces it.
+     * KNOWN RESIDUAL, so it is not mistaken for a new fault: samples arrive from onScrolled, roughly one
+     * per frame of scrolling, so they are PIXEL-weighted rather than ITEM-weighted. A region contributes
+     * samples in proportion to its pixel height, and tall-per-item regions occupy more pixels per item, so
+     * even a symmetric mean sits slightly ABOVE the item-weighted truth — mathematically the ratio of the
+     * second moment to the first rather than the first to the count. Expect a small residual overshoot.
+     * If that turns out to matter, the principled fix is to weight by ITEMS traversed instead: accumulate
+     * `pixels += |dy|` and `items += |dy| / sample`, and take `pixels / items`, which is literally
+     * height-over-count across everywhere the user has been. Do that only with evidence; it is more
+     * machinery than a single alpha.
      *
-     * A fling delivers onScrolled roughly per frame, so a single flick is ~60 samples — enough for RISE to
+     * A fling delivers onScrolled roughly per frame, so a single flick is ~60 samples — enough to
      * converge well within one gesture.
      */
     private fun sampleSpan() {
@@ -213,11 +212,8 @@ class PixelFastScrollViewHelper(
         val range = view.computeVerticalScrollRange()
         if (range <= 0) return
         val sample = range.toDouble() / itemCount
-        perItemSpan = when {
-            perItemSpan == 0.0 -> sample
-            sample > perItemSpan -> perItemSpan + SPAN_ALPHA_RISE * (sample - perItemSpan)
-            else -> perItemSpan + SPAN_ALPHA_FALL * (sample - perItemSpan)
-        }
+        perItemSpan =
+            if (perItemSpan == 0.0) sample else perItemSpan + SPAN_ALPHA * (sample - perItemSpan)
     }
 
     /**

@@ -24,6 +24,25 @@ interface GridAdapter {
     // their own visual separation (e.g. section headers), avoiding doubled spacing.
     fun isSectionHeader(position: Int): Boolean = false
 
+    /**
+     * Extra space below the item at [position] WHEN THE NEXT ITEM IS A SECTION HEADER. Ignored anywhere
+     * else, which is the whole of its scope.
+     *
+     * ⚠️ NOT A GENERAL PER-ITEM SPACING HOOK, and it must not become one. Answer from the item's TYPE
+     * (getItemViewType), never from its identity or index. It exists for exactly one reason: different
+     * section types carry different intrinsic bottom padding in their own layouts, and the decoration is
+     * where that gets equalised. Anything that is not "this KIND of section ends differently" belongs in
+     * the decoration itself, or nowhere. Default 0, so every adapter that does not care is unaffected.
+     *
+     * This is a CONTINUATION of the 2026-06-23 uniform-spacing sweep (14d8bf7f), not a reversal of it.
+     * That commit replaced ad-hoc per-layout padding with this decoration and deleted
+     * item_shelf_lists.xml's `paddingBottom="4dp"` — but the carousel CHILD, item_shelf_lists_media.xml,
+     * kept `android:padding="4dp"`, and that surviving residue is the entire reason a carousel and a card
+     * grid end with different gaps today. Routing the difference through here moves the decision out of a
+     * layout file and into the one mechanism that owns spacing. It centralises more, not less.
+     */
+    fun extraSpacingBeforeHeaderDp(position: Int): Int = 0
+
     class Concat(
         vararg adapters: GridAdapter
     ) : GridAdapter {
@@ -33,6 +52,9 @@ interface GridAdapter {
         }.toMap()
         private val isSectionHeaderMap = adapters.mapIndexed { index, gridAdapter ->
             gridAdapter.adapter to gridAdapter::isSectionHeader
+        }.toMap()
+        private val extraSpacingMap = adapters.mapIndexed { index, gridAdapter ->
+            gridAdapter.adapter to gridAdapter::extraSpacingBeforeHeaderDp
         }.toMap()
 
         override fun getSpanSize(position: Int, width: Int, count: Int): Int {
@@ -46,6 +68,12 @@ interface GridAdapter {
             val (adapter, pos) = adapter.getWrappedAdapterAndPosition(position).toKotlinPair()
             val isSectionHeader = isSectionHeaderMap[adapter] ?: return false
             return isSectionHeader(pos)
+        }
+
+        override fun extraSpacingBeforeHeaderDp(position: Int): Int {
+            val (adapter, pos) = adapter.getWrappedAdapterAndPosition(position).toKotlinPair()
+            val extraSpacing = extraSpacingMap[adapter] ?: return 0
+            return extraSpacing(pos)
         }
     }
 
@@ -73,16 +101,23 @@ interface GridAdapter {
             }.getOrDefault(position)
             if (lastInRow >= state.itemCount - 1) return
             if (runCatching { gridAdapter.isSectionHeader(lastInRow + 1) }.getOrDefault(false)) {
-                outRect.bottom = HEADER_PRE_SPACING_DP.dpToPx(parent.context)
+                // Asked of the item that is ENDING (position), not of the header. Same runCatching and the
+                // same getWrappedAdapterAndPosition route as isSectionHeader above, so this adds no new
+                // exposure to the stale-position throw that guard exists for.
+                val extra = runCatching { gridAdapter.extraSpacingBeforeHeaderDp(position) }.getOrDefault(0)
+                outRect.bottom = (HEADER_PRE_SPACING_DP + extra).dpToPx(parent.context)
                 return
             }
             outRect.bottom = spacingPx
         }
 
         companion object {
-            // Extra space before a section header, on top of the header's own internal
-            // padding. 0 by default since the header's own padding was deemed sufficient;
-            // bump this if Home/Search read as under-spaced after removing the doubled gap.
+            // Baseline extra space before a section header, applied to EVERY section type, on top of
+            // the header's own internal padding. Stays 0: the header's own 8dp inner marginVertical was
+            // deemed sufficient for a single-row section, and raising this would widen every gap in the
+            // app rather than the one type that needs it. Per-type adjustment goes through
+            // GridAdapter.extraSpacingBeforeHeaderDp instead — see its note for why that is the right
+            // lever and this is not.
             private const val HEADER_PRE_SPACING_DP = 0
         }
     }

@@ -243,6 +243,35 @@ class FeedAdapter(
     override fun isSectionHeader(position: Int) =
         runCatching { getItem(position) }.getOrNull()?.type == Header
 
+    /**
+     * 4dp below the last row of a 2-up card grid, giving 12dp to the next header once the header's own
+     * 8dp inner margin is added — the SAME gap a carousel already produces, so this restores uniformity
+     * rather than introducing a new number.
+     *
+     * WHY THESE TYPES AND NOT THE OTHERS. Before a header the decoration contributes nothing
+     * (HEADER_PRE_SPACING_DP is 0), so the gap is the header's 8dp plus whatever the ending item pads
+     * itself with. A carousel's child (item_shelf_lists_media.xml) carries `padding="4dp"`, so a carousel
+     * ends at 12dp. item_shelf_category.xml has no vertical margin and item_shelf_media_grid.xml nets its
+     * paddingVertical to zero against -4dp margins, so both card grids ended at 8dp — identical to the
+     * 8dp spacing BETWEEN their own rows, leaving no visual step at the end of a multi-row block. That is
+     * the defect: a carousel never has it, because it has no internal rows to be confused with.
+     *
+     * ⚠️ item_shelf_media_grid.xml's ±4dp cancellation is TV focus-stroke geometry (2026-07-20) and is
+     * deliberately NOT touched here — the spacing is added as a decoration inset, which sits outside the
+     * item's bounds and moves the NEXT item down, so no view's own bounds and no `android:foreground`
+     * focus stroke is affected.
+     *
+     * 12dp is chosen because it is the value that already reads correctly elsewhere in this same feed,
+     * not because a step felt right. If it still reads tight, the next value on the 4dp grid is 8 (=16dp
+     * total) — but that would make grids exceed carousels, which needs its own argument rather than a
+     * nudge.
+     */
+    override fun extraSpacingBeforeHeaderDp(position: Int) =
+        when (runCatching { FeedType.Enum.entries[getItemViewType(position)] }.getOrNull()) {
+            CategoryGrid, MediaGrid -> 4
+            else -> 0
+        }
+
     private fun clearState() {
         viewModel.layoutManagerStates.clear()
         viewModel.visibleScrollableViews.clear()
