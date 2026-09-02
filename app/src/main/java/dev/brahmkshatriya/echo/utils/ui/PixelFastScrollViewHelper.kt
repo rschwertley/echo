@@ -113,18 +113,12 @@ class PixelFastScrollViewHelper(
 ) : FastScroller.ViewHelper {
 
     private companion object {
-        /** No FastScroller-driven scroll outstanding. Not a valid offset. */
-        const val NO_PENDING = Int.MIN_VALUE
+        /** Smoothing toward a LARGER per-item estimate. Asymmetric on purpose — see [sampleSpan]. */
+        const val SPAN_ALPHA_RISE = 0.2
 
-        /** No gesture in progress, so [getScrollRange] measures live. Not a valid range. */
-        const val NO_FREEZE = Int.MIN_VALUE
+        /** Smoothing toward a SMALLER one. Much slower, so the estimate settles near the max observed. */
+        const val SPAN_ALPHA_FALL = 0.02
     }
-
-    /** Offset [scrollTo] was last asked for, or [NO_PENDING]. See both accessors for why it exists. */
-    private var pendingOffset = NO_PENDING
-
-    /** True only inside [scrollTo]'s own scrollBy, so its onScrolled does not clear [pendingOffset]. */
-    private var selfScrolling = false
 
     /**
      * True while FastScroller is driving the list from a touch it consumed. NOT `view.scrollState`: that
@@ -134,86 +128,175 @@ class PixelFastScrollViewHelper(
      */
     private var gestureActive = false
 
-    /** [liveRange] captured at the start of the current gesture, or [NO_FREEZE]. See [getScrollRange]. */
-    private var frozenRange = NO_FREEZE
+    /**
+     * The list's scrollable span in estimate-pixels, captured ONCE at the start of each gesture. This is
+     * the single place the estimate enters a drag; everything after is finger deltas. Read [scrollTo].
+     */
+    private var gestureSpan = 1
+
+    /** Previous thumb fraction in this gesture, or NaN before the first. */
+    private var lastFraction = Double.NaN
+
+    /** Sub-pixel remainder carried between frames so a long slow drag cannot drift. */
+    private var pendingPixels = 0.0
+
+    /**
+     * Running mean of `computeVerticalScrollRange() / itemCount` — the estimated height of ONE item,
+     * averaged over everywhere the user has scrolled. 0.0 until the first sample. Read by
+     * [estimatedRange], sampled by [sampleSpan].
+     *
+     * ⚠️ PER ITEM, NOT THE TOTAL RANGE, AND THAT IS WHAT MAKES IT SELF-CORRECTING ACROSS CONTENT CHANGES.
+     * A running mean of the total range would describe the list it was measured on, so a feed refresh or a
+     * Search tab switch would leave it describing a list that no longer exists, and it would need
+     * invalidating on adapter changes. Storing the per-item mean and multiplying by the LIVE itemCount at
+     * read time separates the two: item count is exact and always current, and the per-item mean stays
+     * representative as long as the new content is made of similar rows — which it is, since the same
+     * adapters build it. No reset needed, and no AdapterDataObserver to register or leak.
+     *
+     * WHY A MEAN AT ALL: ScrollbarHelper extrapolates from `avgSizePerRow = laidOutArea / itemRange`, and
+     * itemRange counts ITEMS, not rows. On Home and Search — full-span shelves alongside 2-up grid items —
+     * that per-item figure is roughly the span count larger in a shelf region than in a grid region, so a
+     * single live sample depends on WHERE the user grabbed the thumb, and the drag came out proportionally
+     * fast or slow by about 2x. On History, Library and Settings the LinearLayoutManager puts one item per
+     * row with near-uniform heights, the figure is the same everywhere, and a single sample was already
+     * correct — which is exactly why those three screens have always behaved and these two have not. The
+     * estimate stops depending on the grab point. It is deliberately biased toward the LARGER figure
+     * rather than being a plain mean — see [sampleSpan] for the on-device evidence that requires this.
+     *
+     * WHICH SECTIONS ARE WHICH is FeedAdapter.getSpanSize: Header and HorizontalList always take the full
+     * span, and on a phone (sw < 600dp, `phoneSingleColumn`) Category, Media and Video do too. Only
+     * MediaGrid and VideoHorizontal take span 1, and CategoryGrid takes count/2 — those are the tile rows
+     * whose per-item figure is halved. NOTHING NEEDS ENUMERATING HERE, though: a section is sampled by
+     * whatever it actually measures, so a shelf type nobody anticipated is accounted for by construction
+     * rather than by this list being kept current.
+     */
+    private var perItemSpan = 0.0
 
     private fun liveRange() =
         view.computeVerticalScrollRange() + view.paddingTop + view.paddingBottom
 
     /**
-     * FROZEN FOR THE DURATION OF A THUMB DRAG. This is the fix for the two-images-at-different-speeds
-     * effect on Home and Search.
+     * Folds one observation into [perItemSpan]. Called from the scroll listener, so it samples wherever
+     * the user actually goes rather than wherever they happen to stop.
      *
-     * `computeVerticalScrollRange` is an estimate: ScrollbarHelper extrapolates from
-     * `avgSizePerRow = laidOutArea / itemRange`, and `itemRange` counts ITEMS, not rows. On a mixed-span
-     * grid — which is Home and Search, where configureGridLayout gives shelves the full span and grid
-     * items 1 — that average swings by about spanCount between a shelf region and a 2-up region, on top of
-     * the ordinary height variation. History is a LinearLayoutManager with one item per row, has no such
-     * term, and has always been correct: that contrast is the evidence this is the right place to act.
+     * ⚠️ ASYMMETRIC, AND NOT AS A TUNING CHOICE — A SYMMETRIC MEAN WOULD MAKE THE WORKING CASE WORSE.
+     * On-device testing (2026-09-02) isolated this on one page: grabbing the thumb with carousels filling
+     * the screen reaches the end of the list exactly, with no dead travel; grabbing with tiles filling the
+     * screen lands short. Same page, same content, only the grab position differing. Two things follow
+     * WITHOUT needing to know the feed's composition:
+     *   - reaching the end exactly means the full-span-shelf per-item figure ALREADY EQUALS the true
+     *     item-weighted mean for these feeds
+     *   - landing short means the 2-up tile figure sits below it, roughly halved, because ScrollbarHelper
+     *     divides the window's pixels by ITEMS and a tile row holds two of them
+     * Overshoot has never been observed in either position, so the error is one-directional: the estimate
+     * is correct at the top of its range and too small at the bottom, never too large.
      *
-     * Why it matters HERE and not in the thumb position: in `mThumbOffset = thumbOffsetRange *
-     * getScrollOffset() / scrollOffsetRange` the average appears in numerator and denominator and largely
-     * CANCELS, so the drawn thumb was never the unstable part. It does not cancel in [scrollTo]'s delta:
-     * `target = scrollOffsetRange * thumbFrac` scales with `avg * itemCount` while the subtrahend
-     * `computeVerticalScrollOffset()` scales with `avg * itemsBefore`, so
-     * `delta ∝ avg * (itemCount*thumbFrac - itemsBefore)` — the average MULTIPLIES the error. With a live
-     * range the target moves as the content moves, so there is no fixed point to converge on and the
-     * scroll oscillates frame to frame. Freezing makes the target constant for the gesture, so the same
-     * iteration converges on it.
+     * A symmetric mean would therefore converge BETWEEN the two — below the truth — improving tile grabs
+     * but degrading carousel grabs from correct to landing short. Rising fast and decaying slowly settles
+     * near the LARGEST per-item figure observed, which the test says is the right answer: carousel grabs
+     * keep working and tile grabs are lifted to them.
      *
-     * ⚠️ NOTHING HERE BECOMES A STALE CEILING — the failure that pinned the thumb last time. That came
-     * from a frozen value feeding OUR own `coerceIn(0, max)` in getScrollOffset; there is no clamp of ours
-     * left. FastScroller derives `scrollOffsetRange = getScrollRange() - view.height` and uses it in two
-     * places, and a wrong frozen value degrades rather than pins:
-     *   - frozen TOO SMALL (grabbed over compact rows, dragged into tall shelves): the live offset outgrows
-     *     the frozen denominator, so `mThumbOffset` can exceed `thumbOffsetRange` and the thumb is drawn
-     *     past the track end, clipped by the RecyclerView overlay; and the finger maps to a smaller scroll
-     *     span than reality, so a full-track drag lands short of the end of the list.
-     *   - frozen TOO LARGE (the reverse): the thumb lags the finger and never reaches the track bottom, and
-     *     a full-track drag overruns the end — harmlessly, since scrollBy clamps there.
-     * Neither can pin, and neither can make the thumb vanish: `mScrollbarEnabled = scrollOffsetRange > 0`
-     * is evaluated against the frozen value, and a gesture can only begin on a visible thumb, so it stays
-     * true for the whole drag. That is strictly safer than the live behaviour it replaces.
+     * The decay is kept rather than latching on a plain running max so that genuinely shorter content
+     * (a feed refresh into different sections) is still tracked, and so one freak window — a single tall
+     * full-span item alone on screen — inflates the estimate only temporarily.
+     *
+     * ⚠️ IF OVERSHOOT EVER APPEARS (the list hitting its end with the thumb still mid-track, then dead
+     * travel), this bias is the first suspect: it means the max-ward estimate has gone above the true mean
+     * and RISE should come down toward FALL. That symptom is the signal; nothing else here produces it.
+     *
+     * A fling delivers onScrolled roughly per frame, so a single flick is ~60 samples — enough for RISE to
+     * converge well within one gesture.
      */
-    override fun getScrollRange(): Int {
-        if (!gestureActive) return liveRange()
-        if (frozenRange == NO_FREEZE) frozenRange = liveRange()
-        return frozenRange
+    private fun sampleSpan() {
+        val itemCount = view.adapter?.itemCount ?: return
+        if (itemCount <= 0) return
+        val range = view.computeVerticalScrollRange()
+        if (range <= 0) return
+        val sample = range.toDouble() / itemCount
+        perItemSpan = when {
+            perItemSpan == 0.0 -> sample
+            sample > perItemSpan -> perItemSpan + SPAN_ALPHA_RISE * (sample - perItemSpan)
+            else -> perItemSpan + SPAN_ALPHA_FALL * (sample - perItemSpan)
+        }
     }
 
     /**
-     * Plain measurement — deliberately NOT the requested offset.
+     * The list's total scrollable height, from the running per-item mean scaled by the LIVE item count.
      *
-     * An earlier revision replayed [pendingOffset] here so the drawn thumb would exactly follow the
-     * finger, on the argument that it restores what `SimpleViewHelper` gets free (`View.scrollTo` sets
-     * `mScrollY` literally, so its round trip is exact). That argument still holds, but it addresses a
-     * DIFFERENT symptom from the flash — the library uses this value only for
-     * `mThumbOffset = thumbOffsetRange * getScrollOffset() / scrollOffsetRange`, i.e. where the thumb is
-     * PAINTED — and it can never affect whether a scroll happens. Since much of the visible thumb jumping
-     * was driven by the scroll loop that [scrollTo]'s guard now removes, it is not carried unless the
-     * thumb is still seen leaving the finger on a mixed-height feed. Re-add it here if so; do not add it
-     * speculatively, because it makes this method stop reporting the truth.
+     * Falls back to [liveRange] when no sample has been taken yet, which is the pre-convergence case and
+     * is exactly the behaviour this replaces — never worse than a single live read, only better once the
+     * mean exists. In practice a sample almost always exists before it can be read: the thumb auto-hides
+     * and is shown by FastScroller's onScrollChanged, so the list has to have scrolled at least once
+     * before the thumb can be grabbed, and that same scroll feeds [sampleSpan].
+     */
+    private fun estimatedRange(): Int {
+        val itemCount = view.adapter?.itemCount ?: 0
+        if (perItemSpan == 0.0 || itemCount <= 0) return liveRange()
+        return (perItemSpan * itemCount).toInt() + view.paddingTop + view.paddingBottom
+    }
+
+    /**
+     * LIVE, deliberately — an earlier revision froze this for the duration of a gesture and it was the
+     * wrong lever. Live, the estimate's average appears in both numerator and denominator of
+     * `mThumbOffset = thumbOffsetRange * getScrollOffset() / scrollOffsetRange` and largely CANCELS,
+     * leaving roughly `itemsBefore / itemCount` — so the drawn thumb is stable. Freezing the denominator
+     * while the numerator stayed live broke that cancellation and made the thumb wander mid-drag, which
+     * is exactly what was observed. [scrollTo] no longer needs it frozen; see there.
+     */
+    override fun getScrollRange() = liveRange()
+
+    /**
+     * Plain live measurement, and with [scrollTo] no longer subtracting it there is nothing it can feed
+     * back into. It is read exactly once per gesture now, on the first (absolute) call.
+     *
+     * An earlier revision replayed the requested offset here so the drawn thumb would exactly follow the
+     * finger. Not needed: with [getScrollRange] live, the estimate's average cancels between this and the
+     * range, so the thumb already sits at roughly `itemsBefore / itemCount` on its own.
      */
     override fun getScrollOffset() = view.computeVerticalScrollOffset()
 
     /**
      * A DELTA, not an absolute seek — RecyclerView has no "set pixel scroll" to mirror `View.scrollTo`.
      *
-     * ⚠️ THE IDEMPOTENCE GUARD IS LOAD-BEARING, and this is exactly why. `View.scrollTo` early-returns
-     * when the position is unchanged. `RecyclerView.scrollBy` has no such guard, and worse,
-     * scrollByInternal (RecyclerView.java:2266-2268) does
-     * ```java
-     * if (!mItemDecorations.isEmpty()) { invalidate(); }
-     * ```
-     * UNCONDITIONALLY, before any consumed-check — while `dispatchOnScrolled` at :2296 IS guarded by
-     * `consumedX != 0 || consumedY != 0`. addOnPreDrawListener below installs an ItemDecoration, so that
-     * list is never empty once the scroller exists. Therefore **every scrollBy repaints the whole
-     * RecyclerView, including scrollBy(0, 0)**.
+     * ⚠️ THIS APPLIES A DELTA RECOVERED FROM THE FINGER, NOT THE ABSOLUTE TARGET IT IS HANDED. That is
+     * the whole point, and it is what makes a thumb drag behave like a finger scroll.
      *
-     * That is the held-finger flash, and note the loop CONVERGES rather than oscillating: the finger is
-     * still, so FastScroller re-delivers the same target, the delta reaches zero — and then scrollBy(0,0)
-     * is called on every MOVE sample forever, each one invalidating the entire list. Not applying an
-     * unchanged target is the whole fix; there is no delta small enough to be free.
+     * A FINGER scroll is perfect on these same screens with the same unstable estimate, because
+     * RecyclerView.onTouchEvent computes `dy` from finger movement and hands it to scrollByInternal —
+     * there is not a single compute*Scroll* call anywhere in that method. The estimate is never in the
+     * loop. A THUMB drag was different only because of what we did with FastScroller's argument:
+     * `scrollToThumbOffset` builds `scrollOffset = getScrollOffsetRange() * thumbOffset /
+     * thumbOffsetRange` where `thumbOffset = mDragStartThumbOffset + (eventY - mDragStartY)` is pure
+     * finger pixels and `thumbOffsetRange` is pure geometry — so the ONLY estimate dependence is
+     * getScrollOffsetRange(), i.e. ours. Subtracting `computeVerticalScrollOffset()` from that target put
+     * the estimate back in the loop on both sides: the target scaled with `avg * itemCount`, the
+     * subtrahend with `avg * itemsBefore`, so `delta ∝ avg * (itemCount*thumbFrac - itemsBefore)` and the
+     * average MULTIPLIED the error. Content lurched, the window changed, the average moved, repeat — two
+     * images at different offsets, alternating frames.
+     *
+     * So invert FastScroller's own multiplication with the SAME span it just used to recover the finger
+     * fraction, and convert fraction deltas to pixels with a span read ONCE per gesture:
+     *   fraction = offset / (getScrollRange() - view.height)      // undoes the library's multiply
+     *   pixels   = (fraction - lastFraction) * gestureSpan        // gestureSpan captured at gesture start
+     * `computeVerticalScrollOffset()` is never consulted after the first call, so there is no feedback
+     * path at all. An error in gestureSpan makes the whole drag proportionally fast or slow — a bounded,
+     * monotonic wrongness — instead of oscillating. That is the same trade a finger scroll makes.
+     *
+     * The first call of a gesture still lands ABSOLUTELY, which is required rather than incidental: the
+     * track-TAP path sets mDragStartThumbOffset from the tap position and jumps, so the first target is
+     * genuinely somewhere else. On a thumb GRAB the first target is where the content already is, so the
+     * same absolute step is ~0.
+     *
+     * Sub-pixel remainders accumulate in [pendingPixels] rather than being rounded away each frame, so a
+     * long slow drag cannot drift.
+     *
+     * A zero delta returns WITHOUT calling scrollBy, and that is load-bearing, not an optimisation.
+     * RecyclerView.scrollBy has no no-op guard, and scrollByInternal (RecyclerView.java:2266-2268) runs
+     * `if (!mItemDecorations.isEmpty()) { invalidate(); }` UNCONDITIONALLY before any consumed-check —
+     * while dispatchOnScrolled at :2296 IS guarded. addOnPreDrawListener below installs an
+     * ItemDecoration, so that list is never empty and every scrollBy repaints the whole list, including
+     * scrollBy(0, 0). A held finger produces an unchanged fraction, so this returns and the screen stops
+     * flashing.
      *
      * It also clamps at both ends by itself, which is the other half of why no end anchor is needed.
      * stopScroll() first, matching RecyclerViewHelper.
@@ -281,12 +364,28 @@ class PixelFastScrollViewHelper(
      *     no AppBarLayout and no layout_behavior, so it is unaffected.
      */
     override fun scrollTo(offset: Int) {
-        if (offset == pendingOffset) return
-        pendingOffset = offset
-        selfScrolling = true
         view.stopScroll()
-        view.nestedScrollBy(0, offset - view.computeVerticalScrollOffset())
-        selfScrolling = false
+        // The span FastScroller itself just multiplied by, so dividing recovers its thumbOffset fraction.
+        // Two DIFFERENT spans, deliberately. `liveSpan` must be the value FastScroller itself just
+        // multiplied by, or dividing would not recover its thumb fraction — so it stays live. `gestureSpan`
+        // converts that fraction into content pixels and is the one place the estimate enters the drag, so
+        // it comes from the running mean instead of a single window-dependent sample.
+        val liveSpan = (liveRange() - view.height).coerceAtLeast(1)
+        val fraction = offset.toDouble() / liveSpan
+        if (!gestureActive || lastFraction.isNaN()) {
+            gestureSpan = (estimatedRange() - view.height).coerceAtLeast(1)
+            lastFraction = fraction
+            pendingPixels = 0.0
+            val jump = offset - view.computeVerticalScrollOffset()
+            if (jump != 0) view.nestedScrollBy(0, jump)
+            return
+        }
+        pendingPixels += (fraction - lastFraction) * gestureSpan
+        lastFraction = fraction
+        val delta = pendingPixels.toInt()
+        if (delta == 0) return
+        pendingPixels -= delta
+        view.nestedScrollBy(0, delta)
     }
 
     // The three registrations mirror RecyclerViewHelper's own shapes (verified against the 1.3.0 AAR):
@@ -302,9 +401,7 @@ class PixelFastScrollViewHelper(
     override fun addOnScrollChangedListener(onScrollChanged: Runnable) {
         view.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                // Anything that moves the list other than us invalidates the replay, so a finger scroll,
-                // a fling or a programmatic scroll immediately puts getScrollOffset back on measurement.
-                if (!selfScrolling) pendingOffset = NO_PENDING
+                sampleSpan()
                 onScrollChanged.run()
             }
         })
@@ -326,33 +423,29 @@ class PixelFastScrollViewHelper(
     }
 
     /**
-     * Opens and closes the [getScrollRange] freeze, and clears [pendingOffset], around a
-     * FastScroller-driven gesture.
+     * Marks the start and end of a FastScroller-driven gesture, which is what lets [scrollTo] treat the
+     * first call as an absolute landing and every later one as a finger delta.
      *
      * ⚠️ DRIVEN OFF WHETHER FASTSCROLLER CONSUMED THE EVENT, NOT `view.scrollState`. FastScroller moves
-     * the list itself via its own scroll call, so RecyclerView's scrollState stays IDLE for the entire
-     * thumb drag and would never open the freeze. FastScroller.onTouchEvent returns `mDragging`, so a
-     * consumed event means exactly "it has the thumb or the track and is about to drive scrollTo".
+     * the list itself, so RecyclerView's scrollState stays IDLE for the entire thumb drag and would never
+     * open the gesture. FastScroller.onTouchEvent returns `mDragging`, so a consumed event means exactly
+     * "it has the thumb or the track and is about to drive scrollTo".
      *
-     * The range is captured LAZILY on the first [getScrollRange] read after [gestureActive] goes true,
-     * not here, so it cannot go stale sitting unused. One consequence: on the track-TAP path FastScroller
-     * calls scrollToThumbOffset from inside the same ACTION_MOVE being wrapped, so that first jump is
-     * computed against a live range and only the drag that follows is frozen. That is the right value
-     * anyway — it is the range as it stands when the gesture begins.
-     *
-     * The gesture end is also the only reliable point to stop replaying [pendingOffset]: FastScroller's
-     * ACTION_UP path calls setDragging(false) and does not call [scrollTo], so without this the last
-     * requested offset would be held indefinitely.
+     * Ordering is deliberate and the track-TAP path depends on it: this runs AFTER the predicate, so on
+     * the ACTION_MOVE where FastScroller decides a track tap has happened it calls scrollToThumbOffset
+     * before [gestureActive] is set — which routes that first jump down [scrollTo]'s absolute branch,
+     * where it belongs. A thumb GRAB sets the flag on ACTION_DOWN, and FastScroller issues no scrollTo
+     * until the following ACTION_MOVE, so it is seeded by the NaN check instead.
      */
     private fun trackGesture(event: MotionEvent, consumed: Boolean) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> if (consumed) gestureActive = true
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 gestureActive = false
-                // Thawed together with the flag: leaving a capture behind would survive into the next
-                // gesture as a stale starting range.
-                frozenRange = NO_FREEZE
-                pendingOffset = NO_PENDING
+                // Cleared together: a fraction or remainder left behind would be applied against the NEXT
+                // gesture's span, which is a different scale.
+                lastFraction = Double.NaN
+                pendingPixels = 0.0
             }
         }
     }

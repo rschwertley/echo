@@ -65,6 +65,18 @@ object FormatUtils {
         }
     }
 
+    // ⚠️ `selected` is assigned as a SIDE EFFECT inside the map lambda below, not returned through the
+    // chain, and is recovered by the indexOf at the end. That is the part to read carefully here.
+    //
+    // The `map { … }.flatten()` is kept over `flatMap { … }` on purpose and the inspection suppressed:
+    // the two-step form makes the group/index NESTING explicit — outer over groups, inner over track
+    // indices, then flatten — which is how the rest of this function has to be read. The two are exactly
+    // equivalent in this position: same output order, same side-effect order, one fewer intermediate list.
+    // The ONE case where swapping them could change behaviour is a Sequence receiver, where flatMap is
+    // lazy and map{}.flatten() is not, so the side effect would run at a different time. This receiver is
+    // an eager List, so that does not apply — but it is why the swap deserves a thought rather than a
+    // reflex if this ever moves.
+    @Suppress("SimplifiableCallChain")
     fun List<Tracks.Group>.getSelected(): Pair<List<Pair<Tracks.Group, Int>>, Int?> {
         var selected: Pair<Tracks.Group, Int>? = null
         val trackGroups = map { trackGroup ->

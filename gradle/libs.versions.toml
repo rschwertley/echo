@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.1"
+agp = "9.3.2"
 kotlin = "2.4.10"
 # NOTE: Detekt bundles its OWN Kotlin analyzer for PSI parsing; 1.23.8 bundles ~Kotlin 2.0.x, while this
 # project is on Kotlin 2.4.10. PSI-only analysis of ordinary code (incl. reified generics / @OptIn) works,
@@ -10,12 +10,28 @@ detekt = "1.23.8"
 
 car-app = "1.7.0"
 androidx-paging = "3.5.1"
-room = "3.0.1"
+room = "3.0.2"
 sqlite = "2.7.0"
 firebase-bom = "34.18.0"
 koinAndroid = "4.2.2"
 media3 = "1.11.0"
-coil = "3.5.0"
+# ⚠️ DO NOT GO BELOW 3.6.0. It ships a shrinker rule inside coil-core that this app needs:
+#   -keep class * extends coil3.target.GenericViewTarget { *; }
+# Without it, R8 9.0+ vertically merges GenericViewTarget into its subclasses and SILENTLY DROPS the
+# super calls to Target's default interface methods - the override still runs, but the side effect it
+# delegates (ImageView.setImageDrawable) never does. Images come out BLANK, minified builds only
+# (google/issuetracker 524864608, coil-kt/coil#3518). We hit three call sites: ImageUtils.loadInto and
+# loadRoundedInto, which feed the TV full-screen album art (PlayerTvFragment) and the TV mini-player art
+# (MainActivity), plus every feed/history/queue row. The phone full-screen cover is NOT affected - that
+# goes through loadWithThumb's lambda target, which is not a GenericViewTarget.
+#
+# WHY THIS WAS NEVER REPORTED, and worth knowing before dismissing a similar report in future: R8's
+# vertical class merging is an OPTIMIZATION DECISION, not a deterministic transform. Whether it merges
+# any given class depends on the whole-program reachability graph, so the bug appears and disappears
+# between builds with no pattern a user could describe. "TV album art was blank in one build and fine in
+# the next" is exactly what this looks like from outside, and is exactly the shape of report that gets
+# written off as a fluke. It is not a fluke; it is this.
+coil = "3.6.1"
 
 [libraries]
 okhttp = { module = "com.squareup.okhttp3:okhttp", version = "5.5.0" }
@@ -29,7 +45,7 @@ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version = "1.1
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version = "1.8.0" }
 androidx-activity = { group = "androidx.activity", name = "activity", version = "1.13.0" }
 
-protobuf-java = { module = "com.google.protobuf:protobuf-java", version = "4.36.0" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version = "4.36.1" }
 recyclerview = { module = "androidx.recyclerview:recyclerview", version = "1.4.0" }
 swiperefresh = { module = "androidx.swiperefreshlayout:swiperefreshlayout", version = "1.2.0" }
 

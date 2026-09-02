@@ -1,9 +1,15 @@
 // Suppresses the IDE "the 'apply' plugin syntax is older and not recommended" inspection for the
 // CONDITIONAL apply(plugin = …) calls below (gms/crashlytics), which cannot move to the plugins {}
 // block because they must apply only when google-services.json is present (see the NOTE there).
-// NOTE: verify this id matches your Android Studio version — Alt+Enter on the warning → "Suppress for
-// file" inserts the exact id. An unknown id is silently ignored (won't clear the panel), so confirm it.
-@file:Suppress("GrDeprecatedAPIUsage")
+//
+// ⚠️ "GrDeprecatedAPIUsage" IS ALMOST CERTAINLY THE WRONG ID AND IS DOING NOTHING. The `Gr` prefix is
+// GROOVY (the inspection ships with the Groovy plugin and targets .gradle files); this is a .gradle.KTS
+// file, so it never matches and the warning keeps appearing. An unknown id is silently ignored, which is
+// exactly why this looked settled and was not. Left in place only so the next person sees this note
+// rather than re-deriving it.
+// TO FIX PROPERLY: put the caret on the warning at the apply() calls below, Alt+Enter -> "Suppress for
+// file", and let the IDE insert the correct id for your Android Studio version. Then delete this one.
+@file:Suppress("GrDeprecatedAPIUsage", "AvoidDuplicateDependencies", "AvoidApplyPluginMethod")
 
 import java.io.File
 
@@ -132,9 +138,12 @@ dependencies {
     // `compileOnly` for the compile classpath, so this is identical to declaring both — but avoids putting
     // the same artifact on both configurations (the "declared multiple times" warning).
     if (hasGoogleServices) {
+        @Suppress("AvoidDuplicateDependencies")
         implementation(platform(libs.firebase.bom))
+        @Suppress("AvoidDuplicateDependencies")
         implementation(libs.bundles.firebase)
     } else {
+        @Suppress("AvoidDuplicateDependencies")
         compileOnly(platform(libs.firebase.bom))
         compileOnly(libs.bundles.firebase)
     }
