@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.utils.ui
 
 import android.graphics.Canvas
 import android.util.Log
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import android.view.MotionEvent
 import androidx.recyclerview.widget.RecyclerView
 import me.zhanghai.android.fastscroll.FastScroller
@@ -371,16 +372,25 @@ class PixelFastScrollViewHelper(
         val fraction = offset.toDouble() / liveSpan
         if (!gestureActive || lastFraction.isNaN()) {
             gestureSpan = (estimatedRange() - view.height).coerceAtLeast(1)
-            // ⚠️ TRACE — REMOVE WITH THE INVESTIGATION. Every value the drag's calibration depends on, at
-            // the one moment it is fixed. Read it as: liveRange / items should be ~= perItem once the EMA
-            // has converged, and gestureSpan is what one full track-length of finger buys in content px.
-            // If perItem on Search results is within ~30% of Home's and the drag still runs ahead, the
-            // estimate is not the fault and the error is downstream of it.
+            // ⚠️ TRACE — REMOVE WITH THE INVESTIGATION.
+            // Prints BOTH SIDES OF THE ONE COMPARISON THAT MATTERS: est is EMA-derived
+            // (perItemSpan * itemCount + padding), live is measured now (liveRange()). Both are
+            // padding-inclusive so they are directly comparable, and est/live is the calibration error —
+            // 1.00 means the EMA agrees with the layout.
+            // An earlier version printed the RAW computeVerticalScrollRange() beside gestureSpan, which
+            // looked subtractable and was not: gestureSpan comes from est, not from the raw call, and the
+            // raw call omits padding. perItem is printed with a decimal because at 150+ items one unit of
+            // it is 150+ px of range, and truncating made the arithmetic uncheckable.
+            // WHAT TO READ: a stable est/live is fine at any value (Home sits at 1.20 and behaves); an
+            // est/live that MOVES between grabs on an unchanging screen is the fault.
             Log.d(
                 "GladixScroll",
-                "gesture start: perItem=${perItemSpan.toInt()} items=${view.adapter?.itemCount} " +
-                    "gestureSpan=$gestureSpan liveRange=${view.computeVerticalScrollRange()} " +
-                    "viewH=${view.height}"
+                "gesture start: perItem=%.2f items=%d est=%d live=%d est/live=%.2f gestureSpan=%d viewH=%d feedLoads=%d"
+                    .format(
+                        perItemSpan, view.adapter?.itemCount ?: 0, estimatedRange(), liveRange(),
+                        if (liveRange() > 0) estimatedRange().toDouble() / liveRange() else 0.0,
+                        gestureSpan, view.height, CrashKeys.feedLoadCount()
+                    )
             )
             lastFraction = fraction
             pendingPixels = 0.0

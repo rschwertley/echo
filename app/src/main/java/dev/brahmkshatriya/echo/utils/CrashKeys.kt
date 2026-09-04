@@ -73,6 +73,14 @@ object CrashKeys {
     @Volatile private var processStartElapsedMs = 0L
     private val extensionSwitches = AtomicInteger(0)
     private val feedLoads = AtomicInteger(0)
+
+    /**
+     * ⚠️ TRACE SUPPORT — REMOVE WITH THE SCROLLER INVESTIGATION. Read-only view of the same counter
+     * `feed_load_count` reports, so the GladixScroll line can say whether a FeedData reload happened
+     * between two gesture-start samples. If the item count moves while this does NOT, the reload path is
+     * not responsible and the movement has another source.
+     */
+    fun feedLoadCount() = feedLoads.get()
     // Split from the old remote_controller_count gauge (see doc note 1). Both monotonic: their DIFFERENCE is
     // the old gauge, their RATIO is the churn signal the gauge hid.
     private val controllerConnects = AtomicInteger(0)

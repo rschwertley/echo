@@ -100,8 +100,8 @@ class PlayerViewModel(
     // subscriptionCount was 0 at every emit and neither collector ran.
     //
     // The two collectors, and they are NOT equivalent:
-    //   PlayerFragment:555   -> submit(), the full-screen ViewPager pages
-    //   QueueFragment:121    -> submit(), the Up Next list and its scroll-to-current
+    //   PlayerFragment.configurePlayerControls -> submit(), the full-screen ViewPager pages
+    //   QueueFragment.onViewCreated             -> submit(), the Up Next list and scroll-to-current
     // Both are backed by a sibling `playerState.current` collector that rebuilds from `queue`, but by
     // different mechanisms, and the asymmetry is the whole point:
     //   QueueFragment's sibling (:120) is ALSO gated, so flowWithLifecycle re-subscribes at ON_START and

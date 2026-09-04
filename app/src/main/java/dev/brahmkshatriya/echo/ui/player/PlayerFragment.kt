@@ -26,7 +26,6 @@ import android.view.ViewOutlineProvider
 import android.widget.ProgressBar
 import androidx.activity.OnBackPressedCallback
 import androidx.annotation.OptIn
-import androidx.core.view.doOnPreDraw
 import androidx.lifecycle.Lifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
 import android.util.Log
@@ -231,6 +230,21 @@ class PlayerFragment : Fragment() {
             adapter.beginCoverTrace()
             b.viewPager.post {
                 val pos = b.viewPager.currentItem
+                // `pos` is ViewPager2's LOGICAL page (mCurrentItem, written at ViewPager2.java:649 the
+                // instant setCurrentItem is called, frames or no frames). `rendered` is what is actually
+                // laid out. They are different questions and the whole point of this pair is that a
+                // stalled smooth scroll separates them: mCurrentItem advances, the pixels do not.
+                // ViewPager2's own reconciler (updateCurrentItem) CANNOT mask this — it is gated on
+                // SCROLL_STATE_IDLE at ViewPager2.java:555, so while SETTLING it never snaps pos to
+                // rendered. Read off the inner RecyclerView because ViewPager2 exposes no such accessor.
+                val rendered = (b.viewPager.getChildAt(0) as? RecyclerView)
+                    ?.let { it.layoutManager as? LinearLayoutManager }
+                    ?.findFirstCompletelyVisibleItemPosition() ?: RecyclerView.NO_POSITION
+                // The stall itself, directly. notifyProgrammaticScroll dispatches SCROLL_STATE_SETTLING
+                // and only resetState() clears it, which is reached solely from onScrolled /
+                // onScrollStateChanged — so SETTLING at a wake means the smooth scroll never progressed.
+                // 0=IDLE 1=DRAGGING 2=SETTLING.
+                val scrollState = b.viewPager.scrollState
                 val trace = adapter.coverTrace(pos)
                 val boundId = trace?.second
                 val curId = viewModel.playerState.current.value?.mediaItem?.mediaId
@@ -240,9 +254,22 @@ class PlayerFragment : Fragment() {
                 // image load; a match with a NETWORK decision means the cache was not consulted or the key
                 // did not agree. warm=issued/done separates never-ran / parked / completed - see the
                 // counters in ImageUtils.
+                //
+                // ⚠️ READ page/rendered/scrollState BEFORE bound/cur. bound and cur are ADAPTER-SPACE and
+                // can both be correct about a page that is not the one on screen. If page != rendered, or
+                // scrollState is SETTLING(2), this is a PAGE-POSITION fault and every image-layer reading
+                // on this line is aimed at the wrong layer.
+                //
+                // ⚠️ decision=none AND bound=null ARE THE RESET VALUES, not findings. beginCoverTrace()
+                // writes exactly that pair onto every attached holder moments earlier, so together they
+                // mean only "no cover decision was recorded during this wake" - NOT that the holder is
+                // unbound, and NOT that no request was ever issued. A holder bound before the trace opened
+                // reads identically. `decision=no-holder` is the only value that means no holder was
+                // found; the durable binding field (ViewHolder.lastBoundMediaId) is never printed here.
                 Log.d(
                     "GladixArt",
-                    "wake: page=$pos bound=$boundId cur=$curId match=${boundId == curId} " +
+                    "wake: page=$pos rendered=$rendered scrollState=$scrollState " +
+                        "bound=$boundId cur=$curId match=${boundId == curId} " +
                         "decision=${trace?.first ?: "no-holder"} " +
                         "warm=${ImageUtils.warmIssued.get()}/${ImageUtils.warmDone.get()}"
                 )
@@ -562,37 +589,65 @@ class PlayerFragment : Fragment() {
                 val index = capturedIndex ?: return@submitList
                 val viewPager = binding?.viewPager ?: return@submitList
                 val current = viewPager.currentItem
-                // Only smooth-scroll when the display is actually on. A smooth scroll is driven by
-                // Choreographer frames, which are paused while the screen is off — so a screen-off auto-advance's
-                // smoothScrollToPosition stalls and desyncs ViewPager2's logical mCurrentItem from the rendered
-                // page (the one-behind bug). A NON-smooth setCurrentItem commits via the LayoutManager's pending
-                // scroll (scrollToPosition when laid out, mPendingCurrentItem when not), applied on the next
-                // layout pass at screen-on — no frames needed — so the correct page renders with no stale frame.
-                // On-screen advances keep the animated ±1 behavior.
-                // Gate on the DISPLAY, not on lifecycle state, because the question is "will Choreographer
-                // deliver frames" and the lifecycle only answers "is this Fragment started".
+                // Only smooth-scroll when frames will actually be delivered to THIS window. A smooth
+                // scroll is driven by Choreographer frames; a NON-smooth setCurrentItem commits via the
+                // LayoutManager's pending scroll (scrollToPosition when laid out, mPendingCurrentItem when
+                // not), applied on the next layout pass — no frames needed — so the correct page renders
+                // with no stale frame. Visible advances keep the animated ±1 behavior.
                 //
-                // ⚠️ This comment previously claimed the gate was needed because a NATURAL DISPLAY TIMEOUT
-                // leaves the Activity reporting STARTED while the display stops producing frames, and that
-                // a power-button press collapses that window. MEASURED 2026-08-24 and it is FALSE: over
-                // eight consecutive screen-off auto-advances the lifecycle read CREATED every time — the
-                // Activity is genuinely stopped on a natural timeout, so a STARTED check would have
-                // returned the same answer the display check does. The gate is not wrong, but it was
-                // justified by a mechanism that does not exist; do not cite that mechanism again.
+                // TWO CONDITIONS, AND THE SECOND WAS MISSING UNTIL 2026-09-03.
+                //   displayOn  — the screen is producing frames at all. DOZE / DOZE_SUSPEND / OFF all
+                //                correctly read as "no frames". DisplayManager rather than
+                //                Context.getDisplay, which is API 30+ and we ship 24.
+                //   isResumed  — frames are being delivered to US. A BACKGROUNDED app with the display
+                //                fully on is the case displayOn alone gets wrong: the display is on and
+                //                frames flow — to the foreground app. This window gets none.
                 //
-                // What the display check still buys is directness and the DOZE window: Display.STATE_ON is
-                // the signal actually being asked about, and DOZE / DOZE_SUSPEND / OFF all correctly read as
-                // "no frames", whereas lifecycle state only correlates. DisplayManager rather than
-                // Context.getDisplay, which is API 30+ and we ship 24.
+                // ⚠️ THE DISPLAY-ONLY GATE WAS VALIDATED FOR SCREEN-OFF ONLY. The 2026-08-24 measurement
+                // cited below ran over eight consecutive SCREEN-OFF auto-advances. It never exercised
+                // backgrounded-with-display-on, and that is the door it left open. Do not cite it as
+                // general validation of this gate. (It is also recorded ONLY in comments — both Aug 24
+                // commits, b33c4207 and 172f1edb, have empty message bodies. Treat accordingly.)
+                //
+                // What goes wrong without isResumed, READ FROM ViewPager2 1.1.0-beta02 SOURCE (identical
+                // in 1.0.0 — setCurrentItemInternal and updateCurrentItem are byte-identical across both,
+                // so the transitive version does not matter):
+                //   1. ViewPager2.java:649 sets `mCurrentItem = item` IMMEDIATELY, before any scrolling.
+                //      getCurrentItem() returns the target whether or not a frame is ever drawn.
+                //   2. ScrollEventAdapter.notifyProgrammaticScroll sets STATE_IN_PROGRESS_SMOOTH_SCROLL and
+                //      dispatches SCROLL_STATE_SETTLING. Only resetState() clears that, and it is reached
+                //      solely from onScrolled/onScrollStateChanged — i.e. only if the scroll progresses.
+                //   3. The ONLY layout-time reconciler is ViewPager2.java:538 `if (mCurrentItemDirty)
+                //      updateCurrentItem()`. It runs the WRONG WAY (:543-561 pushes the RENDERED snap
+                //      position into mCurrentItem; it never scrolls toward mCurrentItem), and it is gated
+                //      on `getScrollState() == SCROLL_STATE_IDLE` at :555 — false while SETTLING. It then
+                //      clears mCurrentItemDirty at :560 REGARDLESS, consuming its own trigger.
+                //   4. It is self-latching: ViewPager2.java:640 returns early on
+                //      `item == mCurrentItem && smoothScroll`, so no later smooth setCurrentItem for the
+                //      same page can re-drive it.
+                // Net: logical page desyncs from the rendered page, permanently, with nothing to fix it —
+                // no bind, no cover request, and the old holder keeps its old drawable.
+                //
+                // ⚠️ THE ESCAPE IS setCurrentItem(index, FALSE), NOT A currentItem COMPARISON. With state
+                // SETTLING, smooth=false passes BOTH guards (:636 needs isIdle(), false; :640 needs
+                // smoothScroll, false) and reaches :682 mRecyclerView.scrollToPosition(item), a pending
+                // position applied on the next layout with no frames required. But `if (vp.currentItem !=
+                // index)` is FALSE in the stalled state — mCurrentItem was set at step 1 — so a guarded
+                // re-commit is a NO-OP in exactly the scenario it looks like it fixes. That is what the
+                // 2026-07-28 onResume pre-draw block (cf60b564, reverted 2026-07-30 by 60ab8d0c) did; it
+                // could never have fixed this bug. Do not reinstate it in that shape.
+                //
                 // Asymmetry that justifies erring conservative: smooth=false is ALWAYS correct — the
-                // non-smooth setCurrentItem commits via the LayoutManager's pending scroll and needs no
-                // frames — so a false negative costs an animation, while a false positive leaves the page
-                // stale until the user interacts. This flag is the ONLY thing changed; the writers of the
-                // page position are untouched, which is what the reverted 2026-07-30 pre-draw re-commit
-                // got wrong (it added a third writer and produced a permanent one-behind).
+                // non-smooth path commits the same page through the LayoutManager — so a false negative
+                // costs only an animation, while a false positive leaves the page stale until the user
+                // interacts. NO PATH REQUIRES the animated variant: the user-drag path never comes through
+                // here (it is ViewPager2's own touch handling), and every caller of submit() wants the
+                // page committed, not animated. This flag is the ONLY thing changed; the writers of the
+                // page position are untouched, which is what the reverted pre-draw re-commit got wrong (it
+                // added a third writer and produced a permanent one-behind).
                 val displayOn = requireContext().getSystemService(DisplayManager::class.java)
                     ?.getDisplay(Display.DEFAULT_DISPLAY)?.state == Display.STATE_ON
-                val smooth = displayOn && !isInitialLoad && abs(index - current) <= 1
+                val smooth = displayOn && isResumed && !isInitialLoad && abs(index - current) <= 1
                 isInitialLoad = false
                 if (!viewPager.isLaidOut) viewPager.setCurrentItem(index, smooth)
                 else {
@@ -680,6 +735,10 @@ class PlayerFragment : Fragment() {
                 // while dark: its only two entry points are bind (onBindViewHolder) and retryLoad
                 // (onViewAttachedToWindow), both driven by a layout traversal that a STOPPED Activity never
                 // performs - and at wake both are guarded and may decline to issue at all.
+                // NOTE the corollary, which the smooth-scroll gate in submit() got wrong until 2026-09-03:
+                // "stopped" here means THIS WINDOW gets no traversals and no frames, and that is true of a
+                // BACKGROUNDED app whose display is fully on. A display-state check alone reads that case
+                // as "frames are flowing" and is wrong about it; the gate now also requires isResumed.
                 //
                 // TWO EXISTENCE PROOFS, and what they share. The mini bar's cover (loaded into
                 // collapsedTrackCover by FragmentPlayerBinding.applyCurrent) has
@@ -688,9 +747,13 @@ class PlayerFragment : Fragment() {
                 // requestManager coalescing - which rules coalescing out as the discriminator. The property
                 // they share with each other and not with the ViewHolder is issuance from `current`.
                 //
-                // CLEAR OF THE RESUME-TIME TRAP. Two prior resume-time re-commits made things worse, a
-                // permanent one-behind rather than an intermittent one (Jul 28/30 doOnPreDraw, aecc6700,
-                // reverted 3 Aug by 25fae92a). This is not one: it writes no page position, touches no
+                // CLEAR OF THE RESUME-TIME TRAP. A prior resume-time re-commit made things worse, a
+                // permanent one-behind rather than an intermittent one: the onResume doOnPreDraw block
+                // added by cf60b564 (2026-07-28) and reverted by 60ab8d0c (2026-07-30), whose subject is
+                // "revert album-art onResume re-commit". (An earlier comment here cited "aecc6700,
+                // reverted 3 Aug by 25fae92a" — VERIFIED WRONG 2026-09-03: aecc6700 is 2026-07-13 and
+                // 25fae92a is 2026-07-14, and `git log -S "doOnPreDraw"` lists neither. Commit hashes in
+                // comments are checkable; check them.) This is not one: it writes no page position, touches no
                 // ViewPager state, and is not a resume-time action - it runs when `current` changes.
                 //
                 // COST is one decode per advance into a ~38MB memory cache. Deliberately not engineered
