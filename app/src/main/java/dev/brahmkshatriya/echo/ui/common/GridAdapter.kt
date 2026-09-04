@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Rect
-import android.util.Log
 import android.view.View
 import androidx.core.util.toKotlinPair
 import androidx.core.view.doOnLayout
@@ -25,24 +24,6 @@ interface GridAdapter {
     // their own visual separation (e.g. section headers), avoiding doubled spacing.
     fun isSectionHeader(position: Int): Boolean = false
 
-    /**
-     * Extra space below the item at [position] WHEN THE NEXT ITEM IS A SECTION HEADER. Ignored anywhere
-     * else, which is the whole of its scope.
-     *
-     * ⚠️ NOT A GENERAL PER-ITEM SPACING HOOK, and it must not become one. Answer from the item's TYPE
-     * (getItemViewType), never from its identity or index. It exists for exactly one reason: different
-     * section types carry different intrinsic bottom padding in their own layouts, and the decoration is
-     * where that gets equalised. Anything that is not "this KIND of section ends differently" belongs in
-     * the decoration itself, or nowhere. Default 0, so every adapter that does not care is unaffected.
-     *
-     * This is a CONTINUATION of the 2026-06-23 uniform-spacing sweep (14d8bf7f), not a reversal of it.
-     * That commit replaced ad-hoc per-layout padding with this decoration and deleted
-     * item_shelf_lists.xml's `paddingBottom="4dp"` — but the carousel CHILD, item_shelf_lists_media.xml,
-     * kept `android:padding="4dp"`, and that surviving residue is the entire reason a carousel and a card
-     * grid end with different gaps today. Routing the difference through here moves the decision out of a
-     * layout file and into the one mechanism that owns spacing. It centralises more, not less.
-     */
-    fun extraSpacingBeforeHeaderDp(position: Int): Int = 0
 
     class Concat(
         vararg adapters: GridAdapter
@@ -53,9 +34,6 @@ interface GridAdapter {
         }.toMap()
         private val isSectionHeaderMap = adapters.mapIndexed { index, gridAdapter ->
             gridAdapter.adapter to gridAdapter::isSectionHeader
-        }.toMap()
-        private val extraSpacingMap = adapters.mapIndexed { index, gridAdapter ->
-            gridAdapter.adapter to gridAdapter::extraSpacingBeforeHeaderDp
         }.toMap()
 
         override fun getSpanSize(position: Int, width: Int, count: Int): Int {
@@ -71,11 +49,6 @@ interface GridAdapter {
             return isSectionHeader(pos)
         }
 
-        override fun extraSpacingBeforeHeaderDp(position: Int): Int {
-            val (adapter, pos) = adapter.getWrappedAdapterAndPosition(position).toKotlinPair()
-            val extraSpacing = extraSpacingMap[adapter] ?: return 0
-            return extraSpacing(pos)
-        }
     }
 
     class VerticalSpacingItemDecoration(
@@ -101,43 +74,30 @@ interface GridAdapter {
                 } else position
             }.getOrDefault(position)
             if (lastInRow >= state.itemCount - 1) return
-            // TRACE (2026-09-04, temporary, GladixSpacing). REMOVE WITH THE 40dp PROBE.
-            // Both runCatchings below degrade to a default, and BOTH Concat map lookups (isSectionHeaderMap,
-            // extraSpacingMap) also return a default on a miss - four silent paths to 0, none distinguishable
-            // from "the number is simply small" by looking at the device. These lines name which one ran.
-            // A failure is logged with its throwable rather than counted, because the two candidates
-            // (a stale-position IndexOutOfBounds vs an adapter-key miss) need telling apart.
-            val headerNext = runCatching { gridAdapter.isSectionHeader(lastInRow + 1) }
-            headerNext.exceptionOrNull()?.let {
-                Log.d("GladixSpacing", "isSectionHeader THREW at ${lastInRow + 1}: $it")
-            }
-            if (headerNext.getOrDefault(false)) {
-                // Asked of the item that is ENDING (position), not of the header. Same runCatching and the
-                // same getWrappedAdapterAndPosition route as isSectionHeader above, so this adds no new
-                // exposure to the stale-position throw that guard exists for.
-                val extraResult = runCatching { gridAdapter.extraSpacingBeforeHeaderDp(position) }
-                extraResult.exceptionOrNull()?.let {
-                    Log.d("GladixSpacing", "extraSpacing THREW at $position: $it")
-                }
-                val extra = extraResult.getOrDefault(0)
-                Log.d(
-                    "GladixSpacing",
-                    "header branch: pos=$position lastInRow=$lastInRow extra=$extra " +
-                        "bottomDp=${HEADER_PRE_SPACING_DP + extra} (normal row bottom would be 8dp)"
-                )
-                outRect.bottom = (HEADER_PRE_SPACING_DP + extra).dpToPx(parent.context)
+            if (runCatching { gridAdapter.isSectionHeader(lastInRow + 1) }.getOrDefault(false)) {
+                outRect.bottom = HEADER_PRE_SPACING_DP.dpToPx(parent.context)
                 return
             }
             outRect.bottom = spacingPx
         }
 
         companion object {
-            // Baseline extra space before a section header, applied to EVERY section type, on top of
-            // the header's own internal padding. Stays 0: the header's own 8dp inner marginVertical was
-            // deemed sufficient for a single-row section, and raising this would widen every gap in the
-            // app rather than the one type that needs it. Per-type adjustment goes through
-            // GridAdapter.extraSpacingBeforeHeaderDp instead — see its note for why that is the right
-            // lever and this is not.
+            // THE PRE-HEADER GAP, FOR EVERY SECTION TYPE. This REPLACES the row spacing rather than
+            // adding to it (note the `return` above), so it is the WHOLE decoration contribution before a
+            // header — a value of 0 means the gap is the header's own 8dp marginVertical and nothing else.
+            //
+            // ⚠️ ONE VALUE, DELIBERATELY. A per-type hook (extraSpacingBeforeHeaderDp) lived here until
+            // 2026-09-04 and was deleted rather than zeroed: it COMPENSATED for section types ending
+            // differently instead of making them end the same, so every new section type needed a new
+            // number and the numbers could only ever be tuned against each other. The differences it was
+            // compensating for were 4dp of vertical padding in three layouts (the carousel card, video,
+            // video-horizontal), all now normalised to zero, plus a variable amount of unconsumed row
+            // reservation in carousels, now gone because HorizontalListViewHolder MEASURES the row instead
+            // of reserving a dimen. With every type contributing nothing of its own, this constant is the
+            // only lever and it moves all of them together.
+            //
+            // If a section type ever ends with the wrong gap again, the fix is to find what padding that
+            // type carries and remove it — not to reintroduce a per-type exception here.
             private const val HEADER_PRE_SPACING_DP = 0
         }
     }

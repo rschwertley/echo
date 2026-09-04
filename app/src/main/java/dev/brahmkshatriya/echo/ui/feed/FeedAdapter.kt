@@ -243,59 +243,6 @@ class FeedAdapter(
     override fun isSectionHeader(position: Int) =
         runCatching { getItem(position) }.getOrNull()?.type == Header
 
-    /**
-     * 6dp below the last row of a 2-up card grid, giving 14dp to the next header once the header's own
-     * 8dp inner margin is added.
-     *
-     * ⚠️ THE TARGET IS NOT LAYOUT-BOUNDARY PARITY WITH A CAROUSEL, AND AN EARLIER VERSION OF THIS COMMENT
-     * CLAIMED IT WAS. Boundary arithmetic and what the eye measures are different distances here:
-     *
-     *   carousel  boundary 12dp  (4dp item_shelf_lists_media padding + 8dp header margin)
-     *             ink      ~15dp (the last child is a 12sp subtitle TextView, so ~3dp of descent air
-     *                             sits below the final glyph before the layout boundary)
-     *   card      boundary  8dp  (item_shelf_category has no vertical margin)
-     *             ink       8dp  (a CardView with cardBackgroundColor — the fill reaches its bounds)
-     *
-     * So matching the boundary (12dp, the previous value of 4) leaves cards at ~80% of the carousel's
-     * VISIBLE gap, which was built and read as still too tight. 6dp puts them at ~93%.
-     *
-     * WHY NOT INK PARITY (8dp -> 16dp), which is where the arithmetic points:
-     *  1. A card ends in a filled rectangle spanning the column; a carousel ends in ragged 66%-alpha
-     *     text. A hard edge reads as a stronger separator, so equal ink gaps make the CARD look more
-     *     separated. It should sit slightly under parity, not at it.
-     *  2. Ink parity is not a fixed number to hit. The carousel's ~3dp of descent air is derived from a
-     *     12sp text size, so it SCALES with the user's font-size setting while a dp gap does not — any
-     *     value tuned for ink parity is correct at exactly one font scale.
-     *
-     * If 6dp still reads tight, the thing to revisit is argument (1), not the number: going past ink
-     * parity means the hard-edge reasoning is wrong, and that is worth knowing rather than papering over
-     * with another 2dp.
-     *
-     * WHY THESE TYPES AND NOT THE OTHERS. Before a header the decoration contributes nothing
-     * (HEADER_PRE_SPACING_DP is 0), so the gap is the header's 8dp plus whatever the ending item pads
-     * itself with. A carousel's child carries `padding="4dp"`; item_shelf_category.xml has no vertical
-     * margin and item_shelf_media_grid.xml nets its paddingVertical to zero against -4dp margins, so both
-     * card grids ended at 8dp — identical to the 8dp spacing BETWEEN their own rows, leaving no visual
-     * step at the end of a multi-row block. That is the defect: a carousel never has it, because it has
-     * no internal rows to be confused with.
-     *
-     * ⚠️ item_shelf_media_grid.xml's ±4dp cancellation is TV focus-stroke geometry (2026-07-20) and is
-     * deliberately NOT touched here — the spacing is added as a decoration inset, which sits outside the
-     * item's bounds and moves the NEXT item down, so no view's own bounds and no `android:foreground`
-     * focus stroke is affected.
-     */
-    // ⚠️⚠️ PROBE 2026-09-04 — 40 IS NOT A DESIGN VALUE. REVERT TO 6 BEFORE SHIPPING. ⚠️⚠️
-    // Measurement on device put the card gap at 53% of the carousel gap, which is the ratio predicted for
-    // extra=0, and absolute values ~2.5x the model. Two explanations fit that equally: the number is wrong,
-    // or this hook never reaches the layout. 40 separates them in one build — if the gap does not visibly
-    // jump, the hook is not wired and every round of tuning this number has been about nothing.
-    // See VerticalSpacingItemDecoration.getItemOffsets for the three places the value can be silently
-    // dropped to 0 on the way (two runCatchings and two map lookups that return a default).
-    override fun extraSpacingBeforeHeaderDp(position: Int) =
-        when (runCatching { FeedType.Enum.entries[getItemViewType(position)] }.getOrNull()) {
-            CategoryGrid, MediaGrid -> 40
-            else -> 0
-        }
 
     private fun clearState() {
         viewModel.layoutManagerStates.clear()

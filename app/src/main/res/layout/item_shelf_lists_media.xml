@@ -6,7 +6,7 @@
     android:layout_height="wrap_content"
     android:clipToPadding="false"
     android:orientation="vertical"
-    android:padding="4dp">
+    android:paddingHorizontal="4dp">
 
     <include
         android:id="@+id/coverContainer"

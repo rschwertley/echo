@@ -20,6 +20,7 @@ import dev.brahmkshatriya.echo.databinding.ItemShelfListsMediaBinding
 import dev.brahmkshatriya.echo.playback.PlayerState
 import dev.brahmkshatriya.echo.ui.feed.FeedClickListener
 import dev.brahmkshatriya.echo.ui.feed.FeedType
+import dev.brahmkshatriya.echo.ui.feed.viewholders.MediaViewHolder.Companion.subtitle
 import dev.brahmkshatriya.echo.ui.feed.viewholders.shelf.ShelfType
 import dev.brahmkshatriya.echo.ui.feed.viewholders.shelf.ShelfViewHolder
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.applyTranslationAndScaleAnimation
@@ -67,6 +68,22 @@ class HorizontalListViewHolder(
         return measuredHeight
     }
 
+    // Vertical chrome around the cover, READ FROM THE ACTUAL inflated card (measureBinding) so it tracks
+    // whichever layout variant is in use instead of assuming phone's: the card root's vertical padding plus
+    // the cover container's net vertical chrome (its vertical padding + its SIGNED topMargin, which
+    // item_shelf_media_cover_big pulls up by -4dp, so this subtracts).
+    //
+    // Shared by BOTH measured branches. Density-scaled and font-scale-independent (it holds no text), so a
+    // padding change in either layout variant flows through here automatically and cannot reintroduce the
+    // under-budgeting that once clipped TV titles off the bottom of a fixed row height.
+    private fun measuredCoverChromePx(): Int {
+        val coverRoot = measureBinding.coverContainer.root
+        val coverTopMargin =
+            (coverRoot.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
+        return measureBinding.root.paddingTop + measureBinding.root.paddingBottom +
+            coverRoot.paddingTop + coverRoot.paddingBottom + coverTopMargin
+    }
+
     // Generic row height = deterministic cover/card geometry (baseHeightPx) + the tallest measured
     // label block across the shelf's items. Only the labels are measured (they bind synchronously);
     // the cover is async-loaded and would under-measure, so its height stays analytic in baseHeightPx.
@@ -83,33 +100,49 @@ class HorizontalListViewHolder(
         when {
             shelf is Shelf.Lists.Items && shelf.list.all { it is Radio } -> {
                 val coverSize = resolvedItemCoverSizePx()
-                // Vertical chrome around the cover, READ FROM THE ACTUAL inflated card (measureBinding) so it
-                // tracks whichever layout variant is in use instead of assuming phone's. It is the card root's
-                // vertical padding + the cover container's net vertical chrome = its vertical padding + its
-                // SIGNED topMargin (item_shelf_media_cover_big pulls up by -4dp, so this subtracts). This
-                // reproduces the value the old hardcoded constant was derived from:
-                //   phone  item_shelf_lists_media padding 4dp  → root 8 + cover(8 + (-4)) = 12dp  (byte-identical)
-                //   TV     item_shelf_lists_media padding 12dp → root 24 + cover(8 + (-4)) = 28dp  (was under-budgeted
-                //          at 12dp, clipping the title/subtitle off the bottom of the fixed row height).
-                // Density-scaled, font-scale-independent (holds no text); future padding tweaks to either
-                // layout can't reintroduce the mismatch since the number now comes from the layout itself.
-                val coverRoot = measureBinding.coverContainer.root
-                val coverTopMargin =
-                    (coverRoot.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
-                val coverChrome = measureBinding.root.paddingTop + measureBinding.root.paddingBottom +
-                    coverRoot.paddingTop + coverRoot.paddingBottom + coverTopMargin
+                // Radio cards carry a title and no subtitle; chrome via measuredCoverChromePx().
                 contentRowHeightPx(
                     items = shelf.list,
-                    baseHeightPx = coverSize + coverChrome,
+                    baseHeightPx = coverSize + measuredCoverChromePx(),
                     textWidthPx = coverSize,
                 ) { media ->
                     measureBinding.title.text = media.title
                     listOf(measureBinding.title)
                 }
             }
-            shelf is Shelf.Lists.Items ->
-                resolvedItemCoverSizePx() +
-                    resources.getDimensionPixelSize(R.dimen.shelf_media_text_block_height)
+            // STANDARD MEDIA CAROUSEL — MEASURED, NOT RESERVED. Was
+            // `coverSize + R.dimen.shelf_media_text_block_height` (80dp phone / 100dp TV), a worst-case
+            // reservation for two-line title + two-line subtitle. That dimen now has no consumers and is
+            // deleted. The reservation was not merely generous, it was VARIABLE: how much of it a row
+            // actually consumed depended on that row's longest label and on whether its items had subtitles
+            // at all, so two carousels on one screen ended with different amounts of dead space and no
+            // constant could equalise them. Measuring sizes each row to its own tallest card, which is what
+            // the radio branch above has always done — same mechanism, same cached measureBinding, no new
+            // machinery.
+            //
+            // ⚠️ THE SUBTITLE IS INCLUDED ONLY WHEN NON-BLANK, mirroring ShelfViewHolder's
+            // `ItemShelfListsMediaBinding.bind` (`subtitle.isVisible = !sub.isNullOrBlank()`). Measuring it
+            // unconditionally would budget a full line for shelves whose items carry no subtitle — artist
+            // shelves especially — reinstating exactly the slack this replaces. The three fields read here
+            // (title, subtitle text, subtitle visibility) are the whole of the coupling to that binder; if
+            // it ever grows a fourth that affects HEIGHT, mirror it here.
+            //
+            // Font scale is handled by construction: measured heights are real pixels at the current scale,
+            // where the dp reservation could be overflowed by a large font setting and clip.
+            shelf is Shelf.Lists.Items -> {
+                val coverSize = resolvedItemCoverSizePx()
+                contentRowHeightPx(
+                    items = shelf.list,
+                    baseHeightPx = coverSize + measuredCoverChromePx(),
+                    textWidthPx = coverSize,
+                ) { media ->
+                    measureBinding.title.text = media.title
+                    val sub = media.subtitle(binding.root.context)
+                    measureBinding.subtitle.text = sub
+                    if (sub.isNullOrBlank()) listOf(measureBinding.title)
+                    else listOf(measureBinding.title, measureBinding.subtitle)
+                }
+            }
             shelf is Shelf.Lists.Categories ->
                 resources.getDimensionPixelSize(R.dimen.shelf_category_row_height)
             else ->

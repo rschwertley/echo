@@ -16,7 +16,6 @@
     <dimen name="nav_height">64dp</dimen>
 
     <!-- Horizontal-shelf row heights grown to fit the bigger covers + text (were 80 / 68 / 216). -->
-    <dimen name="shelf_media_text_block_height">100dp</dimen>
     <dimen name="shelf_category_row_height">100dp</dimen>
     <dimen name="shelf_three_tracks_row_height">280dp</dimen>
 
