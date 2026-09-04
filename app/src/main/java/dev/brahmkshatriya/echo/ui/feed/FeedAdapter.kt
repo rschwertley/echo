@@ -284,9 +284,16 @@ class FeedAdapter(
      * item's bounds and moves the NEXT item down, so no view's own bounds and no `android:foreground`
      * focus stroke is affected.
      */
+    // ⚠️⚠️ PROBE 2026-09-04 — 40 IS NOT A DESIGN VALUE. REVERT TO 6 BEFORE SHIPPING. ⚠️⚠️
+    // Measurement on device put the card gap at 53% of the carousel gap, which is the ratio predicted for
+    // extra=0, and absolute values ~2.5x the model. Two explanations fit that equally: the number is wrong,
+    // or this hook never reaches the layout. 40 separates them in one build — if the gap does not visibly
+    // jump, the hook is not wired and every round of tuning this number has been about nothing.
+    // See VerticalSpacingItemDecoration.getItemOffsets for the three places the value can be silently
+    // dropped to 0 on the way (two runCatchings and two map lookups that return a default).
     override fun extraSpacingBeforeHeaderDp(position: Int) =
         when (runCatching { FeedType.Enum.entries[getItemViewType(position)] }.getOrNull()) {
-            CategoryGrid, MediaGrid -> 6
+            CategoryGrid, MediaGrid -> 40
             else -> 0
         }
 

@@ -775,7 +775,47 @@ class PlayerFragment : Fragment() {
         // edge-only wiring off the `current` collector did.
         observe(viewModel.playWhenReady) { updateWaveMotion() }
 
-        observe(viewModel.queueFlow) { submit() }
+        // ⚠️ DELIBERATELY UNGATED — DO NOT REPLACE WITH observe(). 2026-09-04.
+        //
+        // WHAT THE GATE WAS FOR, AND HOW I KNOW: nothing specific. `observe` is ContextUtils.observe =
+        // flowWithLifecycle(STARTED), the house default for collecting in a Fragment; both queueFlow
+        // collectors used it because that is what everything here uses. PlayerViewModel's note on queueFlow
+        // treats the gating as the PROBLEM, not as a decision, and recommends driving new work off the
+        // `current` collector instead. There is no commit adding the gate to fix anything — it was never
+        // not there.
+        //
+        // WHAT IT COSTS: queueFlow is a MutableSharedFlow<Unit> with replay = 0. A stopped Activity has no
+        // subscriber, and such a flow DROPS an emission outright rather than deferring it. So the queue
+        // correction published 50ms after a backgrounded advance is destroyed, the adapter keeps the
+        // departed track as a real extra page, and nothing regenerates the lost signal: `viewModel.queue`
+        // is already correct by then, so no further fullQueueFlow write occurs until the next timeline
+        // change. Confirmed on device 2026-09-04: after ANY backgrounded advance — natural timeout or a
+        // power-button press alike — the previous track's page is still swipeable at wake.
+        //
+        // WHY THIS IS NOT THE replay = 1 THAT WAS REVERTED (2026-08-28, cold-start hang): replay changes
+        // what a LATE subscriber sees at subscribe time, which is what raced the restore block. Ungating
+        // adds no replay and no buffer; it only keeps a subscriber alive while stopped, so emit() has
+        // somewhere to go. Nothing about cold-start subscribe timing changes.
+        //
+        // WHY IT DOES NOT REINTRODUCE THE JUNE 11 TEARING: that defect was changeQueue()'s incremental
+        // removeMediaItems/addMediaItems each firing a separate onTimelineChanged and rendering
+        // intermediate torn-down queue states. The 50ms debounce that fixed it lives UPSTREAM, in
+        // PlayerEventListener.emitFullQueue, which cancels its pending write on every new timeline change.
+        // Only the coalesced result ever reaches queueFlow, gated or not. The debounce is untouched.
+        //
+        // WHY IT DOES NOT REINTRODUCE THE JUNE 21-26 RE-DELIVERY: that was observe() on `current`, a
+        // StateFlow, which REPLAYS its latest value to each re-subscription, so applyCurrent()/submit()
+        // re-fired on every ON_START during Activity recreation. A replay-0 SharedFlow replays nothing on
+        // re-subscribe — which is precisely why this one loses emissions instead of duplicating them. The
+        // two flows fail in opposite directions under the same operator.
+        //
+        // viewLifecycleOwner.lifecycleScope, NOT lifecycleScope: this is a view-bound collector and must die
+        // with the view. (The sibling `current` collector above uses the FRAGMENT scope while being started
+        // from onViewCreated — if the view is ever recreated without the fragment being destroyed, that one
+        // stacks. Pre-existing; not changed here, but do not copy it.)
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.queueFlow.collect { submit() }
+        }
         observe(viewModel.browser) { controller ->
             if (controller != null && viewModel.queue.isNotEmpty() && adapter.currentList.isEmpty()) {
                 submit()

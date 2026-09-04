@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Rect
+import android.util.Log
 import android.view.View
 import androidx.core.util.toKotlinPair
 import androidx.core.view.doOnLayout
@@ -100,11 +101,30 @@ interface GridAdapter {
                 } else position
             }.getOrDefault(position)
             if (lastInRow >= state.itemCount - 1) return
-            if (runCatching { gridAdapter.isSectionHeader(lastInRow + 1) }.getOrDefault(false)) {
+            // TRACE (2026-09-04, temporary, GladixSpacing). REMOVE WITH THE 40dp PROBE.
+            // Both runCatchings below degrade to a default, and BOTH Concat map lookups (isSectionHeaderMap,
+            // extraSpacingMap) also return a default on a miss - four silent paths to 0, none distinguishable
+            // from "the number is simply small" by looking at the device. These lines name which one ran.
+            // A failure is logged with its throwable rather than counted, because the two candidates
+            // (a stale-position IndexOutOfBounds vs an adapter-key miss) need telling apart.
+            val headerNext = runCatching { gridAdapter.isSectionHeader(lastInRow + 1) }
+            headerNext.exceptionOrNull()?.let {
+                Log.d("GladixSpacing", "isSectionHeader THREW at ${lastInRow + 1}: $it")
+            }
+            if (headerNext.getOrDefault(false)) {
                 // Asked of the item that is ENDING (position), not of the header. Same runCatching and the
                 // same getWrappedAdapterAndPosition route as isSectionHeader above, so this adds no new
                 // exposure to the stale-position throw that guard exists for.
-                val extra = runCatching { gridAdapter.extraSpacingBeforeHeaderDp(position) }.getOrDefault(0)
+                val extraResult = runCatching { gridAdapter.extraSpacingBeforeHeaderDp(position) }
+                extraResult.exceptionOrNull()?.let {
+                    Log.d("GladixSpacing", "extraSpacing THREW at $position: $it")
+                }
+                val extra = extraResult.getOrDefault(0)
+                Log.d(
+                    "GladixSpacing",
+                    "header branch: pos=$position lastInRow=$lastInRow extra=$extra " +
+                        "bottomDp=${HEADER_PRE_SPACING_DP + extra} (normal row bottom would be 8dp)"
+                )
                 outRect.bottom = (HEADER_PRE_SPACING_DP + extra).dpToPx(parent.context)
                 return
             }

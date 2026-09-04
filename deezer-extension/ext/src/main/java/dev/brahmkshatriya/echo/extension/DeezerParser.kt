@@ -4,6 +4,7 @@ import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Date as EchoDate
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
+import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
@@ -23,10 +24,50 @@ import kotlinx.serialization.json.jsonObject
 
 class DeezerParser(private val session: DeezerSession) {
 
+    /**
+     * The SECTION overload — the receiver is the whole section object, not a bare data array.
+     *
+     * It carries a [Shelf.Lists.Items.more] and the other two overloads do not, which is deliberate and is
+     * what scopes this change: only Home's carousels (DeezerHomeFeedClient.loadHomeFeed) and the channel
+     * sub-pages (DeezerExtension.channelFeed) bind here. DeezerArtistClient and DeezerLibraryClient go
+     * through the JsonArray/JsonObject overloads below and are untouched — they receive a bare array with
+     * no section context, so they could not build a meaningful `more` even if it were wanted there.
+     * DeezerSearchClient calls this too but discards the result and rebuilds it; see the note below.
+     *
+     * WHAT `more` DOES HERE: it re-wraps the SAME already-parsed list as a vertical page. No fetch, no
+     * network, no second parse. The app renders the expand arrow purely on `more != null`
+     * (HeaderViewHolder.bind), so this is what turns a sideways-swiping carousel into a page you can read
+     * down — which is the entire point. It is NOT a "load more".
+     *
+     * MIRRORS DeezerSearchClient's else-branch construction exactly, so Home and Search behave
+     * identically. The one field Search sets explicitly and this does not is `type = Type.Linear`; that is
+     * already the default on Shelf.Lists.Items, so the two are the same shelf.
+     *
+     * ⚠️ IT TERMINATES AFTER ONE LEVEL, BY TYPE, NOT BY A GUARD. The expansion emits Shelf.Item, and
+     * FeedType.toFeedTypes maps Shelf.Item to Media/Video — only `is Shelf.Lists<*>` produces a Header,
+     * and only a Header renders an arrow. So an expanded page contains no arrows and cannot expand again.
+     * A depth guard would be dead code. This holds as long as the expansion emits Items rather than Lists;
+     * if that ever changes, the recursion becomes reachable.
+     *
+     * ⚠️ THE ARROW COULD FETCH INSTEAD OF RE-WRAPPING, AND DEEZER'S OWN APP DOES. Deezer caps its
+     * carousels on the main screens, and where it shows an expand arrow that arrow returns MORE items than
+     * the row displayed — so there is real content behind some of these sections that this does not reach.
+     * The way in is the section-level `target` field (DeezerSearchClient's logSections already reads one
+     * at its `target` line; nothing else in this extension consumes it). A fetching version would resolve
+     * it the way toChannel/channelFeed already resolve an item-level target, via api.page(target). That is
+     * deliberately NOT what this is: the re-wrap is the cheap version and was chosen first, on purpose.
+     * If you come back to make the arrow fetch, the section `target` is where to look — and note that a
+     * fetched page returning Lists would make the termination note above no longer hold.
+     */
     fun JsonElement.toShelfItemsList(name: String = "Unknown"): Shelf? {
         val items = obj()["items"]?.jsonArray?.mapObjects { it.toEchoMediaItem() }.orEmpty()
-        return items.takeIf { it.isNotEmpty() }?.let {
-            Shelf.Lists.Items(id = name, title = name, list = it)
+        return items.takeIf { it.isNotEmpty() }?.let { list ->
+            Shelf.Lists.Items(
+                id = name,
+                title = name,
+                list = list,
+                more = PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
+            )
         }
     }
 
