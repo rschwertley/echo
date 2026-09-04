@@ -34,6 +34,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.extensions.exceptions.MediaUnavailableException
+import dev.brahmkshatriya.echo.extensions.exceptions.WrongItemException
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getAs
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getIf
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.isClient
@@ -202,7 +203,10 @@ object Cached {
                 // form of the requested id (see canonicalId — YTM drops its "VL" playlist prefix), and raw
                 // equality would false-positive this guard. A genuinely different item still mismatches. The
                 // message keeps the RAW ids so a real mismatch stays diagnosable.
-                if (canonicalId(new.id) != canonicalId(state.item.id)) error(
+                // WrongItemException, not error(): an anonymous IllegalStateException cannot be told
+                // apart from any other app-side throw, and the skip reports group on the class. See the
+                // note on that type.
+                if (canonicalId(new.id) != canonicalId(state.item.id)) throw WrongItemException(
                     "loadItem returned wrong item: expected ${idForMessage(state.item.id)}, " +
                         "got ${idForMessage(new.id)}"
                 )

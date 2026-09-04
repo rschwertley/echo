@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.utils.ui
 
 import android.graphics.Canvas
+import android.util.Log
 import android.view.MotionEvent
 import androidx.recyclerview.widget.RecyclerView
 import me.zhanghai.android.fastscroll.FastScroller
@@ -370,6 +371,17 @@ class PixelFastScrollViewHelper(
         val fraction = offset.toDouble() / liveSpan
         if (!gestureActive || lastFraction.isNaN()) {
             gestureSpan = (estimatedRange() - view.height).coerceAtLeast(1)
+            // ⚠️ TRACE — REMOVE WITH THE INVESTIGATION. Every value the drag's calibration depends on, at
+            // the one moment it is fixed. Read it as: liveRange / items should be ~= perItem once the EMA
+            // has converged, and gestureSpan is what one full track-length of finger buys in content px.
+            // If perItem on Search results is within ~30% of Home's and the drag still runs ahead, the
+            // estimate is not the fault and the error is downstream of it.
+            Log.d(
+                "GladixScroll",
+                "gesture start: perItem=${perItemSpan.toInt()} items=${view.adapter?.itemCount} " +
+                    "gestureSpan=$gestureSpan liveRange=${view.computeVerticalScrollRange()} " +
+                    "viewH=${view.height}"
+            )
             lastFraction = fraction
             pendingPixels = 0.0
             val jump = offset - view.computeVerticalScrollOffset()

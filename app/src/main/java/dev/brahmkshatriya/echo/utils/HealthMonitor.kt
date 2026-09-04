@@ -29,7 +29,7 @@ class HealthMonitor(private val app: App) {
         HealthException("extensionId=$extensionId durationMs=$durationMs", extensionId)
 
     /**
-     * Split into two concrete families ON PURPOSE — do not collapse it back.
+     * Split into concrete families ON PURPOSE — do not collapse it back.
      *
      * Crashlytics groups a non-fatal on the exception CLASS plus the top stack frames, and this had
      * exactly one construction site (PlayerEventListener.reportAndResetConsecutiveSkips), so every trip
@@ -44,9 +44,9 @@ class HealthMonitor(private val app: App) {
      * ONLY the inner name — declaring these as `ConsecutiveSkipException.Stall` would title the issue
      * "Stall" with no context. Keep any future family a sibling with a fully-qualifying name.
      *
-     * The family comes from PlayerEventListener's `recentSkipRunHadError` flag, NOT from string-matching
-     * [lastCauses] for "StuckBuffering" — see the note on this file's [HealthException] about why parsing
-     * the message back is the thing these `val`s exist to prevent.
+     * The family comes from PlayerEventListener's `recentSkipFamily`, computed per skip from the cause
+     * and PlaybackException in hand, NOT from string-matching [lastCauses] — see the note on this file's
+     * [HealthException] about why parsing the message back is the thing these `val`s exist to prevent.
      *
      * The MESSAGE FORMAT IS UNCHANGED, and must stay that way: [lastCauses] carries the probe fields, and
      * `report()`'s dedupe signature is simpleName + message. The two families already produced different
@@ -60,8 +60,8 @@ class HealthMonitor(private val app: App) {
      * NOT split on extension-attributability. That sounds like the natural axis and is the wrong one: the
      * `ext:` field in a cause comes from an AppException in the chain, and an HTTP 403 on a STREAM URL is a
      * Media3 `InvalidResponseCodeException` from the datasource carrying no AppException — so an
-     * extension-attributable split would not separate a 403 storm from a stall at all. If the error family
-     * later needs subdividing, do it on HTTP-code presence.
+     * extension-attributable split would not separate a 403 storm from a stall at all. The error family
+     * was subdivided on 2026-09-03 — on Media3 error codes and types we own, for the reason below.
      */
     sealed class ConsecutiveSkipException(
         val skipCount: Int, val lastExtensionId: String, val lastCauses: String
@@ -69,15 +69,56 @@ class HealthMonitor(private val app: App) {
         "skipCount=$skipCount lastExtensionId=$lastExtensionId lastCauses=$lastCauses", lastExtensionId
     )
 
+    /**
+     * ⚠️ THE ERROR FAMILIES BELOW EXIST BECAUSE CRASHLYTICS MUTE IS PER-ISSUE. One class per DECISION,
+     * never one per cause: if two families would always be triaged the same way they must be merged. The
+     * six real causes seen so far collapse to three outcomes — watch the network ones (they neighbour the
+     * buffering-stall investigation), watch our own guards, mute everything a third party refused.
+     *
+     * ⚠️ CLASSIFIED FROM TYPES WE OWN OR THAT ANDROID OWNS — NEVER FROM A THIRD-PARTY CLASS NAME OR
+     * MESSAGE STRING. We know the built-in extensions; we do not know the third-party universe, and a
+     * rule keyed on "TrackUnavailableException" or on message text works until somebody installs an
+     * extension nobody here has read. See PlayerEventListener.skipFamilyOf for what that leaves
+     * classifiable and what deliberately falls to the residual bucket.
+     */
     /** Every skip in the run came from the buffering watchdog — `recordSkip(null)`, no error object. */
     class ConsecutiveSkipStallException(
         skipCount: Int, lastExtensionId: String, lastCauses: String
     ) : ConsecutiveSkipException(skipCount, lastExtensionId, lastCauses)
 
     /**
-     * At least one skip in the run carried a real throwable. Mixed runs land here deliberately: a genuine
-     * error present is the actionable half, and burying it in the mutable stall family is the failure this
-     * split exists to prevent.
+     * A timeout or connection failure. WATCHED: this neighbours the buffering-stall park, and a run that
+     * times out is the closest thing to it that carries a throwable.
+     */
+    class ConsecutiveSkipNetworkException(
+        skipCount: Int, lastExtensionId: String, lastCauses: String
+    ) : ConsecutiveSkipException(skipCount, lastExtensionId, lastCauses)
+
+    /**
+     * A third party refused, or the content or its extension is gone. MUTABLE: nothing here is
+     * actionable from this side — a broken scraper, an expired token, a queue restored against an
+     * extension the user has since uninstalled.
+     */
+    class ConsecutiveSkipUnavailableException(
+        skipCount: Int, lastExtensionId: String, lastCauses: String
+    ) : ConsecutiveSkipException(skipCount, lastExtensionId, lastCauses)
+
+    /**
+     * One of OUR OWN named guards fired. WATCHED.
+     *
+     * ⚠️ NAMED TYPES ONLY — NEVER A BASE CLASS. Routing `is IllegalStateException` here would fill the one
+     * bucket that is actually read with every unrelated app-side throw, which is the state this split
+     * exists to escape. A guard earns a place here by being given a name (see WrongItemException);
+     * anything anonymous belongs in the residual family, where an unexpected cause is visible as such.
+     */
+    class ConsecutiveSkipInternalException(
+        skipCount: Int, lastExtensionId: String, lastCauses: String
+    ) : ConsecutiveSkipException(skipCount, lastExtensionId, lastCauses)
+
+    /**
+     * RESIDUAL. A throwable that none of the families above recognised — which is signal, not noise: it
+     * means a cause the split did not anticipate, most likely from an extension nobody here has read.
+     * Deliberately keeps its original name so the existing Crashlytics issue is not orphaned.
      */
     class ConsecutiveSkipErrorException(
         skipCount: Int, lastExtensionId: String, lastCauses: String

@@ -52,6 +52,7 @@ import dev.brahmkshatriya.echo.common.providers.MusicExtensionsProvider
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.di.App
+import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionNotFoundException
 import dev.brahmkshatriya.echo.extensions.cache.Cached
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException.Companion.toAppException
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.toKey
@@ -125,7 +126,10 @@ class UnifiedExtension(
         private fun List<Extension<*>>.getOrNull(id: String?) = find { it.id == id }
 
         val Map<String, String>.extensionId
-            get() = this[EXTENSION_ID] ?: throw Exception("Extension id not found")
+            // Typed, not a bare Exception: the skip reports group on the class, and a restored queue
+            // referencing an uninstalled sub-extension is a normal config condition that must be
+            // classifiable as Unavailable rather than landing in the residual bucket.
+            get() = this[EXTENSION_ID] ?: throw ExtensionNotFoundException(null)
 
         fun Track.withExtensionId(
             id: String, client: Any?, cached: Boolean = false,

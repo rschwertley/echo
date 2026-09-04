@@ -29,6 +29,8 @@ import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.extensions.ExtensionLoader
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException
 import dev.brahmkshatriya.echo.extensions.exceptions.ExtensionNotFoundException
+import dev.brahmkshatriya.echo.extensions.exceptions.MediaUnavailableException
+import dev.brahmkshatriya.echo.extensions.exceptions.WrongItemException
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.getExtension
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.isClient
 import dev.brahmkshatriya.echo.playback.MediaItemUtils
@@ -646,6 +648,10 @@ class PlayerEventListener(
         // (simpleName + message); for ConsecutiveSkipException that is Scope.MEMORY_ONLY, i.e. a HashMap
         // key with no length limit, and a longer string does not change the signature CARDINALITY because
         // identical content still produces an identical signature. Safe to move again if needed.
+        // Bounds the cause-chain walk in skipFamilyOf. A self-referential or pathologically nested chain
+        // must not spin on a per-skip path; 16 is far past anything real (the deepest observed is a
+        // PlaybackException -> AppException -> IOException -> ErrnoException at 4).
+        private const val MAX_CAUSE_DEPTH = 16
         private const val MAX_MSG_LEN = 256
         private const val MAX_CAUSE_LEN = 400
         // Extension display names are author-declared and unbounded; cap independently so a long one can't
@@ -661,31 +667,27 @@ class PlayerEventListener(
     private val maxConsecutiveUnavailableSkips = 3
     private var consecutiveUnavailableSkips = 0
     // The safeCause() of each skip in the current run, oldest→newest, bounded to maxConsecutiveUnavailableSkips.
-    // Moves in lockstep with consecutiveUnavailableSkips AND recentSkipRunHadError below: recordSkip()
+    // Moves in lockstep with consecutiveUnavailableSkips AND recentSkipFamily below: recordSkip()
     // advances all three, resetConsecutiveSkips() clears all three — they are never mutated apart, so a
     // reported run can never carry a cause, a count or a family from a previous run.
     private val recentSkipCauses = ArrayDeque<String>()
 
-    // Picks the HealthException FAMILY for this run: false -> ConsecutiveSkipStallException (every skip was
-    // the buffering watchdog's recordSkip(null)), true -> ConsecutiveSkipErrorException. Crashlytics groups
-    // on the class, so this is what lets a stall storm be muted without hiding a real error — see the long
-    // note on HealthMonitor.ConsecutiveSkipException.
-    //
-    // A FLAG, NOT A SCAN OF recentSkipCauses. Deriving it by looking for "StuckBuffering" in the joined
-    // string would reintroduce exactly the message-parsing fragility that HealthException's `val` fields
-    // exist to remove: the first reformat of safeCause() would silently misfile every report.
-    //
-    // Sticky over the run, which is exact rather than approximate here: every recordSkip() call site is
-    // immediately followed by the `>= maxConsecutiveUnavailableSkips` trip check, so the counter never
-    // reaches 4 and the deque's removeFirst() never actually evicts. The flag therefore always describes
-    // the same set of skips that recentSkipCauses reports. If a future skip site ever omits that trip
-    // check, an early error could scroll out of the causes while this stayed true — reinstate the check
-    // rather than weakening this.
-    //
-    // Third member of the reset trio. consecutiveUnavailableSkips, recentSkipCauses and this MUST be
-    // mutated together (recordSkip advances all three, resetConsecutiveSkips clears all three) or a report
-    // can carry one run's count with another run's family.
-    private var recentSkipRunHadError = false
+    /**
+     * Highest-precedence [SkipFamily] seen in the current run, which picks the HealthException class at
+     * the trip. Crashlytics groups on the class, so this is what lets a permanently-mutable family be
+     * silenced without silencing the ones being watched.
+     *
+     * PRECEDENCE, not last-wins: a run of three skips can mix causes, and the enum is ordered so
+     * `maxOf` keeps the most decision-relevant one. Internal beats Unavailable beats Network beats Error
+     * beats Stall — an app-side guard always surfaces, an explicit refusal beats a transport symptom, and
+     * only a genuinely unrecognised throwable keeps the residual name.
+     *
+     * A FAMILY, NOT A BOOLEAN, and not a scan of recentSkipCauses: deriving it by matching the joined
+     * string would reintroduce exactly the message-parsing fragility HealthException's `val` fields exist
+     * to remove. Third member of the reset trio — consecutiveUnavailableSkips, recentSkipCauses and this
+     * are mutated together or a report carries one run's count with another run's family.
+     */
+    private var recentSkipFamily = SkipFamily.Stall
 
     // True once a track has resolved to STATE_READY since the queue was last set fresh (reset below on a
     // PLAYLIST_CHANGED media-item transition). Removed-extension tracks fail during resolution and never
@@ -819,10 +821,8 @@ class PlayerEventListener(
     ) {
         consecutiveUnavailableSkips++
         recentSkipCauses.addLast(safeCause(cause, playbackError, detail))
-        // Mirrors safeCause's own test: `cause == null` is what renders as "StuckBuffering", so the two can
-        // never disagree about which family a skip belongs to. playbackError is included because a skip
-        // carrying only a PlaybackException is still a real error, not a stall.
-        if (cause != null || playbackError != null) recentSkipRunHadError = true
+        // maxOf, so the most decision-relevant cause in a mixed run survives — see recentSkipFamily.
+        recentSkipFamily = maxOf(recentSkipFamily, skipFamilyOf(cause, playbackError))
         if (recentSkipCauses.size > maxConsecutiveUnavailableSkips) recentSkipCauses.removeFirst()
     }
 
@@ -831,7 +831,7 @@ class PlayerEventListener(
     private fun resetConsecutiveSkips() {
         consecutiveUnavailableSkips = 0
         recentSkipCauses.clear()
-        recentSkipRunHadError = false
+        recentSkipFamily = SkipFamily.Stall
         lastWatchdogSkipMediaId = null
     }
 
@@ -860,6 +860,70 @@ class PlayerEventListener(
     // placed immediately after the class name because it QUALIFIES it; the http/msg fields are always null
     // on that path, so nothing is displaced. Callers must keep it low-cardinality -- see the note at the
     // watchdog's call site for why (report()'s dedupe signature includes this string).
+    /**
+     * Skip families, ORDERED BY PRECEDENCE — `maxOf` over a run keeps the later entry. See
+     * [recentSkipFamily] for why precedence and not last-wins.
+     */
+    private enum class SkipFamily { Stall, Error, Network, Unavailable, Internal }
+
+    /**
+     * Which family a single skip belongs to.
+     *
+     * ⚠️ EVERY TEST HERE IS AGAINST A TYPE WE OWN, THE JDK OWNS, OR MEDIA3 OWNS. Never a third-party
+     * class name, never a message string. We know the built-in extensions; we do not know the
+     * third-party universe, and there are dozens of extensions nobody here has read. A rule like
+     * `cause::class.simpleName == "TrackUnavailableException"` classifies correctly for the extensions
+     * that happen to have been seen and silently misfiles every other one — and misfiling INTO a muted
+     * family is invisible, which is the worst direction for this to fail in.
+     *
+     * That is why PlaybackException.errorCode carries so much of the load: Media3 assigns it, so it means
+     * the same thing whoever wrote the extension. An extension that throws its own type with no Media3
+     * code and no recognised cause in the chain lands in [SkipFamily.Error], the residual family — which
+     * is the correct answer, not a gap. An unanticipated cause SHOWING UP as unanticipated is the signal;
+     * guessing it into Unavailable would mute a fault nobody has looked at yet.
+     *
+     * INTERNAL MATCHES NAMED TYPES ONLY. `is IllegalStateException` would route every unrelated app-side
+     * throw into the one bucket that is actually read. A guard earns Internal by being given a name.
+     */
+    private fun skipFamilyOf(cause: Throwable?, playbackError: PlaybackException?): SkipFamily {
+        // recordSkip(null) with no PlaybackException is the buffering watchdog — no throwable at all.
+        if (cause == null && playbackError == null) return SkipFamily.Stall
+
+        val chain = generateSequence(cause) { it.cause }.take(MAX_CAUSE_DEPTH).toList()
+
+        // 1. OURS. Named guards only — see the note above.
+        if (chain.any { it is WrongItemException }) return SkipFamily.Internal
+
+        // 2. REFUSED OR GONE. Our own unavailable types, Media3's HTTP/permission/not-found codes, and a
+        //    4xx from Media3's own datasource exception. A 4xx is the source declining, not a transport
+        //    problem, so it must be tested before the network branch.
+        if (chain.any { it is MediaUnavailableException || it is ExtensionNotFoundException })
+            return SkipFamily.Unavailable
+        when (playbackError?.errorCode) {
+            PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+            PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
+            PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> return SkipFamily.Unavailable
+        }
+        val http = chain.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
+        if (http != null && http.responseCode in 400..499) return SkipFamily.Unavailable
+
+        // 3. TRANSPORT. JDK/kotlinx types plus Media3's connection codes. SocketException is deliberately
+        //    absent for the same reason ErrorCategory.classify omits it: a mid-stream reset is a
+        //    per-track transient, not a connectivity failure, and lumping it here would hide it.
+        if (chain.any {
+                it is SocketTimeoutException || it is TimeoutCancellationException ||
+                    it is ConnectException || it is UnknownHostException || it is NoRouteToHostException
+            }) return SkipFamily.Network
+        when (playbackError?.errorCode) {
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> return SkipFamily.Network
+        }
+
+        // 4. RESIDUAL. Recognised as a real throwable, not recognised as anything in particular.
+        return SkipFamily.Error
+    }
+
     private fun safeCause(
         cause: Throwable?, playbackError: PlaybackException? = null, detail: String? = null
     ): String {
@@ -923,8 +987,15 @@ class PlayerEventListener(
         val skips = consecutiveUnavailableSkips
         val ext = extensionId ?: "unknown"
         healthMonitor?.report(
-            if (recentSkipRunHadError) HealthMonitor.ConsecutiveSkipErrorException(skips, ext, causes)
-            else HealthMonitor.ConsecutiveSkipStallException(skips, ext, causes),
+            when (recentSkipFamily) {
+                SkipFamily.Stall -> HealthMonitor.ConsecutiveSkipStallException(skips, ext, causes)
+                SkipFamily.Error -> HealthMonitor.ConsecutiveSkipErrorException(skips, ext, causes)
+                SkipFamily.Network -> HealthMonitor.ConsecutiveSkipNetworkException(skips, ext, causes)
+                SkipFamily.Unavailable ->
+                    HealthMonitor.ConsecutiveSkipUnavailableException(skips, ext, causes)
+                SkipFamily.Internal ->
+                    HealthMonitor.ConsecutiveSkipInternalException(skips, ext, causes)
+            },
             HealthMonitor.Scope.MEMORY_ONLY, 10 * 60 * 1000L
         )
         resetConsecutiveSkips()
