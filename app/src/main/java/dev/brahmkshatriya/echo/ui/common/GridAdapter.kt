@@ -141,7 +141,17 @@ interface GridAdapter {
             // quantity from the same premise.
             //
             // Requires the span-group index cache, which is already enabled below.
-            layoutManager.isUsingSpansToEstimateScrollBarDimensions = true
+            //
+            // ⚠️ "Scrollbar", LOWERCASE b — the ACCESSORS DISAGREE WITH THE FIELD. Verified against the
+            // recyclerview 1.4.0 jar with javap, not from docs:
+            //     public void    setUsingSpansToEstimateScrollbarDimensions(boolean)
+            //     public boolean isUsingSpansToEstimateScrollbarDimensions()
+            // while the private field is `mUsingSpansToEstimateScrollBarDimensions` (capital B), and so is
+            // the setter's own PARAMETER name. Reading the field name and inferring the accessor is what
+            // produced an "Unresolved reference" here on 2026-09-05. Property-synthesis is not the issue —
+            // Kotlin synthesises `isX`/`setX` pairs fine, as `view.isVerticalScrollBarEnabled = false` in
+            // FastScrollerHelper already proves — the name was simply spelt wrong by one letter.
+            layoutManager.isUsingSpansToEstimateScrollbarDimensions = true
             recycler.adapter = gridAdapter.adapter
             recycler.layoutManager = layoutManager
             recycler.addItemDecoration(VerticalSpacingItemDecoration(8.dpToPx(context), gridAdapter))
