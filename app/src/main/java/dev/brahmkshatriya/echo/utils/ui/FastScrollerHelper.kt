@@ -54,8 +54,35 @@ object FastScrollerHelper {
      * Null-receiver tolerant: `applyTo` returns null whenever the scroller is not applied (setting off, or
      * on TV), so call sites can wire this unconditionally instead of guarding.
      */
+    /**
+     * Pads the scroll TRACK so it clears the system bars and the mini-player.
+     *
+     * ⚠️ [top] IS A PARAMETER BECAUSE THE ANSWER DIFFERS BY LAYOUT, and getting it wrong is invisible
+     * until someone looks closely at where the thumb sits. It defaults to [UiViewModel.Insets.top], which
+     * is right for a FULL-BLEED list — Home, Search, Library, History put the RecyclerView under the
+     * status bar, so the track must start below it.
+     *
+     * It is WRONG for a list inside a CoordinatorLayout + AppBarLayout (MediaDetailsFragment,
+     * FeedFragment). There, HeaderScrollingViewBehavior sizes the RecyclerView to roughly
+     * `viewport - collapsedToolbarHeight` and CoordinatorLayout positions it BELOW the header, so the
+     * status bar belongs to the AppBarLayout and not to this view. Adding it anyway inset the track by a
+     * status bar that is not there: the track started too low and was too short, so the thumb sat below
+     * the top of its own track at scroll zero (looking "parked mid-track") and the thumb-to-content
+     * mapping was compressed by that amount. Those sites pass `top = 0`.
+     *
+     * THE TEST TO APPLY at any new call site: does the RecyclerView itself extend under the status bar?
+     * The same question `View.applyContentInsets` answers with its `vertical` argument — and the two must
+     * agree about the same view, since they are padding the content and the track of one list. Where
+     * applyContentInsets is given a top of 0, this must be too.
+     *
+     * ⚠️ Fixes the thumb's POSITION only. The collapsing-layout screens ALSO had a dead drag, and that was
+     * an unrelated OnItemTouchListener registration-order problem — see the note at those call sites.
+     */
     fun FastScroller?.applyInsets(
-        context: Context, insets: UiViewModel.Insets, extraBottom: Int = 0
+        context: Context,
+        insets: UiViewModel.Insets,
+        extraBottom: Int = 0,
+        top: Int = insets.top,
     ) {
         this ?: return
         val pad = 8.dpToPx(context)
@@ -73,7 +100,7 @@ object FastScrollerHelper {
         val far = insets.start + pad
         val left = if (!isRtl) far else edge
         val right = if (!isRtl) edge else far
-        setPadding(Rect(left, insets.top + pad, right, insets.bottom + extraBottom + pad))
+        setPadding(Rect(left, top + pad, right, insets.bottom + extraBottom + pad))
     }
 
     /**
@@ -99,13 +126,20 @@ object FastScrollerHelper {
      *
      * It matters because `more` (the ⋯ overflow) is the rightmost control on every media row -
      * item_shelf_media, item_history, item_shelf_video - so the strip overlaps it.
-     * ➤ TEST THIS before the SCROLL_BAR default is ever flipped to true: scroller on, tap ⋯ near the
-     *   right edge of a feed row in a long list, and see whether the menu opens or the tap is eaten.
-     *   If it is eaten, that is a stronger argument against default-on than upstream issue #53.
-     * ➤ THE FIX, if needed: `afs_min_touch_target_size` is read with Resources.getDimensionPixelSize,
-     *   so an app-side <dimen> of that name overrides the library's 48dp by normal resource merging -
-     *   no fork required. It shrinks the THUMB's grab area too, and takes it under the 48dp
-     *   accessibility floor, so do not apply it pre-emptively.
+     *
+     * ✅ TESTED ON DEVICE 2026-09-04 — ACCEPTABLE, AND THIS GATE IS CLOSED. Do not re-run it, and do not
+     * reach for the dimen override below. The reasoning above OVERSTATED the reach: the collision is
+     * THUMB-POSITION-ONLY, not track-wide. Only the ⋯ on the single row the thumb is physically sitting
+     * in front of is unreachable; rows at the same right edge above and below it open their menus
+     * normally. So the cost is one row briefly blocked by a VISIBLE control, cleared by scrolling - not
+     * an invisible strip eating taps down the whole edge, which is what the paragraph above predicted and
+     * what would genuinely have argued against default-on.
+     *
+     * ➤ THE FIX, NOT APPLIED AND NOT NEEDED: `afs_min_touch_target_size` is read with
+     *   Resources.getDimensionPixelSize, so an app-side <dimen> of that name overrides the library's 48dp
+     *   by normal resource merging - no fork required. It shrinks the THUMB's grab area too and takes it
+     *   under the 48dp accessibility floor, which is why it stays unapplied: the measured cost does not
+     *   justify it. Kept here only so the option is documented if the behaviour ever changes upstream.
      */
     private fun FastScrollerBuilder.applyEchoStyle(context: Context) {
         setTrackDrawable(AppCompatResources.getDrawable(context, R.drawable.fast_scroll_track)!!)

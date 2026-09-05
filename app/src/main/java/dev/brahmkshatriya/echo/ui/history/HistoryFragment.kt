@@ -10,9 +10,8 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.recyclerview.widget.ConcatAdapter
 import dev.brahmkshatriya.echo.R
-import dev.brahmkshatriya.echo.common.models.EchoMediaItem
-import dev.brahmkshatriya.echo.common.models.Radio
 import dev.brahmkshatriya.echo.databinding.FragmentHistoryBinding
+import dev.brahmkshatriya.echo.playback.MediaItemUtils.isReplayableContext
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.trackRadioPlaceholder
 import dev.brahmkshatriya.echo.ui.main.HeaderAdapter
 import dev.brahmkshatriya.echo.ui.main.MainFragment.Companion.applyInsets
@@ -31,17 +30,34 @@ class HistoryFragment : Fragment(R.layout.fragment_history) {
     private val adapter = HistoryAdapter(this) { item ->
         val track = item.track ?: return@HistoryAdapter
         val context = item.context
-        if (context is EchoMediaItem.Lists) {
+        if (context.isReplayableContext()) {
             // Load the context fresh and play current+upcoming from the tapped track's fresh version
             // (backfillQueue now sets+plays the whole queue). The stored track is NOT replayed — only
             // its id locates the fresh one — so a frozen/stale streamable token can't skip the tap.
             playerViewModel.backfillQueue(item.extensionId, context, false, track.id)
         } else {
-            // Bare-track / Radio seed: stamp a display-only "<track> Radio" context so the header reads
-            // "Playing from <track> Radio" from the first second. It's marked LABEL_ONLY_RADIO, so radio
-            // generation still runs off a null context (unchanged) — this is purely the label.
-            val seedContext =
-                if (context is Radio || context == null) trackRadioPlaceholder(track) else context
+            // Seed path: force the STARTING TRACK, keep the station. The queue is set to the tapped track
+            // alone; PlayerRadio then generates from it and APPENDS (PlayerRadio.play uses addMediaItems),
+            // so the tapped track plays first and the station continues behind it.
+            //
+            // ⚠️ THE REAL CONTEXT PASSES THROUGH — the placeholder is for context == null ONLY. A stored
+            // Radio keeps its own id/title/cover, so "Neil Young Radio / Heart of Gold" plays Heart of Gold
+            // and then continues as Neil Young Radio. That works because loadPlaylist's marker strip is a
+            // `takeUnless` aimed at LABEL_ONLY_RADIO alone: an unmarked Radio reaches radio(track, context)
+            // untouched, and DeezerRadioClient's Track branch preserves station identity per RadioKind
+            // (ARTIST rebuilds from context.id/title, PLAYLIST/ALBUM return the context itself).
+            // Replacing it with trackRadioPlaceholder would discard the station's name AND regenerate from
+            // the track instead — a different station wearing the wrong label.
+            //
+            // ⚠️ Radio REACHES THIS BRANCH ONLY BECAUSE OF isReplayableContext: Radio is an
+            // EchoMediaItem.Lists, so a plain `is Lists` test above swallowed it and the old
+            // `context is Radio` check here was dead code from July until 2026-09-04. Do not weaken that
+            // predicate back to a type test.
+            //
+            // The placeholder still earns its keep for a bare track (context == null): there is no station
+            // to name, so it stamps a display-only "<track> Radio" header from the first second, marked
+            // LABEL_ONLY_RADIO so generation still runs off a null context exactly as before.
+            val seedContext = context ?: trackRadioPlaceholder(track)
             playerViewModel.setQueue(item.extensionId, listOf(track), 0, seedContext)
             playerViewModel.setPlaying(true)
         }

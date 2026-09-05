@@ -150,13 +150,6 @@ class DeezerSearchClient(private val deezerExtension: DeezerExtension, private v
             searchHomePipe.await() to exploreTab.await()
         }
 
-        runCatching { withTimeout(5000) { api.page("channels") } }
-            .onSuccess { logSections("channels", it) }
-            .onFailure { println("GladixDeezer PAGE[channels] ERROR: ${it.message}") }
-        runCatching { withTimeout(5000) { api.page("channels/home-pipe") } }
-            .onSuccess { logSections("home-pipe", it) }
-            .onFailure { println("GladixDeezer PAGE[channels/home-pipe] ERROR: ${it.message}") }
-
         return searchHomePipeShelves + exploreTabShelves
     }
 

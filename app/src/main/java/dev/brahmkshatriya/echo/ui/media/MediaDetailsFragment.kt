@@ -101,6 +101,13 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val binding = FragmentMediaDetailsBinding.bind(view)
+        // ⚠️ ORDER IS LOAD-BEARING: the ItemTouchHelper is attached BEFORE the fast scroller,
+        // matching HomeFragment/LibraryFragment/SearchFragment. Both are OnItemTouchListeners and
+        // RecyclerView.dispatchOnItemTouch walks mOnItemTouchListeners IN REGISTRATION ORDER, latching
+        // the first that intercepts — upstream AndroidFastScroll issue #53. This file and FeedFragment
+        // had the opposite order and were the only two screens where the fast-scroll thumb rendered but
+        // refused to drag. Do not reorder these two lines.
+        getTouchHelper(feedListener).attachToRecyclerView(binding.recyclerView)
         // Handle KEPT and re-padded below. Discarding it left the track on applyTo's flat 8dp forever,
         // running under the mini-player and nav bar.
         val scroller = FastScrollerHelper.applyTo(binding.recyclerView)
@@ -108,7 +115,14 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
         applyInsets(viewModel.uiResultFlow, uiViewModel.tvMiniPlayerVisible) {
             val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(binding.recyclerView.context) else 0
             binding.recyclerView.applyContentInsets(it, 20, 0, 16 + miniExtra)
-            scroller.applyInsets(binding.recyclerView.context, it)
+            // top = 0, disagreeing with the full-bleed screens ON PURPOSE — see applyInsets' `top` param.
+            // This RecyclerView sits BELOW the AppBarLayout in a CoordinatorLayout, so it never extends
+            // under the status bar; the header does. Adding insets.top here inset the scroll TRACK by a
+            // status bar that is not in this view, parking the thumb below the top of its own track (the
+            // "mid-track at rest" symptom). Matches the `0` passed to applyContentInsets on the line above:
+            // one view, one answer about the top inset.
+            // ⚠️ This fixes the thumb's POSITION, not the dead drag — that was the listener order above.
+            scroller.applyInsets(binding.recyclerView.context, it, top = 0)
         }
         val lineAdapter = LineAdapter()
         observe(trackFeedData.shouldShowEmpty) {
@@ -117,7 +131,6 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
         observe(viewModel.uiResultFlow) { result ->
             mediaHeaderAdapter.result = result
         }
-        getTouchHelper(feedListener).attachToRecyclerView(binding.recyclerView)
         binding.recyclerView.itemAnimator = null
         configureGridLayout(
             binding.recyclerView,

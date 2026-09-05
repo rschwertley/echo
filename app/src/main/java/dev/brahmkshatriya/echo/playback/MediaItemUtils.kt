@@ -20,6 +20,8 @@ import dev.brahmkshatriya.echo.common.models.Radio
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.di.App
+import kotlin.contracts.ExperimentalContracts
+import kotlin.contracts.contract
 import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.playback.PlayerService.Companion.selectServerIndex
@@ -32,6 +34,34 @@ import kotlin.io.encoding.Base64
 import kotlin.text.Charsets.UTF_8
 
 object MediaItemUtils {
+
+    /**
+     * Can this stored context be RE-LOADED and the original track found inside it again?
+     *
+     * Named for the question because three call sites previously asked it three different ways — each
+     * spelled `is EchoMediaItem.Lists` inline — and a fourth would have made the same mistake. Anything
+     * that locates a stored track inside a freshly loaded context must ask THIS, not the type.
+     *
+     * ⚠️ RADIO IS EXCLUDED EVEN THOUGH IT IS AN [EchoMediaItem.Lists] (see Radio's declaration — that
+     * supertype is exactly what made this a bug). A radio REGENERATES on every load: the list that comes
+     * back is a different station, so the stored track's id can never be found in it and any index lookup
+     * against one is guaranteed to miss. Before 2026-09-04 a Radio context fell into the Lists branch at
+     * every site, the miss hit an `?: 0` fallback, and History played the new station's FIRST track instead
+     * of the one tapped — for two months, silently, because the fallback looked like a sane default.
+     *
+     * A radio history tap belongs on the seed path instead: play the tapped track, let PlayerRadio append
+     * a freshly generated station after it. That path already resolves through MediaState.Unloaded, so
+     * routing here replays no stored streamable state and strips no extras.
+     *
+     * Returning true implies [EchoMediaItem.Lists] via a contract, so existing smart casts at the call
+     * sites keep working.
+     */
+    // Fully qualified: this file imports androidx.annotation.OptIn, which is NOT the annotation needed here.
+    @kotlin.OptIn(ExperimentalContracts::class)
+    fun EchoMediaItem?.isReplayableContext(): Boolean {
+        contract { returns(true) implies (this@isReplayableContext is EchoMediaItem.Lists) }
+        return this is EchoMediaItem.Lists && this !is Radio
+    }
 
     // Marker on a seed's context that means "display-only radio label, not a real radio to generate".
     // PlayerRadio strips a context carrying this before calling extension.radio(), so radio GENERATION

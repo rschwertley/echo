@@ -86,16 +86,47 @@ class PlayerRadio(
             stateFlow.value = if (tracks.continuation == null) PlayerState.Radio.Empty
             else loaded.copy(cont = tracks.continuation)
 
-            val item = tracks.data.map {
-                MediaItemUtils.build(
-                    app,
-                    downloadFlow.value,
-                    MediaState.Unloaded(loaded.clientId, it),
-                    loaded.context
-                )
-            }
-
             withContext(Dispatchers.Main) {
+                // ⚠️ NEVER APPEND THE TRACK THAT IS PLAYING RIGHT NOW.
+                //
+                // WHY HERE AND NOT IN THE EXTENSION, which is the obvious instinct since that is where the
+                // duplicate comes from: the invariant is a property of THE PLAYER forcing a first track, not
+                // of any extension's radio algorithm. DeezerRadioClient does filter its seed out of results
+                // — but only for RadioKind.TRACK (see its `if (kind == RadioKind.TRACK)` branch), because
+                // TRACK used to be the only kind that ever had a track forced ahead of it. ARTIST and FLOW
+                // are unfiltered, and ARTIST could not filter correctly anyway: its Radio carries
+                // `id = <artist id>`, so an `it.id != radio.id` test compares track ids against an artist id
+                // and never matches. PLAYLIST/ALBUM deliberately re-include their own seeds. Fixing it
+                // per-kind in Deezer would need a new seed_id extra on two branches AND would leave every
+                // other extension carrying the same bug — the filter belongs on the side that created the
+                // situation.
+                //
+                // WHAT MADE THIS REACHABLE: History taps on a Radio context now force the tapped track as
+                // the queue and let the stored station generate behind it (HistoryFragment's seed branch),
+                // so a non-TRACK station is generated behind a forced first track for the first time. It
+                // also covers the pre-existing case of an album auto-radio returning the album's last track.
+                //
+                // Applied to EVERY append, not just the first: a station appending the currently playing
+                // track is wrong whenever it happens, and topUpQueue reaches this same function.
+                //
+                // ⚠️ THIS CAN EMPTY THE APPEND. If a page returns only the current track, addMediaItems gets
+                // an empty list and the queue does not grow. That is a NO-OP, not a stall: stateFlow was
+                // already advanced above, so a continuation leaves Loaded and the next topUpQueue loads the
+                // NEXT page, while a null continuation leaves Empty and startRadio/topUpQueue call
+                // loadPlaylist() to regenerate. The one behaviour change is that a station whose entire
+                // remaining content is the current track now ENDS instead of replaying that track — which is
+                // the correct outcome and the point of the filter.
+                val currentId = player.currentMediaItem?.track?.id
+                val item = tracks.data
+                    .filter { currentId == null || it.id != currentId }
+                    .map {
+                        MediaItemUtils.build(
+                            app,
+                            downloadFlow.value,
+                            MediaState.Unloaded(loaded.clientId, it),
+                            loaded.context
+                        )
+                    }
                 player.addMediaItems(item)
                 if (player.playbackState == Player.STATE_IDLE) player.prepare()
             }

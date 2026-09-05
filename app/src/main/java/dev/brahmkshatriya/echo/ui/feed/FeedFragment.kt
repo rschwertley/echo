@@ -135,13 +135,23 @@ class FeedFragment : Fragment(R.layout.fragment_generic_collapsable) {
             val binding = FragmentRecyclerWithRefreshBinding.bind(view)
             val recyclerView = binding.recyclerView as RecyclerView
             val uiViewModel by activityViewModel<UiViewModel>()
+            // ⚠️ ORDER IS LOAD-BEARING: the ItemTouchHelper is attached BEFORE the fast scroller,
+            // matching HomeFragment/LibraryFragment/SearchFragment. Both are OnItemTouchListeners and
+            // RecyclerView.dispatchOnItemTouch walks mOnItemTouchListeners IN REGISTRATION ORDER, latching
+            // the first that intercepts — upstream AndroidFastScroll issue #53. This file and FeedFragment
+            // had the opposite order and were the only two screens where the fast-scroll thumb rendered but
+            // refused to drag. Do not reorder these two lines.
+            getTouchHelper(listener).attachToRecyclerView(recyclerView)
             // Hoisted above the inset block so the handle exists when the block first runs; it is kept and
             // re-padded there rather than left on applyTo's flat 8dp.
             val scroller = FastScrollerHelper.applyTo(recyclerView)
             applyInsets(uiViewModel.tvMiniPlayerVisible) {
                 val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(recyclerView.context) else 0
                 recyclerView.applyContentInsets(it, 20, 8, 16 + miniExtra)
-                scroller.applyInsets(recyclerView.context, it)
+                // top = 0 — same reason as MediaDetailsFragment: fragment_generic_collapsable puts this
+                // RecyclerView below an AppBarLayout in a CoordinatorLayout, so the status bar is the
+                // header's, not this view's. applyContentInsets above likewise adds no insets.top.
+                scroller.applyInsets(recyclerView.context, it, top = 0)
             }
             configureGridLayout(
                 recyclerView,
@@ -149,7 +159,6 @@ class FeedFragment : Fragment(R.layout.fragment_generic_collapsable) {
             )
             (recyclerView as? TvAwareRecyclerView)?.navRailView =
                 requireActivity().findViewById(R.id.navRailContainer)
-            getTouchHelper(listener).attachToRecyclerView(recyclerView)
 
             // ══ PREFETCH TRIGGER ══ See FeedData.warmTracks for the gates and the reasoning.
             // Scroll-settle, not long-press: what predicts opening an item is looking at it. A long-press

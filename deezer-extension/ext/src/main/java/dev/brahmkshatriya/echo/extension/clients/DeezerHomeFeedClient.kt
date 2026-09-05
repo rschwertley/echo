@@ -11,7 +11,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -30,10 +29,6 @@ class DeezerHomeFeedClient(
         deezerExtension.handleArlExpiration()
         val jsonObject = api.page("home")
         logSections("home", jsonObject, parser)
-
-        runCatching { withTimeout(5000) { api.page("channels/home-pipe") } }
-            .onSuccess { logSections("channels/home-pipe", it, parser) }
-            .onFailure { println("GladixDeezer PAGE[channels/home-pipe] ERROR: ${it.message}") }
 
         val homePageResults = jsonObject["results"]?.jsonObject ?: JsonObject(emptyMap())
         val homeSections = homePageResults["sections"]?.jsonArray ?: JsonArray(emptyList())
@@ -58,7 +53,11 @@ class DeezerHomeFeedClient(
                     else -> async(dispatcher) {
                         runCatching {
                             parser.run {
-                                section.toShelfItemsList(title)
+                                // Same resolver the category path uses, so a carousel's "see all" and a
+                                // channel tile reach a page the same way. Null target → re-wrap fallback.
+                                section.toShelfItemsList(title) { target ->
+                                    deezerExtension.channelFeed(target)
+                                }
                             }
                         }.getOrNull()
                     }
@@ -80,6 +79,11 @@ class DeezerHomeFeedClient(
                 val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "?"
                 val layout = obj["layout"]?.jsonPrimitive?.contentOrNull ?: "?"
                 val moduleId = obj["module_id"]?.jsonPrimitive?.contentOrNull ?: "?"
+                // The section-level "see all" page path, e.g. /channels/module/<uuid> — the same shape
+                // api.page(target.substringAfter("/")) consumes. "?" means the section has none and its
+                // arrow can only re-wrap. Confirmed populated on Search 2026-09-04; logged here to settle
+                // whether Home's sections carry them too.
+                val target = obj["target"]?.jsonPrimitive?.contentOrNull ?: "?"
                 val items = obj["items"]?.jsonArray ?: JsonArray(emptyList())
                 // Same __TYPE__ extraction as DeezerParser.hasChannelItems() so the logged
                 // breakdown reflects exactly the field that drives Home routing.
@@ -88,7 +92,7 @@ class DeezerHomeFeedClient(
                         .groupingBy { it }.eachCount()
                 }
                 val types = typeCounts.entries.joinToString(", ") { "${it.key}:${it.value}" }
-                "$title/$layout/$moduleId/items=${items.size}/types={$types}"
+                "$title/$layout/$moduleId/$target/items=${items.size}/types={$types}"
             }
             println("GladixDeezer PAGE[$label] sections: $summary")
         }

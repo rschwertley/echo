@@ -447,7 +447,19 @@ class PlayerCallback(
             throwableFlow.emit(it)
             return emptyList()
         }
-        val correctIndex = list.indexOfFirst { it.id == tappedTrackId }.takeIf { it >= 0 } ?: 0
+        // A miss means the freshly loaded context no longer contains the tapped track. Starting at the top
+        // is the defensible fallback for the case that actually causes it — a track deleted from the
+        // playlist since it was played — but it MUST NOT BE SILENT. Until 2026-09-04 a Radio context
+        // reached here (Radio is an EchoMediaItem.Lists), where a miss was GUARANTEED because a radio
+        // regenerates, and this fallback quietly played the new station's first track instead of the one
+        // tapped. Callers now gate on MediaItemUtils.isReplayableContext, so a miss here is genuinely
+        // unexpected. Log it rather than absorbing it.
+        val foundIndex = list.indexOfFirst { it.id == tappedTrackId }
+        if (foundIndex < 0) Log.w(
+            "GladixContext",
+            "tapped track not in freshly loaded context: ext=$extId ctx=${context.id} — starting at 0"
+        )
+        val correctIndex = foundIndex.coerceAtLeast(0)
         return list.subList(correctIndex, list.size).map {
             MediaItemUtils.build(app, downloadFlow.value, MediaState.Unloaded(extId, it), context)
         }

@@ -48,6 +48,7 @@ import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.history.HistoryRepository
 import dev.brahmkshatriya.echo.extensions.ExtensionUtils.isClient
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.extensionId
+import dev.brahmkshatriya.echo.playback.MediaItemUtils.isReplayableContext
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.track
 import dev.brahmkshatriya.echo.extensions.MediaState
 import dev.brahmkshatriya.echo.extensions.builtin.offline.OfflineExtension
@@ -673,14 +674,26 @@ abstract class AndroidAutoCallback(
             }
             if (cached != null) {
                 val (track, extId, con) = cached
-                if (con is EchoMediaItem.Lists) {
+                if (con.isReplayableContext()) {
                     val tracksEntry = tracksMap.values.find { (item, _) ->
                         item is EchoMediaItem.Lists && item.id == con.id
                     }
                     if (tracksEntry != null) {
                         val (item, pagedData) = tracksEntry
                         val allTracks = pagedData.loadAll()
-                        val tappedIndex = allTracks.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+                        // A miss here means the context no longer contains the tapped track — it was
+                        // removed from the playlist since it was played. Starting at the top is the
+                        // defensible fallback for that, but it must not be SILENT: an identical silent
+                        // fallback (this one and freshContextUpcoming's `?: 0`) hid a radio-routing bug for
+                        // two months by making the wrong track look like a deliberate default. Radio can no
+                        // longer reach here (isReplayableContext above), so a miss now genuinely means
+                        // "removed since".
+                        val rawIndex = allTracks.indexOfFirst { it.id == track.id }
+                        if (rawIndex < 0) Log.w(
+                            "GladixContext",
+                            "tapped track not in freshly loaded context: ctx=${con.id} — starting at 0"
+                        )
+                        val tappedIndex = rawIndex.coerceAtLeast(0)
                         // P2 — current+upcoming: drop the tracks before the tapped one so it lands at
                         // index 0 (matches phone playItem + freshContextUpcoming) — no stranded-above,
                         // zero persisted index.

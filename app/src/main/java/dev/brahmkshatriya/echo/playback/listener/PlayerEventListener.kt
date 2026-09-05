@@ -383,13 +383,13 @@ class PlayerEventListener(
     private fun armBufferingWatchdog() {
         Log.d("GladixPlayback", "STATE_BUFFERING: ${player.currentMediaItem?.mediaId} \"${player.currentMediaItem?.mediaMetadata?.title}\"")
         // Start (or keep) the cold-resolution grace timer for the current item.
-        val coldMediaId = player.currentMediaItem?.mediaId
-        if (coldMediaId != coldBufferingMediaId) {
-            coldBufferingMediaId = coldMediaId
-            coldBufferingStart = System.currentTimeMillis()
+        val graceMediaId = player.currentMediaItem?.mediaId
+        if (graceMediaId != resolveGraceMediaId) {
+            resolveGraceMediaId = graceMediaId
+            resolveGraceStart = System.currentTimeMillis()
             // PROBE (2026-08-29) - baseline for the `opens` delta, taken per ITEM rather than per arm so a
             // watchdog retry on the same track does not reset it. Anything the retries open still counts.
-            // This guard is `coldMediaId != coldBufferingMediaId`, i.e. it fires when the current mediaId
+            // This guard is `graceMediaId != resolveGraceMediaId`, i.e. it fires when the current mediaId
             // CHANGES - it is not inside the STATE_READY branch above, so the baseline does not depend on a
             // track ever having reached READY.
             openCountAtItemStart = StreamableDataSource.openCount.get()
@@ -401,16 +401,34 @@ class PlayerEventListener(
             delay(BUFFERING_WATCHDOG_MS)
             withContext(Dispatchers.Main) {
                 if (player.playbackState != Player.STATE_BUFFERING) return@withContext
-                // COLD-START SUPPRESSION: a first-time stream resolution is actively in flight
-                // (current item not loaded AND a load running) and we're still inside the grace
-                // window → the buffering is expected, not stuck. Re-arm and wait WITHOUT touching the
-                // player: stop()+re-prepare() would cancel the running loadJob and restart the
-                // resolution clock, skipping valid-but-slow cold tracks (the AA cold-connect bug).
-                if (player.currentMediaItem?.isLoaded == false
-                    && activeLoadCount() > 0
-                    && System.currentTimeMillis() - coldBufferingStart < COLD_GRACE_MS
+                // RESOLVE-IN-FLIGHT SUPPRESSION: a stream resolution is actively running and we are
+                // still inside the grace window → the buffering is expected, not stuck. Re-arm and wait
+                // WITHOUT touching the player: stop()+re-prepare() would cancel the running loadJob and
+                // restart the resolution clock, skipping valid-but-slow tracks.
+                //
+                // ⚠️ COLD START IS ONE INSTANCE OF THIS, NOT THE WHOLE OF IT. This gate carried an
+                // `isLoaded == false` conjunct until 2026-09-04, which confined it to first-time
+                // resolutions and so never fired on an ADVANCE: by then the item has been through
+                // buildLoaded, isLoaded is true, and a 2.4-3.8s resolve was killed and skipped by the 5s
+                // watchdog with nothing wrong (measured — createPeriod 338ms before the trip).
+                //
+                // WHY WIDENING IS SAFE FOR THE JUNE 30 AA COLD-CONNECT FIX, which is the non-obvious part:
+                // the old condition is a STRICT SUBSET of this one. `isLoaded == false && loads > 0`
+                // implies `loads > 0`, so every input that took the cold branch still takes it. The fix is
+                // preserved by construction, not by argument — there is no cold-path behaviour change to
+                // re-test.
+                //
+                // AND THE TIMER WAS ALREADY PER-ITEM, not per-cold-start — see resolveGraceStart, which is
+                // rekeyed whenever the current mediaId CHANGES. So on an advance the window measures from
+                // the moment that item became current, which is exactly the semantics wanted here. June
+                // 30's reason for keying it by mediaId rather than resetting from player callbacks (the
+                // cold-restore path fires onMediaItemTransition / PLAYLIST_CHANGED as part of
+                // setMediaItems, and callback-order resets were fragile there) is about NOT resetting from
+                // callbacks and is untouched by widening.
+                if (activeLoadCount() > 0
+                    && System.currentTimeMillis() - resolveGraceStart < RESOLVE_GRACE_MS
                 ) {
-                    Log.d("GladixPlayback", "Buffering watchdog: cold resolution in flight, re-arming")
+                    Log.d("GladixPlayback", "Buffering watchdog: resolve in flight, re-arming")
                     armBufferingWatchdog()
                     return@withContext
                 }
@@ -475,7 +493,7 @@ class PlayerEventListener(
                     // Deliberately NOT added, because they carry no information here:
                     //   time-in-buffering -- continuous (see the cardinality note below), and the grace
                     //     expiry it would show is already implied: reaching this branch with loaded=false
-                    //     loads=1+ can ONLY happen after COLD_GRACE_MS elapsed, or the cold branch above
+                    //     loads=1+ can ONLY happen after RESOLVE_GRACE_MS elapsed, or the cold branch above
                     //     would have re-armed instead.
                     //   retriedWatchdogCount -- always maxWatchdogRetries here; a constant.
                     //   mediaId / track title -- extension-authored, would need scrubbing, and item=
@@ -621,9 +639,17 @@ class PlayerEventListener(
         // at song start — a reboot/OS-kill/crash then resumes at 0. 5s loses at most ~5s of position and
         // writes a tiny POSITION-only file at most 12×/min while playing (negligible).
         private const val POSITION_SAVE_INTERVAL_MS = 5_000L
+        // How long the buffering watchdog defers while a stream resolution is IN FLIGHT (any item, cold or
+        // mid-queue — see the gate in armBufferingWatchdog; cold start is one instance, not the whole of it).
+        //
         // ≥ Deezer stream-resolution ceiling: DeezerApi clientNP connect 15s + read 10s;
         // getContentLength 10s. If clientNP ever gains a callTimeout, anchor to that instead.
-        private const val COLD_GRACE_MS = 25_000L
+        //
+        // ⚠️ MUST STAY BELOW StreamableLoader's withTimeout(30_000). That ordering is what keeps the
+        // widened gate bounded: a hung resolve loses the grace at 25s and the watchdog returns, and even if
+        // it did not, the loader throws TimeoutCancellationException at 30s onto the isTimeout error path.
+        // Two independent ceilings; raising this above 30s would remove the first and leave only the second.
+        private const val RESOLVE_GRACE_MS = 25_000L
         // Bounds for enriched skip-cause reporting (safeCause) — keep the Crashlytics non-fatal small and
         // spiral-proof: per-cause detail is capped, and only maxConsecutiveUnavailableSkips (3) causes are
         // ever joined, so lastCauses stays ~a few hundred chars regardless of how nested a message is.
@@ -714,12 +740,33 @@ class PlayerEventListener(
         involuntarySkipJob?.cancel()
         involuntarySkipJob = scope.launch(Dispatchers.Main, block = body)
     }
-    // Cold-resolution grace timer, keyed to the current item: restarts when the current mediaId
-    // changes (a new buffering episode) and persists across watchdog re-arms of the same item.
-    // Keyed by mediaId rather than reset via player callbacks, so it survives the
-    // onMediaItemTransition / PLAYLIST_CHANGED events that fire as part of the cold-restore setMediaItems.
-    private var coldBufferingStart = 0L
-    private var coldBufferingMediaId: String? = null
+    // Resolve grace timer, keyed to the CURRENT ITEM: restarts when the current mediaId changes (a new
+    // buffering episode) and persists across watchdog re-arms of the same item. Was named for cold start,
+    // but it was never cold-specific — the rekey is on mediaId change, so it has always measured per item.
+    // That is what lets the 2026-09-04 widening cover the advance path with no change to this timer.
+    //
+    // Keyed by mediaId rather than reset via player callbacks, so it survives the onMediaItemTransition /
+    // PLAYLIST_CHANGED events that fire as part of the cold-restore setMediaItems. That June 30 reasoning
+    // is about not resetting FROM CALLBACKS and is untouched by the widening.
+    //
+    // ⚠️ THE ONE REAL COST OF WIDENING, recorded so it is not rediscovered as a new fault:
+    // activeLoadCount (PlayerState) is a GLOBAL counter incremented per prepareSourceInternal, not per
+    // item. So an unrelated concurrent resolve can suppress the watchdog for a genuinely stuck CURRENT
+    // item. Bounded at RESOLVE_GRACE_MS by the window, and the window restarts per item, so it cannot
+    // compound across tracks. The counter's global nature was understood when the gate was built — the
+    // guarantee has always been "activeLoadCount reaches zero, or the cap expires", which is the same
+    // reasoning the report branch relies on ("loads=1+ can ONLY happen after RESOLVE_GRACE_MS elapsed").
+    //
+    // HOW NARROW THAT IS, in this app specifically: nothing prefetches. PreloadConfiguration was scoped on
+    // Aug 1, found to be buffering-only, and never shipped — there is no call to it in the tree. The only
+    // producer of a concurrent resolve is ExoPlayer preparing the NEXT period ahead of a transition, and it
+    // does that off the current period's buffered position — so an item that has buffered nothing never
+    // gets a neighbour prepared, and the `loaded=true buf=0` CDN stall still trips at 5s with loads=0.
+    // The suppressible case therefore needs a coincidence: the current item buffers some, then stalls
+    // mid-stream, WHILE the next item's resolve is slow. Narrow, but not theoretical — do not delete this
+    // note on the grounds that it cannot happen.
+    private var resolveGraceStart = 0L
+    private var resolveGraceMediaId: String? = null
     private var retriedMediaId: String? = null
     private var retriedWatchdogCount = 0
     private val maxWatchdogRetries = 1
@@ -1263,7 +1310,7 @@ class PlayerEventListener(
         // 1059 timeline confirms it end to end: detector at 10:32:09, breaker trip at 10:32:39, exactly
         // 3 x (5s retry + 5s skip) later.
         // The one caveat that DOES survive: at a lowered threshold it can fire on a genuinely slow cold
-        // resolve, so it still needs reconciling with COLD_GRACE_MS = 25_000 before the threshold moves.
+        // resolve, so it still needs reconciling with RESOLVE_GRACE_MS = 25_000 before the threshold moves.
         val isTimeout = rootCause is TimeoutCancellationException || rootCause is SocketTimeoutException
 
         // Benign media3 datasource teardown race — suppressed, but counted. The player/cache is torn down

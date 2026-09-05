@@ -43,13 +43,32 @@ class DeezerParser(private val session: DeezerSession) {
      * identically. The one field Search sets explicitly and this does not is `type = Type.Linear`; that is
      * already the default on Shelf.Lists.Items, so the two are the same shelf.
      *
-     * ⚠️ IT TERMINATES AFTER ONE LEVEL, BY TYPE, NOT BY A GUARD. The expansion emits Shelf.Item, and
-     * FeedType.toFeedTypes maps Shelf.Item to Media/Video — only `is Shelf.Lists<*>` produces a Header,
-     * and only a Header renders an arrow. So an expanded page contains no arrows and cannot expand again.
-     * A depth guard would be dead code. This holds as long as the expansion emits Items rather than Lists;
-     * if that ever changes, the recursion becomes reachable.
+     * ⚠️ DEPTH DEPENDS ON WHICH BRANCH THE ARROW TOOK, and the two differ.
      *
-     * ⚠️ THE ARROW COULD FETCH INSTEAD OF RE-WRAPPING, AND DEEZER'S OWN APP DOES. Deezer caps its
+     * RE-WRAP (no target): terminates after one level, BY TYPE, not by a guard. The expansion emits
+     * Shelf.Item, and FeedType.toFeedTypes maps Shelf.Item to Media/Video — only `is Shelf.Lists<*>`
+     * produces a Header and only a Header renders an arrow. An expanded page contains no arrows.
+     *
+     * FETCH (target present): does NOT terminate by type. `block` resolves to channelFeed, which returns
+     * Shelf.Lists built by THIS function — so the fetched page's rows carry arrows of their own, and any
+     * of those with a target fetch again. Depth is bounded by DEEZER'S OWN GRAPH, not by us: a page stops
+     * offering arrows when its sections stop carrying targets. That is a real bound in practice (a channel
+     * page's rows are plain item lists) but it is not one we enforce, and a cycle in their targets would
+     * loop. Left unguarded DELIBERATELY: a depth counter here would have to be threaded through
+     * channelFeed and every caller for a case not observed, and the navigation stack is the user's exit.
+     * If a loop is ever seen, the guard belongs at channelFeed — one place, with the target in hand.
+     *
+     * ⚠️ THE ARROW NOW FETCHES WHEN THE SECTION CARRIES A `target`, AND RE-WRAPS WHEN IT DOES NOT.
+     * Section targets are `/channels/module/<uuid>` — exactly the shape api.page(target.substringAfter("/"))
+     * consumes, the same resolution toChannel/channelFeed already use for ITEM-level targets. Confirmed
+     * populated on Search 2026-09-04 (six of eight sections; the two without are an unnamed horizontal-grid
+     * and "Explore all"), which is why the re-wrap fallback stays rather than the arrow being hidden: a
+     * vertical view of a long row is useful on its own and every row keeps one.
+     *
+     * COST: one page.get per TAP. The lambda does not run at feed-build time, so nothing is paid by a feed
+     * that is never expanded — the same cost profile a channel tile already has.
+     *
+     * Historical note, kept because it explains the shape: Deezer caps its
      * carousels on the main screens, and where it shows an expand arrow that arrow returns MORE items than
      * the row displayed — so there is real content behind some of these sections that this does not reach.
      * The way in is the section-level `target` field (DeezerSearchClient's logSections already reads one
@@ -59,14 +78,21 @@ class DeezerParser(private val session: DeezerSession) {
      * If you come back to make the arrow fetch, the section `target` is where to look — and note that a
      * fetched page returning Lists would make the termination note above no longer hold.
      */
-    fun JsonElement.toShelfItemsList(name: String = "Unknown"): Shelf? {
+    fun JsonElement.toShelfItemsList(
+        name: String = "Unknown",
+        block: (suspend (String) -> List<Shelf>)? = null,
+    ): Shelf? {
         val items = obj()["items"]?.jsonArray?.mapObjects { it.toEchoMediaItem() }.orEmpty()
+        // Section-level target, NOT the item-level one toChannel reads. Absent on some sections by design.
+        val target = obj().str("target")
         return items.takeIf { it.isNotEmpty() }?.let { list ->
             Shelf.Lists.Items(
                 id = name,
                 title = name,
                 list = list,
-                more = PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
+                more = if (block != null && !target.isNullOrBlank())
+                    Feed(emptyList()) { block(target).toFeedData() }
+                else PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
             )
         }
     }

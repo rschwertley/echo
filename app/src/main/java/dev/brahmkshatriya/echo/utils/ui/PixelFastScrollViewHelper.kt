@@ -1,8 +1,6 @@
 package dev.brahmkshatriya.echo.utils.ui
 
 import android.graphics.Canvas
-import android.util.Log
-import dev.brahmkshatriya.echo.utils.CrashKeys
 import android.view.MotionEvent
 import androidx.recyclerview.widget.RecyclerView
 import me.zhanghai.android.fastscroll.FastScroller
@@ -114,11 +112,6 @@ class PixelFastScrollViewHelper(
     private val view: RecyclerView
 ) : FastScroller.ViewHelper {
 
-    private companion object {
-        /** Smoothing factor for [perItemSpan]. SYMMETRIC — see [sampleSpan] for why it stopped being biased. */
-        const val SPAN_ALPHA = 0.05
-    }
-
     /**
      * True while FastScroller is driving the list from a touch it consumed. NOT `view.scrollState`: that
      * stays IDLE for the whole of a thumb drag, because FastScroller moves the list itself rather than
@@ -128,8 +121,8 @@ class PixelFastScrollViewHelper(
     private var gestureActive = false
 
     /**
-     * The list's scrollable span in estimate-pixels, captured ONCE at the start of each gesture. This is
-     * the single place the estimate enters a drag; everything after is finger deltas. Read [scrollTo].
+     * The list's scrollable span in content pixels, captured ONCE at the start of each gesture from
+     * [liveRange]. Read [scrollTo].
      */
     private var gestureSpan = 1
 
@@ -139,99 +132,8 @@ class PixelFastScrollViewHelper(
     /** Sub-pixel remainder carried between frames so a long slow drag cannot drift. */
     private var pendingPixels = 0.0
 
-    /**
-     * Running mean of `computeVerticalScrollRange() / itemCount` — the estimated height of ONE item,
-     * averaged over everywhere the user has scrolled. 0.0 until the first sample. Read by
-     * [estimatedRange], sampled by [sampleSpan].
-     *
-     * ⚠️ PER ITEM, NOT THE TOTAL RANGE, AND THAT IS WHAT MAKES IT SELF-CORRECTING ACROSS CONTENT CHANGES.
-     * A running mean of the total range would describe the list it was measured on, so a feed refresh or a
-     * Search tab switch would leave it describing a list that no longer exists, and it would need
-     * invalidating on adapter changes. Storing the per-item mean and multiplying by the LIVE itemCount at
-     * read time separates the two: item count is exact and always current, and the per-item mean stays
-     * representative as long as the new content is made of similar rows — which it is, since the same
-     * adapters build it. No reset needed, and no AdapterDataObserver to register or leak.
-     *
-     * WHY A MEAN AT ALL: ScrollbarHelper extrapolates from `avgSizePerRow = laidOutArea / itemRange`, and
-     * itemRange counts ITEMS, not rows. On Home and Search — full-span shelves alongside 2-up grid items —
-     * that per-item figure is roughly the span count larger in a shelf region than in a grid region, so a
-     * single live sample depends on WHERE the user grabbed the thumb, and the drag came out proportionally
-     * fast or slow by about 2x. On History, Library and Settings the LinearLayoutManager puts one item per
-     * row with near-uniform heights, the figure is the same everywhere, and a single sample was already
-     * correct — which is exactly why those three screens have always behaved and these two have not. The
-     * estimate stops depending on the grab point. It is a PLAIN mean, deliberately — an earlier revision
-     * biased it toward the largest observed figure and overshot; see [sampleSpan].
-     *
-     * WHICH SECTIONS ARE WHICH is FeedAdapter.getSpanSize: Header and HorizontalList always take the full
-     * span, and on a phone (sw < 600dp, `phoneSingleColumn`) Category, Media and Video do too. Only
-     * MediaGrid and VideoHorizontal take span 1, and CategoryGrid takes count/2 — those are the tile rows
-     * whose per-item figure is halved. NOTHING NEEDS ENUMERATING HERE, though: a section is sampled by
-     * whatever it actually measures, so a shelf type nobody anticipated is accounted for by construction
-     * rather than by this list being kept current.
-     */
-    private var perItemSpan = 0.0
-
     private fun liveRange() =
         view.computeVerticalScrollRange() + view.paddingTop + view.paddingBottom
-
-    /**
-     * Folds one observation into [perItemSpan]. Called from the scroll listener, so it samples wherever
-     * the user actually goes rather than wherever they happen to stop.
-     *
-     * ⚠️ SYMMETRIC. IT WAS ASYMMETRIC (rise 0.2 / fall 0.02) AND THAT WAS A REASONING ERROR — do not
-     * reinstate the bias without re-reading this.
-     *
-     * On-device testing (2026-09-02) found that grabbing the thumb with carousels filling the screen
-     * reached the end of the list exactly, while grabbing with tiles filling the screen landed short.
-     * At that time gestureSpan was a LIVE sample of whatever region was under the finger, so the correct
-     * reading of that result is narrow: A CAROUSEL REGION'S per-item figure is approximately the true
-     * item-weighted mean. It was instead generalised to "the LARGEST per-item figure ever observed is the
-     * true mean", and the estimate biased toward that maximum. Those are different quantities and the
-     * second is strictly larger, so every grab then got a span above the truth — each finger pixel bought
-     * too much scroll and the page reached the end before the finger reached the bottom of the track.
-     * The 2026-09-03 build showed exactly that.
-     *
-     * The target is the true ITEM-WEIGHTED mean, `totalContentHeight / itemCount`, and nothing about the
-     * evidence says it sits at the top of the observed range — only that it is near a carousel region's
-     * figure, which tile regions pull down from.
-     *
-     * KNOWN RESIDUAL, so it is not mistaken for a new fault: samples arrive from onScrolled, roughly one
-     * per frame of scrolling, so they are PIXEL-weighted rather than ITEM-weighted. A region contributes
-     * samples in proportion to its pixel height, and tall-per-item regions occupy more pixels per item, so
-     * even a symmetric mean sits slightly ABOVE the item-weighted truth — mathematically the ratio of the
-     * second moment to the first rather than the first to the count. Expect a small residual overshoot.
-     * If that turns out to matter, the principled fix is to weight by ITEMS traversed instead: accumulate
-     * `pixels += |dy|` and `items += |dy| / sample`, and take `pixels / items`, which is literally
-     * height-over-count across everywhere the user has been. Do that only with evidence; it is more
-     * machinery than a single alpha.
-     *
-     * A fling delivers onScrolled roughly per frame, so a single flick is ~60 samples — enough to
-     * converge well within one gesture.
-     */
-    private fun sampleSpan() {
-        val itemCount = view.adapter?.itemCount ?: return
-        if (itemCount <= 0) return
-        val range = view.computeVerticalScrollRange()
-        if (range <= 0) return
-        val sample = range.toDouble() / itemCount
-        perItemSpan =
-            if (perItemSpan == 0.0) sample else perItemSpan + SPAN_ALPHA * (sample - perItemSpan)
-    }
-
-    /**
-     * The list's total scrollable height, from the running per-item mean scaled by the LIVE item count.
-     *
-     * Falls back to [liveRange] when no sample has been taken yet, which is the pre-convergence case and
-     * is exactly the behaviour this replaces — never worse than a single live read, only better once the
-     * mean exists. In practice a sample almost always exists before it can be read: the thumb auto-hides
-     * and is shown by FastScroller's onScrollChanged, so the list has to have scrolled at least once
-     * before the thumb can be grabbed, and that same scroll feeds [sampleSpan].
-     */
-    private fun estimatedRange(): Int {
-        val itemCount = view.adapter?.itemCount ?: 0
-        if (perItemSpan == 0.0 || itemCount <= 0) return liveRange()
-        return (perItemSpan * itemCount).toInt() + view.paddingTop + view.paddingBottom
-    }
 
     /**
      * LIVE, deliberately — an earlier revision froze this for the duration of a gesture and it was the
@@ -363,35 +265,41 @@ class PixelFastScrollViewHelper(
      */
     override fun scrollTo(offset: Int) {
         view.stopScroll()
-        // The span FastScroller itself just multiplied by, so dividing recovers its thumbOffset fraction.
-        // Two DIFFERENT spans, deliberately. `liveSpan` must be the value FastScroller itself just
-        // multiplied by, or dividing would not recover its thumb fraction — so it stays live. `gestureSpan`
-        // converts that fraction into content pixels and is the one place the estimate enters the drag, so
-        // it comes from the running mean instead of a single window-dependent sample.
+        // ONE SCALE, and that is the whole fix. `liveSpan` is the value FastScroller itself just multiplied
+        // by, so dividing recovers its thumb fraction; `gestureSpan` converts that fraction back into
+        // content pixels. They are now the SAME number — see the note on [gestureSpan]'s assignment below.
         val liveSpan = (liveRange() - view.height).coerceAtLeast(1)
         val fraction = offset.toDouble() / liveSpan
         if (!gestureActive || lastFraction.isNaN()) {
-            gestureSpan = (estimatedRange() - view.height).coerceAtLeast(1)
-            // ⚠️ TRACE — REMOVE WITH THE INVESTIGATION.
-            // Prints BOTH SIDES OF THE ONE COMPARISON THAT MATTERS: est is EMA-derived
-            // (perItemSpan * itemCount + padding), live is measured now (liveRange()). Both are
-            // padding-inclusive so they are directly comparable, and est/live is the calibration error —
-            // 1.00 means the EMA agrees with the layout.
-            // An earlier version printed the RAW computeVerticalScrollRange() beside gestureSpan, which
-            // looked subtractable and was not: gestureSpan comes from est, not from the raw call, and the
-            // raw call omits padding. perItem is printed with a decimal because at 150+ items one unit of
-            // it is 150+ px of range, and truncating made the arithmetic uncheckable.
-            // WHAT TO READ: a stable est/live is fine at any value (Home sits at 1.20 and behaves); an
-            // est/live that MOVES between grabs on an unchanging screen is the fault.
-            Log.d(
-                "GladixScroll",
-                "gesture start: perItem=%.2f items=%d est=%d live=%d est/live=%.2f gestureSpan=%d viewH=%d feedLoads=%d"
-                    .format(
-                        perItemSpan, view.adapter?.itemCount ?: 0, estimatedRange(), liveRange(),
-                        if (liveRange() > 0) estimatedRange().toDouble() / liveRange() else 0.0,
-                        gestureSpan, view.height, CrashKeys.feedLoadCount()
-                    )
-            )
+            // ⚠️ FOURTH ATTEMPT AT gestureSpan, AND IT WORKS BY DELETING WHAT THE OTHER THREE WERE TUNING.
+            // DO NOT REINTRODUCE AN ESTIMATE HERE. Three revisions calibrated a running per-item mean —
+            // live sample, then asymmetric EMA, then symmetric EMA — and each was wrong by a different
+            // amount because they were all estimating a quantity that does not exist.
+            //
+            // RecyclerView's computeVerticalScrollRange is not a measurement of the content. Read
+            // ScrollbarHelper.computeScrollRange (recyclerview 1.4.0): it returns
+            // `laidOutArea / laidOutRange * itemCount` — an extrapolation from whichever children are
+            // attached RIGHT NOW. On a mixed feed (full-span shelves beside 2-up tiles) that is
+            // position-dependent by construction, so there is no true content height to converge on. A
+            // capture on Search, 33 items throughout, measured 4082 at the top and 5918 further down and
+            // then exactly 4082 again on returning — the repeat is determinism, not oscillation: same
+            // viewport, same children, same arithmetic. No mean can smooth that into a fixed number.
+            //
+            // AND ACCURACY WAS NEVER THE REQUIREMENT. The thumb does not need to know how tall the content
+            // is; it needs the DRAG and the THUMB to share one scale. FastScroller draws the thumb from
+            // getScrollOffset()/getScrollRange(), both of which come from that same extrapolation, so the
+            // thumb is self-consistent however the scale moves. gestureSpan was the only quantity taken
+            // from somewhere else — and being derived from an average across every region scrolled, it sat
+            // ABOVE the live value at almost any grab point (est/live measured 1.19-1.69), so each finger
+            // pixel bought too much scroll and the thumb ran ahead. Setting it to liveSpan makes the two
+            // the same number, and the thumb stays under the finger by construction rather than by
+            // calibration.
+            //
+            // RESIDUAL, stated so it is not mistaken for a new fault: if the scale shifts DURING a long
+            // drag (new children attach with different heights), the fraction-to-pixels mapping drifts.
+            // But it drifts IDENTICALLY for the thumb and for the content, because both now read the same
+            // extrapolation — which is the property that matters. The estimate broke exactly that.
+            gestureSpan = liveSpan
             lastFraction = fraction
             pendingPixels = 0.0
             val jump = offset - view.computeVerticalScrollOffset()
@@ -419,7 +327,6 @@ class PixelFastScrollViewHelper(
     override fun addOnScrollChangedListener(onScrollChanged: Runnable) {
         view.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                sampleSpan()
                 onScrollChanged.run()
             }
         })

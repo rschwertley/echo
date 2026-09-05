@@ -382,7 +382,10 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
                 async(Dispatchers.Default) {
                     parser.run {
                         section.jsonObject["title"]?.jsonPrimitive?.content
-                            ?.let { section.toShelfItemsList(it) }
+                            // Recursive by design: a channel page's rows get fetching arrows too when they
+                            // carry a target. See toShelfItemsList's depth note — bounded by Deezer's graph,
+                            // not by us.
+                            ?.let { section.toShelfItemsList(it) { t -> channelFeed(t) } }
                     }
                 }
             }.awaitAll().filterNotNull()
