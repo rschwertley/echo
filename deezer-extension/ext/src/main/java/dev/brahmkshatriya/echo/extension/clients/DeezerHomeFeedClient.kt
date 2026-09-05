@@ -37,9 +37,18 @@ class DeezerHomeFeedClient(
             homeSections.mapNotNull { section ->
                 val obj = section.asObjectOrNull() ?: return@mapNotNull null
                 val id = obj.optString("module_id") ?: return@mapNotNull null
-                // REMOVE WITH THE TRACE. A section with no title is dropped here and never reaches the
-                // parser, so it vanishes from Home with no signal — the same silence that hid "Made for
-                // you". module_id is printed because it is the only stable handle on a titleless section.
+                // ⚠️ PERMANENT — NOT A TEMPORARY DIAGNOSTIC. DO NOT STRIP.
+                // June's blanket "remove all GladixDeezer printlns before a release build" rule is about
+                // trace spam; it does NOT apply to this line or to its twin in DeezerExtension.channelFeed.
+                // This fires ONLY on a failure — a section Deezer sent that we then discard — so it costs
+                // nothing on a healthy load and is silent in every normal session.
+                //
+                // WHY IT EARNS PERMANENCE: a section with no title is dropped here and never reaches the
+                // parser, so the row vanishes from Home with no signal anywhere. That silence is how "Made
+                // for you" went unnoticed for months — it was in the response the whole time and simply
+                // never rendered. This line turns the next Deezer shape change into an immediate,
+                // greppable symptom instead of a row nobody notices is missing.
+                // module_id is printed because it is the only stable handle on a titleless section.
                 val title = obj.optString("title") ?: run {
                     println("GladixDeezer DROP section=<no-title> reason=missing-title module_id=$id")
                     return@mapNotNull null

@@ -24,8 +24,21 @@ import kotlinx.serialization.json.jsonObject
 
 class DeezerParser(private val session: DeezerSession) {
 
-    /** Cap on the raw-item JSON dump in the silent-drop diagnostic. REMOVE WITH THE TRACE. */
-    private val RAW_ITEM_LOG_CAP = 600
+    /**
+     * Cap on the raw-item JSON dump. TEMPORARY — this and the firstItem= field it feeds are deleted after
+     * one capture; the two DROP printlns elsewhere are permanent and are NOT part of this.
+     *
+     * Raised 600 → 3000 on 2026-09-05: at 600 the last capture truncated mid-object at `item_id=`, which
+     * is the point the question turns on — whether a nested media object hangs off item_id, or the whole
+     * payload is telemetry, which decides whether smarttracklist can be supported at all.
+     *
+     * ⚠️ DO NOT RAISE THIS ABOVE ~3500. println goes to System.out, which Android redirects into logcat,
+     * and a logcat entry's payload is capped near 4000 bytes — beyond that the line is truncated by the
+     * PLATFORM with no marker, so a larger cap buys nothing and silently looks like a short object. 3000
+     * leaves room for the ~100-char prefix. If one item genuinely exceeds that, the fix is chunked output,
+     * not a bigger number.
+     */
+    private val RAW_ITEM_LOG_CAP = 3000
 
     /**
      * The SECTION overload — the receiver is the whole section object, not a bare data array.

@@ -381,8 +381,10 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
             channelSections.map { section ->
                 async(Dispatchers.Default) {
                     parser.run {
-                        // REMOVE WITH THE TRACE. Same silent drop as the Home client's, one level down:
-                        // a fetched page's titleless sections disappear with no signal.
+                        // ⚠️ PERMANENT — NOT A TEMPORARY DIAGNOSTIC. DO NOT STRIP. Twin of the line in
+                        // DeezerHomeFeedClient; see the reasoning there. June's blanket
+                        // "strip all GladixDeezer printlns" rule does not cover these two. Fires only on a
+                        // failure: a fetched page's titleless sections disappear with no signal otherwise.
                         if (section.jsonObject["title"] == null)
                             println("GladixDeezer DROP section=<no-title> reason=missing-title src=channelFeed")
                         section.jsonObject["title"]?.jsonPrimitive?.content

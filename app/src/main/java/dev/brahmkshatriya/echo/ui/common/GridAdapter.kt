@@ -111,6 +111,37 @@ interface GridAdapter {
                 .currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
                 context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
             val layoutManager = GridLayoutManager(context, 1)
+            // ── SPAN-AWARE SCROLLBAR ESTIMATION (2026-09-05) ────────────────────────────────────────
+            // GridLayoutManager ships two estimators and defaults to the WRONG ONE for a mixed feed.
+            // Default (ScrollbarHelper.computeScrollRange): laidOutArea / itemRange * itemCount
+            // Enabled  (computeScrollRangeWithSpanInfo):    laidOutArea / laidOutSpans * totalSpans
+            // The difference is the divisor: ITEMS versus SPAN GROUPS. On Home, Search and media pages,
+            // full-span shelves sit beside 2-up tiles — two tiles are TWO ITEMS BUT ONE ROW — so the
+            // default's per-item figure roughly halves whenever tile rows are on screen and doubles back
+            // when shelves are. That is the mechanism behind the measured 3415→5371 range swing (57%) on a
+            // static artist page, and behind Search's deterministic stall two-thirds down, where the
+            // estimate grows as denser rows attach mid-drag and offset/range plateaus.
+            //
+            // ⚠️ IT MOVES RANGE AND OFFSET TOGETHER, and that is why it is safe to enable globally.
+            // computeScrollOffsetWithSpanInfo is the paired method — both switch on this one flag — so the
+            // `offset + extent == range` identity that puts the fast-scroll thumb exactly at the rail
+            // bottom cannot be broken by enabling it. A range-only change (e.g. a measured row-height
+            // cache over liveRange()) WOULD break it, which is why that larger proposal was not taken.
+            //
+            // ⚠️ NO-OP ON SINGLE-COLUMN SCREENS, by construction rather than by test: with spanCount 1 and
+            // every item spanning 1, getCachedSpanGroupIndex(pos, 1) == pos, so totalSpans == itemCount and
+            // laidOutSpans == itemRange — the two expressions are arithmetically identical. Screens that
+            // resolve to one column compute exactly what they computed before. (HistoryFragment is not
+            // affected at all: fragment_history.xml uses a LinearLayoutManager and never calls this.)
+            //
+            // ⚠️ STILL AN EXTRAPOLATION. It divides by a better denominator; it does not measure content.
+            // The range will still move as the laid-out window changes, so it should SHRINK the swing, not
+            // remove it. If a capture shows the Search stall unchanged at the same row, row density is not
+            // the driver — and that also weakens the case for the row-height cache, which attacks the same
+            // quantity from the same premise.
+            //
+            // Requires the span-group index cache, which is already enabled below.
+            layoutManager.isUsingSpansToEstimateScrollBarDimensions = true
             recycler.adapter = gridAdapter.adapter
             recycler.layoutManager = layoutManager
             recycler.addItemDecoration(VerticalSpacingItemDecoration(8.dpToPx(context), gridAdapter))

@@ -185,6 +185,8 @@ class PixelFastScrollViewHelper(
     // Throttled on a PIXEL DELTA, not every Nth event: a drag is frame-driven, so an event counter samples
     // at a rate that varies with finger speed, while a pixel threshold samples uniformly in the quantity
     // under investigation and still emits during a slow drag at the stall point.
+    /** One-shot guard for the first rest: line. REMOVE WITH THE TRACE. */
+    private var loggedFirstRest = false
     private var lastDragLogAt = 0
     private var dragReqAccum = 0
 
@@ -394,11 +396,39 @@ class PixelFastScrollViewHelper(
      */
     override fun scrollTo(offset: Int) {
         view.stopScroll()
-        // ONE SCALE, and that is the whole fix. `liveSpan` is the value FastScroller itself just multiplied
-        // by, so dividing recovers its thumb fraction; `gestureSpan` converts that fraction back into
-        // content pixels. They are now the SAME number — see the note on [gestureSpan]'s assignment below.
-        val liveSpan = (liveRange() - view.height).coerceAtLeast(1)
-        val fraction = offset.toDouble() / liveSpan
+        // ⚠️ THIS MUST BE THE EXACT SPAN FastScroller MULTIPLIED BY. It computes the `offset` handed to
+        // this method as
+        //     scrollOffset = getScrollOffsetRange() * thumbOffset / getThumbOffsetRange()
+        //     getScrollOffsetRange() = getScrollRange() - mView.getHeight()
+        // so recovering the thumb fraction REQUIRES dividing by getScrollRange() - height. Anything else
+        // and the fraction does not cancel.
+        //
+        // RESTORING AN INVARIANT, NOT INTRODUCING ONE. The 2026-09-04 resolution was that the thumb never
+        // needed an accurate content height — it needed THE DRAG AND THE THUMB TO SHARE ONE SCALE, and
+        // gestureSpan was the only quantity taken from somewhere else. The composite change (2026-09-05)
+        // broke exactly that: it grew getScrollRange() by appBarRange and left this divisor on the old
+        // liveRange(), 633px smaller on the artist page.
+        //
+        // WHAT THAT COST, measured before the fix: with a STATIONARY finger thumbOffset is constant, so
+        // matched spans reduce `fraction` to thumbOffset/thumbOffsetRange — invariant, delta 0, no scroll.
+        // Mismatched, `fraction` moves whenever range moves, emits a delta, the scroll changes which
+        // children are attached, range moves again, and the sign flips. The capture shows the closed loop:
+        //     req= 237 offset= 988 range=3743 thumbFrac=0.595
+        //     req=-237 offset=1855 range=4767 thumbFrac=0.691
+        // repeating at 16ms for 600ms+ with the finger still — an 867px alternation at 60Hz, which is the
+        // on-device "flashing two screens".
+        //
+        // ⚠️ ANY FUTURE CHANGE TO getScrollRange() MUST MOVE THIS SPAN WITH IT. That coupling is what
+        // failed here and will fail the same way again — silently, as a frame-rate oscillation rather than
+        // a wrong number. The two expressions are load-bearing as a PAIR.
+        //
+        // NOT FROZEN AT GESTURE START, deliberately: the library keeps recomputing mThumbOffset from a LIVE
+        // getScrollRange() every pre-draw, so a frozen divisor here would put the drawn thumb and the drag
+        // back on different scales — the 2026-09-04 round-3 failure, where the thumb wandered away from the
+        // finger mid-drag. That is a LESS VISIBLE failure than flashing and therefore the more dangerous
+        // one to ship.
+        val librarySpan = (getScrollRange() - view.height).coerceAtLeast(1)
+        val fraction = offset.toDouble() / librarySpan
         if (!gestureActive || lastFraction.isNaN()) {
             // ⚠️ FOURTH ATTEMPT AT gestureSpan, AND IT WORKS BY DELETING WHAT THE OTHER THREE WERE TUNING.
             // DO NOT REINTRODUCE AN ESTIMATE HERE. Three revisions calibrated a running per-item mean —
@@ -420,7 +450,7 @@ class PixelFastScrollViewHelper(
             // thumb is self-consistent however the scale moves. gestureSpan was the only quantity taken
             // from somewhere else — and being derived from an average across every region scrolled, it sat
             // ABOVE the live value at almost any grab point (est/live measured 1.19-1.69), so each finger
-            // pixel bought too much scroll and the thumb ran ahead. Setting it to liveSpan makes the two
+            // pixel bought too much scroll and the thumb ran ahead. Setting it to librarySpan makes the two
             // the same number, and the thumb stays under the finger by construction rather than by
             // calibration.
             //
@@ -428,7 +458,7 @@ class PixelFastScrollViewHelper(
             // drag (new children attach with different heights), the fraction-to-pixels mapping drifts.
             // But it drifts IDENTICALLY for the thumb and for the content, because both now read the same
             // extrapolation — which is the property that matters. The estimate broke exactly that.
-            gestureSpan = liveSpan
+            gestureSpan = librarySpan
             lastFraction = fraction
             pendingPixels = 0.0
             val jump = offset - view.computeVerticalScrollOffset()
@@ -453,6 +483,29 @@ class PixelFastScrollViewHelper(
         view.addItemDecoration(object : RecyclerView.ItemDecoration() {
             override fun onDraw(c: Canvas, parent: RecyclerView, state: RecyclerView.State) {
                 onPreDraw.run()
+                // ── TRACE (2026-09-05). REMOVE WITH THE REST OF THE GladixScroll LINES. ──
+                // The FIRST rest: line must come from here, not from onScrollStateChanged. That callback
+                // fires only on a STATE TRANSITION, and a freshly-opened page is already IDLE — so "at the
+                // top, never touched" produces no callback at all, which is precisely the state the
+                // mid-rail-rest question needs. A whole capture came back with zero rest: lines for that
+                // reason.
+                //
+                // This hook is also the RIGHT moment rather than merely an available one: it is what
+                // FastScroller itself uses to recompute mThumbOffset, so the metrics logged here are the
+                // ones that position the thumb on this frame. A post-layout one-shot could read before the
+                // adapter has content.
+                //
+                // Guarded on a laid-out view with items so an empty first frame does not consume the
+                // one-shot. After it fires the flag short-circuits, so the steady-state cost is one field
+                // read per draw. onScrollStateChanged keeps its emission — it is the only one that can
+                // report atBottom.
+                if (!loggedFirstRest &&
+                    parent.height > 0 &&
+                    (parent.adapter?.itemCount ?: 0) > 0
+                ) {
+                    loggedFirstRest = true
+                    logRest()
+                }
             }
         })
     }
