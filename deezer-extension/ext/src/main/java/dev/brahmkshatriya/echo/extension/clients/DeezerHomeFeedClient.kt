@@ -37,7 +37,13 @@ class DeezerHomeFeedClient(
             homeSections.mapNotNull { section ->
                 val obj = section.asObjectOrNull() ?: return@mapNotNull null
                 val id = obj.optString("module_id") ?: return@mapNotNull null
-                val title = obj.optString("title") ?: return@mapNotNull null
+                // REMOVE WITH THE TRACE. A section with no title is dropped here and never reaches the
+                // parser, so it vanishes from Home with no signal — the same silence that hid "Made for
+                // you". module_id is printed because it is the only stable handle on a titleless section.
+                val title = obj.optString("title") ?: run {
+                    println("GladixDeezer DROP section=<no-title> reason=missing-title module_id=$id")
+                    return@mapNotNull null
+                }
                 val hasChannelItems = parser.run { obj.hasChannelItems() }
 
                 when {

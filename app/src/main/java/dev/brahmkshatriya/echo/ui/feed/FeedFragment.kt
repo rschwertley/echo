@@ -11,6 +11,7 @@ import androidx.fragment.app.replace
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.ViewModel
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import com.google.android.material.appbar.AppBarLayout
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Shelf
@@ -144,7 +145,10 @@ class FeedFragment : Fragment(R.layout.fragment_generic_collapsable) {
             getTouchHelper(listener).attachToRecyclerView(recyclerView)
             // Hoisted above the inset block so the handle exists when the block first runs; it is kept and
             // re-padded there rather than left on applyTo's flat 8dp.
-            val scroller = FastScrollerHelper.applyTo(recyclerView)
+            // COLLAPSING SCREEN — see MediaDetailsFragment. The AppBarLayout is in the OUTER
+            // FeedFragment's layout (fragment_generic_collapsable.xml); this is FeedFragment.Actual.
+            val appBar = requireParentFragment().view?.findViewById<AppBarLayout>(R.id.appBarLayout)
+            val scroller = FastScrollerHelper.applyTo(recyclerView, appBar, traceTag = "seeall")
             applyInsets(uiViewModel.tvMiniPlayerVisible) {
                 val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(recyclerView.context) else 0
                 recyclerView.applyContentInsets(it, 20, 8, 16 + miniExtra)

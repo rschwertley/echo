@@ -6,6 +6,7 @@ import android.view.View
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.widget.NestedScrollView
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.appbar.AppBarLayout
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.ui.common.UiViewModel
 import dev.brahmkshatriya.echo.utils.ContextUtils.getSettings
@@ -146,7 +147,17 @@ object FastScrollerHelper {
         setThumbDrawable(AppCompatResources.getDrawable(context, R.drawable.fast_scroll_thumb)!!)
     }
 
-    fun applyTo(view: RecyclerView): FastScroller? {
+    /**
+     * [appBar] is the collapsing header ABOVE this list, or null on a full-bleed screen. Passing it makes
+     * the scroll metrics COMPOSITE — see PixelFastScrollViewHelper's note. Null keeps today's arithmetic
+     * exactly, so the six full-bleed call sites are unchanged by construction rather than by testing.
+     * [traceTag] labels the temporary GladixScroll lines; REMOVE WITH THE TRACE.
+     */
+    fun applyTo(
+        view: RecyclerView,
+        appBar: AppBarLayout? = null,
+        traceTag: String = "?",
+    ): FastScroller? {
         view.isVerticalScrollBarEnabled = false
         if (!view.isFastScrollUsable()) return null
         return FastScrollerBuilder(view).apply {
@@ -158,7 +169,7 @@ object FastScrollerHelper {
             // RecyclerView's own averaged estimates satisfy it, and for why the earlier position-based
             // attempt could not. RecyclerView ONLY — the NestedScrollView overload below keeps the
             // library's default helper, which is already this shape there.
-            setViewHelper(PixelFastScrollViewHelper(view))
+            setViewHelper(PixelFastScrollViewHelper(view, appBar, traceTag))
             // Pre-inset default; applyInsets overwrites it on the first inset pass. Flush on the thumb
             // side here too so the first frame does not show the gap and then close it.
             val pad = 8.dpToPx(view.context)

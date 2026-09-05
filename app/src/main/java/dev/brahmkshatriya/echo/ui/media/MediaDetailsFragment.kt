@@ -7,6 +7,7 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.paging.LoadState
 import kotlinx.coroutines.launch
+import com.google.android.material.appbar.AppBarLayout
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.clients.PlaylistEditClient
 import dev.brahmkshatriya.echo.common.models.Feed
@@ -110,7 +111,12 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
         getTouchHelper(feedListener).attachToRecyclerView(binding.recyclerView)
         // Handle KEPT and re-padded below. Discarding it left the track on applyTo's flat 8dp forever,
         // running under the mini-player and nav bar.
-        val scroller = FastScrollerHelper.applyTo(binding.recyclerView)
+        // COLLAPSING SCREEN: hand the scroller the AppBarLayout so its metrics account for the scroll
+        // the header consumes. It lives in the PARENT fragment's layout (fragment_media.xml), not this
+        // one, and is a sibling of this fragment's container under the CoordinatorLayout — hence resolved
+        // from the parent rather than from binding.
+        val appBar = requireParentFragment().view?.findViewById<AppBarLayout>(R.id.appBarLayout)
+        val scroller = FastScrollerHelper.applyTo(binding.recyclerView, appBar, traceTag = "media")
         val uiViewModel by activityViewModel<UiViewModel>()
         applyInsets(viewModel.uiResultFlow, uiViewModel.tvMiniPlayerVisible) {
             val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(binding.recyclerView.context) else 0

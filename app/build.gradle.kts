@@ -41,6 +41,21 @@ val isDirty = runCatching { execute("git", "status", "--porcelain", "-uno").isNo
 // to the count: "3.1.01024" == count 1024, just padded.
 val version = "3.1." + gitCount.toString().padStart(5, '0')
 
+// ── APK FILENAME CARRIES THE VARIANT. AGP names an APK "<archivesName>-<variantName>.apk", so setting
+// archivesName here yields Gladix-v3.1.NNNNN-release.apk and Gladix-v3.1.NNNNN-debug.apk. The version is
+// already in the name; what was missing is the VARIANT, and its absence is what let a debug build be
+// uploaded to GitHub for months without it being visible on the releases page — a renamed debug APK and a
+// renamed release APK looked identical there. With the marker, the wrong artifact announces itself.
+//
+// `base { archivesName }` rather than rewriting variant.outputs: the output-renaming API needs
+// VariantOutputImpl, which is AGP-internal and a poor bet on 9.3.2. This is the supported lever and it
+// produces the same result.
+//
+// ⚠️ UPLOAD THE ...-release.apk. Nothing enforces that — it is a naming convention, not a gate.
+base {
+    archivesName = "Gladix-v$version"
+}
+
 android {
     namespace = "dev.brahmkshatriya.echo"
     compileSdk = 37
@@ -58,34 +73,66 @@ android {
         buildConfigField("boolean", "HAS_FIREBASE", "$hasGoogleServices")
     }
 
-    // ── WHICH VARIANT GOES WHERE. Not derivable from this file, so it is written down: the next
-    // "which variant is that?" question should be answered from here rather than re-inferred.
-    //   release  -> GOOGLE PLAY, via `bundleRelease`.
+    // ── WHICH VARIANT GOES WHERE. Not derivable from this file, so it is written down. VERIFIED
+    // AGAINST THE ACTUAL BUILD FLOW AND THE PUBLISHED ARTIFACTS ON 2026-09-05 — earlier revisions of this
+    // note were WRONG (see the inheritance warning below), so treat it as the record and correct it here
+    // rather than re-inferring from the variants that happen to exist.
+    //
+    //   release  -> GOOGLE PLAY, as an AAB, via Build > Generate Signed App Bundle (the wizard; output
+    //              lands in app/release/app-release.aab, NOT build/outputs). AND, from 2026-09-05, the
+    //              SIDELOADED APK on GitHub — see the signingConfig on the release block below, which is
+    //              what makes that APK installable and upgradable.
     //              ⚠️ ON PLAY THE APP SELF-UPDATER IS OFF; EXTENSION UPDATES STAY ON. Play owns app
-    //              updates. This is not a build-type rule — it is decided by INSTALL SOURCE, so a
-    //              release APK sideloaded from elsewhere does self-update, deliberately.
+    //              updates. Decided by INSTALL SOURCE, not build type, so a release APK sideloaded from
+    //              GitHub DOES self-update — deliberately, and it is why AppUpdater has a "release" arm.
     //              AppUpdater.isStoreInstall() is checked at the top of updateApp(), before any network
     //              work, and is fail-closed twice over: an empty installer list and a thrown exception
     //              both resolve to "store" (skip). updateApp() has exactly ONE caller
     //              (ExtensionsViewModel.update), so no entry point can route around it, and `force`
-    //              lifts only the 24h throttle, never the gate. On a store install updateApp returns
-    //              null and control falls into the extension-update branch unchanged — which is how a
-    //              Play user keeps getting extension updates while never being offered an app update.
-    //   stable   -> SIDELOADED APK, self-updated from GitHub releases (AppUpdater's "stable" branch).
-    //   nightly  -> SIDELOADED APK, self-updated from nightly.link artifacts (its "nightly" branch).
-    //   debug    -> local development only, never distributed, never minified.
+    //              lifts only the 24h throttle, never the gate.
+    //   debug    -> WHAT WAS ACTUALLY SHIPPED TO GITHUB UNTIL 2026-09-05. Built with Build > Build APK(s)
+    //              on the debug variant and renamed in place before upload. Confirmed from
+    //              build/outputs/apk/debug/output-metadata.json (variantName "debug") and from the
+    //              published v3.1.01063 asset being the same size as a local debug build. Unminified,
+    //              unobfuscated, debuggable, and guarded by NEITHER verifyExtensionAbi (nothing to check —
+    //              R8 never ran) NOR verifyCleanKotlinOutput (a real gap: that guard covers the stale-
+    //              Kotlin-output bug from build 1058, which debug builds are equally exposed to).
+    //              After the switch, debug is local development only.
+    //   stable   -> ⚠️ UPSTREAM'S CHANNEL. NEVER BUILT HERE.
+    //   nightly  -> ⚠️ UPSTREAM'S CHANNEL. NEVER BUILT HERE.
     //
-    // ⚠️ ALL THREE MINIFIED VARIANTS SHIP TO REAL USERS. Roughly 95% of users are on a sideloaded APK
-    // (stable/nightly); the rest come through Play (release). So an R8 behaviour change is a
-    // ship-blocker on every one of them, and both build guards below deliberately cover all three.
+    // ⚠️ STABLE AND NIGHTLY ARE INHERITED, NOT OURS, AND YOU CANNOT DERIVE THIS FORK'S DISTRIBUTION FROM
+    // THEM. `git log -S '"nightly" ->' -- AppUpdater.kt` returns 422fc7e1 (2025-04-24, author
+    // brahmkshatriya); the updater itself is 093cb8e1 (2025-04-02), whose message reads "add in app
+    // updater, not tested, will not test". Those channels describe how brahmkshatriya/echo ships, were
+    // inherited wholesale by this fork, and have never produced an artifact here. This fork's own 2026
+    // commits (c361a884, cb536383, bfc32a5a) only added the install-source gate and the throttle around
+    // them — they hardened a gate on channels nobody had checked applied.
     //
-    // ⚠️ DO NOT INFER DISTRIBUTION FROM AppUpdater. It branches on BUILD_TYPE for "stable" and
-    // "nightly" only, and has no "release" branch — that is because a Play build does not SELF-update,
-    // the Store updates it, not because release is undistributed. That inference was actually made and
-    // was wrong (2026-09-02). AppUpdater answers "does this channel publish its own releases", which is
-    // a different question from "does this variant reach users".
+    // A 2026-09-02 revision of THIS note asserted "stable -> SIDELOADED APK / nightly -> SIDELOADED APK"
+    // and "roughly 95% of users are on stable/nightly". Both were false, derived from the mere presence of
+    // the variants. That is the error this paragraph exists to prevent: the variants prove only that
+    // upstream had those channels.
+    //
+    // ⚠️ SIGNING KEY: release is signed with the DEBUG keystore, on purpose. See the signingConfig note on
+    // the release block.
     buildTypes {
         release {
+            // ⚠️ SIGNED WITH THE DEBUG KEYSTORE, DELIBERATELY (2026-09-05). Every APK shipped to GitHub
+            // before this date was a debug build, so it carries the debug key's signature. Android refuses
+            // an in-place upgrade across a change of signing identity, so signing release with a NEW key
+            // would force every existing sideloaded user to UNINSTALL first — wiping settings, the Room
+            // database (history, downloads index) and every extension login. Reusing the debug key makes
+            // the switch to a minified, guarded build a silent in-place upgrade instead.
+            //
+            // ⚠️ THE COST, SO IT IS VISIBLE WHEN THE TRADE IS REVISITED: the debug keystore is generated by
+            // the SDK with a published password and alias, so ANYONE can build an APK that upgrades over a
+            // sideloaded install. That is the STATUS QUO — it has been true of every APK shipped so far —
+            // not a weakness introduced here. Adopting a real keystore is a one-way door: it fixes that,
+            // and it costs every existing user an uninstall/reinstall and their local data. Do it, if at
+            // all, as a deliberate announced migration rather than as a side effect of another change.
+            // The Play AAB is unaffected either way — the wizard signs it with the upload key.
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -303,9 +350,14 @@ tasks.matching { it.name.matches(Regex("^minify.*WithR8$")) }.configureEach {
 // protects nothing. The variant list below must likewise track buildTypes {} above.
 tasks.register("verifyCleanKotlinOutput") {
     description = "Fails a release/nightly/stable build that would compile on top of existing Kotlin output."
-    // All three are shipped variants (see the note on buildTypes) — hence all three guarded, and debug
-    // deliberately not: it is never distributed, and gating it would force a clean build on every
-    // day-to-day compile.
+    // ⚠️ THE VARIANT LIST HERE IS ABOUT WHAT SHIPS, AND IT WAS WRONG UNTIL 2026-09-05. An earlier note
+    // read "All three are shipped variants ... and debug deliberately not: it is never distributed" —
+    // exactly backwards at the time, since debug was the ONLY variant distributed outside Play (see the
+    // buildTypes note). stable/nightly are upstream's and have never been built here; they stay in the
+    // list because guarding an unbuilt variant costs nothing and would be correct if one were ever built.
+    // debug stays OUT: it is now genuinely local-development-only, and gating it would force a clean build
+    // on every day-to-day compile. If debug is ever distributed again, add it here — that is the whole
+    // exposure this guard covers, and the 1058 stale-output bug does not care which variant it lands in.
     group = "verification"
     // Resolved at CONFIGURATION time into plain serializable locals so the action below captures no
     // Project reference - same configuration-cache constraint as verifyExtensionAbi.

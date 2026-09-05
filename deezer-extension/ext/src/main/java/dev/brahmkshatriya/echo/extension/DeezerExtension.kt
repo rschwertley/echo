@@ -381,6 +381,10 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
             channelSections.map { section ->
                 async(Dispatchers.Default) {
                     parser.run {
+                        // REMOVE WITH THE TRACE. Same silent drop as the Home client's, one level down:
+                        // a fetched page's titleless sections disappear with no signal.
+                        if (section.jsonObject["title"] == null)
+                            println("GladixDeezer DROP section=<no-title> reason=missing-title src=channelFeed")
                         section.jsonObject["title"]?.jsonPrimitive?.content
                             // Recursive by design: a channel page's rows get fetching arrows too when they
                             // carry a target. See toShelfItemsList's depth note — bounded by Deezer's graph,

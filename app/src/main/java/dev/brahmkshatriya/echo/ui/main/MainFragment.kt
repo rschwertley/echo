@@ -99,7 +99,10 @@ class MainFragment : Fragment() {
                     outline.alpha = max(0f, offset - extra)
                 }
             }
-            val scroller = FastScrollerHelper.applyTo(recyclerView)
+            // Full-bleed: no appBar, so the metrics stay exactly as they were. traceTag only — the
+            // GladixScroll comparison needs a clean screen alongside the collapsing ones.
+            // REMOVE THE TAG WITH THE TRACE.
+            val scroller = FastScrollerHelper.applyTo(recyclerView, traceTag = "main")
             val uiViewModel by activityViewModel<UiViewModel>()
             applyInsets(uiViewModel.tvMiniPlayerVisible) {
                 val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(recyclerView.context) else 0

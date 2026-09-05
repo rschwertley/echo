@@ -101,6 +101,36 @@ object AppUpdater {
 
         val url = runCatching {
             when (appType) {
+                // THIS FORK'S SIDELOAD CHANNEL. `release` is the variant actually distributed outside
+                // Play here (signed with the debug key so it upgrades in place over the historical debug
+                // APKs — see app/build.gradle.kts). Before 2026-09-05 this `when` had no "release" arm, so
+                // every sideloaded user fell to `else -> return null` and was NEVER told about a new
+                // version: no update, no error, no snackbar, indistinguishable from "up to date".
+                //
+                // Same body as "stable" deliberately — both are "check this repo's GitHub releases" — but
+                // kept as a separate arm rather than merged, because "stable" is UPSTREAM's channel and is
+                // never built here (see the buildTypes note). Merging them would re-imply that stable is
+                // one of ours.
+                //
+                // ⚠️ WHAT THE GITHUB RELEASE MUST LOOK LIKE, since getGithubUpdateUrl matches on it:
+                //   TAG   must equal versionName.substringBefore('_'), i.e. "v3.1.NNNNN" zero-padded to 5
+                //         digits (build.gradle.kts: version = "3.1." + gitCount.padStart(5,'0'),
+                //         versionName = "v${'$'}version_${'$'}gitHash(${'$'}gitCount)"). A tag that differs in ANY
+                //         way — no "v", unpadded count, a suffix — compares unequal and offers an update
+                //         forever; a tag equal to the running version correctly offers nothing.
+                //   ASSET must be a file ending ".apk". Assets are sorted so a name CONTAINING the device's
+                //         Build.SUPPORTED_ABIS.first() (e.g. "arm64-v8a") wins; with a single universal
+                //         APK the sort is a no-op and it is picked anyway.
+                //   It reads /releases/LATEST, so the release must be published and not a draft or
+                //         pre-release.
+                "release" -> {
+                    val currentVersion = version.substringBefore('_')
+                    val updateUrl = "https://api.github.com/repos/$githubRepo/releases"
+                    getGithubUpdateUrl(currentVersion, updateUrl, client) ?: return null
+                }
+
+                // UPSTREAM'S CHANNEL, NOT BUILT HERE — kept so a stable build would still work if one were
+                // ever produced. See the buildTypes note in app/build.gradle.kts.
                 "stable" -> {
                     val currentVersion = version.substringBefore('_')
                     val updateUrl = "https://api.github.com/repos/$githubRepo/releases"
@@ -113,6 +143,8 @@ object AppUpdater {
                     "https://nightly.link/$githubRepo/actions/runs/$id/artifact.zip"
                 }
 
+                // debug (local dev) and anything unrecognised. NOT "no channel publishes for you" — see
+                // the "release" arm above; this is now genuinely only local builds.
                 else -> return null
             }
         }.getOrElse {
@@ -185,6 +217,37 @@ object AppUpdater {
         }.getOrElse {
             throw Exception("Failed to fetch latest release for $user/$repo", it)
         }
+        // ⚠️ STRING INEQUALITY, AND IT MUST STAY THAT WAY — THIS FUNCTION IS SHARED BY THREE CALLERS WITH
+        // THREE DIFFERENT NOTIONS OF "version". Verified 2026-09-05:
+        //   updateApp (APP update)            -> currentVersion = versionName.substringBefore('_'),
+        //                                        i.e. "v3.1.NNNNN", our 5-digit zero-padded gitCount.
+        //   ExtensionsViewModel:282 (EXT)     -> the installed extension's own version string.
+        //   AddViewModel:116 (ADD EXTENSION)  -> "" — a SENTINEL meaning "no current version, take
+        //                                        whatever is latest". With "", any non-empty tag compares
+        //                                        unequal, which is exactly the intent.
+        //
+        // ⚠️ THE TRAP: a "parse the number and require strictly greater" rule looks like an obvious
+        // improvement here and CANNOT go in this function. Extension tags are authored by third parties in
+        // arbitrary shapes ("1.2.3", "v0.9-beta", a date) — none of them parse as our scheme, so a numeric
+        // rule would refuse every extension update. And it would turn AddViewModel's "" sentinel from
+        // "take latest" into "never offer anything", breaking the add-extension flow outright. If a numeric
+        // constraint is ever wanted for the APP path, it belongs behind an OPT-IN parameter defaulting to
+        // "no constraint", never as a change to this comparison.
+        //
+        // Considered and deliberately NOT done (2026-09-05): `!=` also offers a LOWER tag, i.e. a
+        // downgrade. Left alone because the OS refuses a lower versionCode at install time, so the live
+        // cost is one spurious prompt and a failed install — the same cost as the mis-tag case below, and
+        // not worth constraining a shared function for.
+        //
+        // NOTE this compares the TAG against the RUNNING BUILD, never against the asset. A release whose
+        // tag disagrees with its own APK's versionName is offered, installs as a permitted same-code
+        // reinstall, and is then offered again on every check — a loop that no client-side rule here can
+        // detect, ending only when a later release whose tag matches its binary supersedes it.
+        // ⚠️ NOTHING CHECKS THAT THEY AGREE — not here, not at build time, not at upload. The only thing
+        // working against it is that the APK filename now carries its own build number and variant
+        // (`base { archivesName }` in app/build.gradle.kts), so tagging a release is COPYING a number off
+        // the filename rather than recalling it. Whether the tag and the filename actually match is still
+        // an unchecked manual step.
         if (res.tagName != currentVersion) {
             res.assets.sortedByDescending {
                 it.name.contains(Build.SUPPORTED_ABIS.first())

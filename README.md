@@ -1,106 +1,76 @@
-# Gladix: Music Player
+# Gladix
 
-A personal fork of [Echo](https://github.com/brahmkshatriya/echo) — an extension-based music player for Android — with enhanced Android Auto support, bundled Deezer integration, and various stability and UX improvements.
+A personal Android music player — a fork of [Echo](https://github.com/brahmkshatriya/echo) by brahmkshatriya, with the Deezer extension bundled and substantial work on Android Auto, Android TV, playback stability and everyday UX.
 
-> **Note:** Gladix is a personal project and is not affiliated with any content providers, streaming services, or the original Echo developers. This application hosts zero content. The user is responsible for managing their own sources and complying with applicable terms of service.
+> Gladix is a hobby project maintained by one person. It isn't affiliated with Deezer or any other service.
 
 ---
 
-## What's Different from Echo
+## What it is
+
+Echo is an extension-based music player: the app itself knows nothing about any particular service, and extensions supply the content. Gladix keeps that architecture, bundles the Deezer extension so it works out of the box, and adds the things a daily-driver player needs.
+
+**Package:** `dev.rschwertley.gladix`
+
+---
+
+## What Gladix adds over Echo
 
 ### Android Auto
-- Full browse tree support — Home, Search, and Library tabs load correctly per extension
-- Search returns real results from Deezer
-- Voice search support via Google Assistant ("Hey Google, play X on Gladix")
-- Queue view in Now Playing screen
-- Shuffle and Repeat buttons in Now Playing controls
-- Auto-pause when disconnecting from car
-- Playback resumption when reconnecting
-- Auto-skip unavailable/region-locked tracks with circuit breaker
-- Proper error messages instead of silent failures
-- Fixed browse breaking when playback initiated from phone
-- "Playing from" subtitle in Now Playing is tappable (navigates to album/playlist/artist)
-- Last played track shown in AA thumbnail instead of "Tap to open"
-- Battery optimization exemption prompt on first launch (prevents Android killing the service after ~1.5h idle)
-- Fixed race condition where AA resumption overwrote a user-initiated queue
+Browse tabs, artist drill-down, real search with voice input, a queue view, shuffle and repeat controls, and auto-pause on disconnect. Unavailable and region-locked tracks are skipped automatically, with a circuit breaker after three consecutive failures so a bad queue can't spin. Errors surface as readable messages instead of silent failures.
 
-### Bundled Deezer Extension
-- Deezer is included out of the box — no separate extension install required
-- Additional extensions (Spotify, Tidal, etc.) can still be installed on top
-- Paginated artist albums, top tracks, and related artists (full catalog, not just first page)
+### Android TV
+A full-screen D-pad player, a mini-player bar, and focus routing that behaves across the nav rail and mixed-span grids. Deezer login on TV works through a pairing code and a companion web page, since the usual login flow isn't usable with a remote.
 
-### Audio
-- Track Fade — configurable volume fade between tracks (1–12 seconds)
-- Accessible directly from Audio Effects sheet while listening
-- Fixed audio focus — other players pause when Gladix starts playing, Gladix pauses when others start playing
-- Buffering watchdog — 8s retry then skip instead of hanging forever
-- Deezer quality fallback fixed: FLAC → 320kbps → 128kbps (was skipping 320)
-- Retry loop with backoff for transient Deezer shared server failures
-- HTTP 404 CDN errors now retry before skipping
+### Playback and queue
+The queue is stored durably and restored exactly — the same track, the same position — across cold starts, process death and app updates. A buffering watchdog retries and then skips a stuck track rather than leaving the player wedged, with a grace window so a slow stream resolution isn't mistaken for a stall.
 
-### UI/UX
-- Compact Spotify-style context menus (icon left, text right)
-- Shuffle Play option in playlist/album context menus
-- Voice search microphone in all search bars
-- Listening history — clock icon on home screen shows recently played tracks
-- Confirmation dialog before removing a playlist from library
-- Bookmark icon hidden for playlists you own (can't be unsaved)
-- Fullscreen album art with Ken Burns pan/zoom animation
-- Fixed Lyrics/Queue tab overlap in player
-- Fixed fullscreen album art requiring two back gestures to dismiss
-- Splash screen with Gladix animation (bolt, ring spin, draw-in effect)
-- Tappable 'Playing from' subtitle navigates to album, playlist, or artist
+### History
+Listening history with date sections, sort by date, title or artist, filtering by extension, and text or voice search. Tapping an entry plays that track and rebuilds its context — the playlist, album or radio station it came from.
 
-### Stability & Performance
-- Fixed StreamableMediaSource race conditions causing play button spinning
-- Fixed Bluetooth queue size crash on large playlists
-- Fixed foreground service startup timing crashes
-- Fixed PlayerInfo$Builder crash triggered by Bluetooth volume buttons
-- Fixed second track hang after Bluetooth reconnect
-- Fixed recreate() infinite loop with dynamic player colors
-- Fixed WeakHashMap GC bug causing intermittent empty playlists in Android Auto
-- Replaced unsafe concurrent map access with thread-safe alternatives
-- Fixed coroutine scope cancellation issues across multiple services
-- Fixed Room database schema versioning for listening history
-- Faster app startup (deferred ExtensionLoader initialization)
-- Fixed infinite STATE_BUFFERING hang on session restore (watchdog + stop/prepare cycle)
-- Fixed SocketException / connection reset errors treated as silent skips (not reported as crashes)
-- Fixed ExceptionFragment crash when tapping "View" on error toast (screen capture permission)
-- Fixed AA resumption race condition using active load tracking
-
-### Crash Reporting
-- Firebase Crashlytics integrated for automatic crash reporting
+### Interface
+Full-screen album art with a Ken Burns pan, a structured Info tab with credits and technical detail, and compact context menus.
 
 ---
 
-## Installation
+## Installing
 
-Download the latest APK from the Releases page [Releases page](https://github.com/rschwertley/gladix/releases) and install it on your Android device. You may need to allow installation from unknown sources in your device settings.
+Grab the latest APK from [Releases](https://github.com/rschwertley/gladix/releases). Once installed, the app checks for new versions on its own.
 
-**To build from source:**
-1. Clone this repository
-2. Open in Android Studio
-3. Build and run on your Android device
+Also available on Google Play, where Play handles updates.
 
-To install extensions (Spotify, YouTube Music, etc.), download the respective `.eapk` files from the Echo community and open them on your device — Gladix will offer to install them.
+---
 
-### Recommended Extensions
+## Building
 
-**[Last.fm Scrobbler](https://github.com/rebelonion/echo-lastfm)** — Scrobbles your listening history to Last.fm in real time. Install the `.eapk` from that repo, open it on your device, and sign in with your Last.fm account. Once connected, every track you play in Gladix is logged to your Last.fm profile automatically.
+Standard Android Studio project. JDK 17.
 
-**[EchoDown](https://github.com/LuftVerbot/echo-echodown-extension)** — Adds download capability to Gladix. Once installed, open any track, album, or playlist, tap the menu, and select Download. Supports quality selection and tags downloads with artist, album, and lyrics metadata. Install code: `echodown`.
+```
+./gradlew :app:assembleRelease      # APK
+./gradlew :app:bundleRelease        # Play bundle
+```
 
+Firebase Crashlytics is wired in; `google-services.json` is gitignored, and the build works without it.
+
+---
+
+## Extensions
+
+Extensions are separate APKs loaded at runtime. Deezer is bundled; others are installed by the user.
+
+Two build checks protect the extension boundary, and both run on every shipped build:
+
+- **`verifyExtensionAbi`** confirms R8 hasn't renamed or repackaged the classes extensions link against. An R8 change once broke every third-party extension at once, and this catches that at build time rather than in the field.
+- **`verifyCleanKotlinOutput`** guards against stale inlined code after a public inline function changes.
+
+---
+
+## Contributing
+
+This is a personal fork and not open to contributions, but it's public — read it, take from it, or fork it if something here is useful. Issues with Echo itself belong upstream.
 
 ---
 
 ## Credits
 
-Gladix is built on top of [Echo](https://github.com/brahmkshatriya/echo) by [brahmkshatriya](https://github.com/brahmkshatriya). All core architecture, extension system, and base functionality are their work. Please support the original project.
-
-The bundled Deezer extension is based on [echo-deezer-extension](https://github.com/LuftVerbot/echo-deezer-extension) by LuftVerbot.
-
----
-
-## Disclaimer
-
-Gladix is intended for personal use only. The developer is not liable for any misuse or legal issues arising from its use. This application hosts zero content — all content is sourced from user-configured extensions and external services.
+Built on [Echo](https://github.com/brahmkshatriya/echo) by [brahmkshatriya](https://github.com/brahmkshatriya). Extension architecture, core playback and much of the interface are theirs.

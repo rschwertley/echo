@@ -24,6 +24,9 @@ import kotlinx.serialization.json.jsonObject
 
 class DeezerParser(private val session: DeezerSession) {
 
+    /** Cap on the raw-item JSON dump in the silent-drop diagnostic. REMOVE WITH THE TRACE. */
+    private val RAW_ITEM_LOG_CAP = 600
+
     /**
      * The SECTION overload — the receiver is the whole section object, not a bare data array.
      *
@@ -78,21 +81,72 @@ class DeezerParser(private val session: DeezerSession) {
      * If you come back to make the arrow fetch, the section `target` is where to look — and note that a
      * fetched page returning Lists would make the termination note above no longer hold.
      */
+    // `block` is RETAINED BUT UNUSED while the fetch branch is off — see the ⚠️ note below. Keeping the
+    // parameter (and channelFeed, and the target read) means re-enabling is a one-expression change rather
+    // than a re-plumb, and it keeps the two call sites that pass a resolver honest about their intent.
+    @Suppress("UNUSED_PARAMETER")
     fun JsonElement.toShelfItemsList(
         name: String = "Unknown",
         block: (suspend (String) -> List<Shelf>)? = null,
     ): Shelf? {
-        val items = obj()["items"]?.jsonArray?.mapObjects { it.toEchoMediaItem() }.orEmpty()
+        val rawItems = obj()["items"]?.jsonArray
+        val items = rawItems?.mapObjects { it.toEchoMediaItem() }.orEmpty()
         // Section-level target, NOT the item-level one toChannel reads. Absent on some sections by design.
         val target = obj().str("target")
+
+        // ── SILENT-DROP DIAGNOSTIC (2026-09-05, temporary, GladixDeezer). REMOVE WITH THE TRACE. ──
+        // A section that parses to zero items returns null here and is then removed by the caller's
+        // filterNotNull()/getOrNull() — the row simply is not on Home, with no signal anywhere. That is
+        // exactly how "Made for you" (5 items, every one lacking __TYPE__ so every one parsing to null)
+        // went unnoticed. Print WHY, plus the raw first item so the item shape can be classified:
+        //   __TYPE__ present but nested where unwrap() does not reach -> fix unwrap, row works
+        //   no __TYPE__ but identifiable another way                  -> fallback branch on what IS there
+        //   nothing usable                                            -> dropping is right, silence is the bug
+        // ⚠️ PRINTS RAW RESPONSE JSON, length-capped. Strip before any release build.
+        if (items.isEmpty()) {
+            val reason = when {
+                rawItems == null -> "no-items-key"
+                rawItems.isEmpty() -> "items-empty"
+                else -> "no-item-parsed"
+            }
+            val first = rawItems?.firstOrNull()?.toString()?.take(RAW_ITEM_LOG_CAP) ?: "-"
+            println(
+                "GladixDeezer DROP section=\"$name\" reason=$reason raw=${rawItems?.size ?: 0} " +
+                    "parsed=0 target=${target ?: "?"} firstItem=$first"
+            )
+        }
+
         return items.takeIf { it.isNotEmpty() }?.let { list ->
             Shelf.Lists.Items(
                 id = name,
                 title = name,
                 list = list,
-                more = if (block != null && !target.isNullOrBlank())
-                    Feed(emptyList()) { block(target).toFeedData() }
-                else PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
+                // ⚠️ FETCH BRANCH DISABLED 2026-09-05 — EVERY SECTION RE-WRAPS. Do not re-enable without
+                // reading this. It was added by f03492fc and had ZERO working cases on device.
+                //
+                // WHY: a Home section's `target` is not one endpoint, it is FOUR FAMILIES, and channelFeed
+                // assumes one shape (a page with results.sections). Captured on device 2026-09-05:
+                //   /channels/module/<uuid>  Summer in slow-mo, Playlists you'll love, Recently you've
+                //                            been loving, Playlists you love — fetched, page came back
+                //                            section-shaped but yielded nothing. EMPTY rows. Body never
+                //                            captured; nobody has seen what this endpoint returns.
+                //   /channels/explore        Your top genres — read but NEVER USED: channel-item sections
+                //                            route to toShelfCategoryList, whose `more` is cats.toFeed().
+                //   /channels/new            New releases for you — untested.
+                //   /artist/<id>             Since you like <artist> — an ARTIST endpoint with NO
+                //                            "sections" key, so channelFeed's second `!!` throws. That is
+                //                            the retraced crash: DeezerExtension.kt:379, confirmed against
+                //                            build 1077's mapping (pg_map_id 9d7725eb…), frame nm0.a:127.
+                //
+                // The re-wrap path is not a fallback here, it is the whole behaviour: it opens the row's
+                // existing items as a vertical page. That is the only thing the arrow has ever done
+                // usefully — "Your top genres" showing 6 on Home and 12 expanded is this path working.
+                //
+                // ⚠️ RE-ENABLING MEANS HANDLING FAMILIES, NOT A SHAPE. A per-target dispatch needs three
+                // response bodies nobody has captured; an allowlist that only fetches known-good targets
+                // fails safe but must not treat "/channels/" as one family, since /channels/module/ is
+                // among the broken ones. Blocked on a /channels/module/<uuid> capture either way.
+                more = PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
             )
         }
     }

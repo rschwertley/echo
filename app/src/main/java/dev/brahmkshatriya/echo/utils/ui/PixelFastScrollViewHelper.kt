@@ -1,8 +1,10 @@
 package dev.brahmkshatriya.echo.utils.ui
 
 import android.graphics.Canvas
+import android.util.Log
 import android.view.MotionEvent
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.appbar.AppBarLayout
 import me.zhanghai.android.fastscroll.FastScroller
 import me.zhanghai.android.fastscroll.Predicate
 
@@ -109,8 +111,46 @@ import me.zhanghai.android.fastscroll.Predicate
  * carried pre-emptively.
  */
 class PixelFastScrollViewHelper(
-    private val view: RecyclerView
+    private val view: RecyclerView,
+    /**
+     * The collapsing header ABOVE this list, when there is one — null on every full-bleed screen.
+     *
+     * ⚠️ NOT DISCOVERED, PASSED IN. The AppBarLayout is a SIBLING under the CoordinatorLayout (this
+     * RecyclerView lives inside a FragmentContainerView), never an ancestor, so walking up the view tree
+     * would have to scan the CoordinatorLayout's children and guess. Call sites resolve it explicitly.
+     *
+     * When null every composite term below is zero and the arithmetic reduces EXACTLY to what the six
+     * full-bleed screens use today. That is the containment guarantee: those screens are not on a
+     * different branch, they are on the same expression with an additive identity.
+     */
+    private val appBar: AppBarLayout? = null,
+    /** Screen tag for the temporary trace only. REMOVE WITH THE TRACE. */
+    private val traceTag: String = "?",
 ) : FastScroller.ViewHelper {
+
+    // ── COMPOSITE SCROLL METRICS (2026-09-05) ────────────────────────────────────────────────────────
+    // A collapsing screen has TWO stacked scroll axes: the header collapsing, then the list travelling.
+    // FastScroller's contract is one-dimensional, and computeVerticalScrollOffset/Range describe only the
+    // SECOND — so on those screens the pixels the AppBarLayout consumes are invisible to the thumb.
+    // RecyclerView.nestedScrollBy returns VOID (RecyclerView.java:2074) and subtracts whatever
+    // dispatchNestedPreScroll consumed before scrolling, so scrollTo cannot see the loss either: the drag
+    // spends finger pixels the list never travelled.
+    //
+    // The AppBarLayout's contribution is a pure ADDITIVE term available through public Material API, so it
+    // can be represented rather than worked around. verticalOffset runs 0 (expanded) to -totalScrollRange
+    // (collapsed), hence the negation.
+    private var appBarConsumed = 0
+
+    /** Trace throttle in px. REMOVE WITH THE TRACE. */
+    private val DRAG_LOG_PX = 24
+
+    private val appBarRange get() = appBar?.totalScrollRange ?: 0
+
+    init {
+        appBar?.addOnOffsetChangedListener(
+            AppBarLayout.OnOffsetChangedListener { _, verticalOffset -> appBarConsumed = -verticalOffset }
+        )
+    }
 
     /**
      * True while FastScroller is driving the list from a touch it consumed. NOT `view.scrollState`: that
@@ -132,6 +172,95 @@ class PixelFastScrollViewHelper(
     /** Sub-pixel remainder carried between frames so a long slow drag cannot drift. */
     private var pendingPixels = 0.0
 
+    // ── TRACE (2026-09-05, temporary, GladixScroll). REMOVE WITH THE INVESTIGATION. ──────────────────
+    // Two lines, because the open questions live at two different moments and one cannot answer the other.
+    //   rest:  fires on IDLE. Decides whether artist's mid-rail rest position comes from a non-zero
+    //          offset (composite layer can reach it) or not (it cannot, and the fallback is to gate the
+    //          scroller off on collapsing screens). `extent` is printed so offset+extent==range — the
+    //          identity in liveRange's note above — is checkable directly rather than inferred.
+    //   drag:  fires during scrollTo. This is where read 4 lives: `req` is what scrollTo ASKED
+    //          nestedScrollBy for, and nestedScrollBy reports nothing back, so req vs the change in
+    //          `offset` is the only way to observe the AppBarLayout eating the delta.
+    //
+    // Throttled on a PIXEL DELTA, not every Nth event: a drag is frame-driven, so an event counter samples
+    // at a rate that varies with finger speed, while a pixel threshold samples uniformly in the quantity
+    // under investigation and still emits during a slow drag at the stall point.
+    private var lastDragLogAt = 0
+    private var dragReqAccum = 0
+
+    /**
+     * The appBar field for both trace lines. REMOVE WITH THE TRACE.
+     *
+     * ⚠️ "none" AND "0/N" MEAN DIFFERENT THINGS AND MUST NOT BE CONFLATED. A null [appBar] makes every
+     * composite term zero, which produces today's arithmetic with new logging — indistinguishable from
+     * "the composite ran and the header happened to be expanded" if this printed a bare 0. On a `media` or
+     * `seeall` line, "none" means requireParentFragment().view?.findViewById(R.id.appBarLayout) returned
+     * null and THE COMPOSITE NEVER RAN: that capture cannot answer anything about the fix. On a `main`
+     * line "none" is correct and expected — those screens have no collapsing header by design.
+     */
+    private fun appBarField() =
+        if (appBar == null) "none" else "$appBarConsumed/$appBarRange"
+
+    private fun thumbFrac(): Double {
+        val span = (getScrollRange() - view.height).coerceAtLeast(1)
+        return getScrollOffset().toDouble() / span
+    }
+
+    /** REMOVE WITH THE TRACE. Called from the scroll listener when the list settles. */
+    private fun logRest() {
+        Log.d(
+            "GladixScroll",
+            ("rest: screen=%s atTop=%b atBottom=%b offset=%d extent=%d range=%d height=%d " +
+                "padTop=%d padBottom=%d appBar=%s thumbFrac=%.3f").format(
+                traceTag,
+                !view.canScrollVertically(-1),
+                !view.canScrollVertically(1),
+                getScrollOffset(),
+                view.computeVerticalScrollExtent(),
+                getScrollRange(),
+                view.height,
+                view.paddingTop,
+                view.paddingBottom,
+                appBarField(),
+                thumbFrac(),
+            )
+        )
+    }
+
+    /** REMOVE WITH THE TRACE. [req] is the delta handed to nestedScrollBy on this call. */
+    private fun logDrag(req: Int) {
+        dragReqAccum += req
+        if (kotlin.math.abs(dragReqAccum - lastDragLogAt) < DRAG_LOG_PX) return
+        lastDragLogAt = dragReqAccum
+        Log.d(
+            "GladixScroll",
+            "drag: screen=%s req=%d offset=%d range=%d appBar=%s thumbFrac=%.3f".format(
+                traceTag, req, getScrollOffset(), getScrollRange(), appBarField(), thumbFrac()
+            )
+        )
+    }
+
+    /**
+     * ⚠️ THE PADDING TERM IS LOAD-BEARING. IT IS WHAT LETS THE THUMB REACH THE BOTTOM. Do not remove it.
+     *
+     * Established 2026-09-04 by reading AndroidFastScroll and RecyclerView together, WRONGLY CALLED A
+     * DEFECT on 2026-09-05, and reinstated the same day. Recording the algebra so the next reader does not
+     * repeat the retraction:
+     *
+     *   computeVerticalScrollExtent() = min(getTotalSpace(), laidOutExtent)
+     *                                 = height - padTop - padBottom   (list longer than the viewport)
+     *   at the true bottom:  offset = range - extent = range - height + padTop + padBottom
+     *   FastScroller uses:   scrollOffsetRange = getScrollRange() - mView.getHeight()
+     *                                          = range + padTop + padBottom - height
+     *   -> the two are EQUAL, so offset/scrollOffsetRange reaches exactly 1.0 and the thumb lands flush.
+     *
+     * Drop the padding and offset_at_bottom EXCEEDS scrollOffsetRange, so mThumbOffset overshoots
+     * getThumbOffsetRange() and the thumb is positioned past the end of its own track. The asymmetry is
+     * REQUIRED because extent subtracts the padding and getScrollOffsetRange subtracts the full height.
+     *
+     * Source: ScrollbarHelper.computeScrollExtent / OrientationHelper.getTotalSpace (recyclerview 1.4.0);
+     * FastScroller.getScrollOffsetRange (AndroidFastScroll 1.3.0, decoded from the AAR — no sources jar).
+     */
     private fun liveRange() =
         view.computeVerticalScrollRange() + view.paddingTop + view.paddingBottom
 
@@ -143,7 +272,7 @@ class PixelFastScrollViewHelper(
      * while the numerator stayed live broke that cancellation and made the thumb wander mid-drag, which
      * is exactly what was observed. [scrollTo] no longer needs it frozen; see there.
      */
-    override fun getScrollRange() = liveRange()
+    override fun getScrollRange() = appBarRange + liveRange()
 
     /**
      * Plain live measurement, and with [scrollTo] no longer subtracting it there is nothing it can feed
@@ -153,7 +282,7 @@ class PixelFastScrollViewHelper(
      * finger. Not needed: with [getScrollRange] live, the estimate's average cancels between this and the
      * range, so the thumb already sits at roughly `itemsBefore / itemCount` on its own.
      */
-    override fun getScrollOffset() = view.computeVerticalScrollOffset()
+    override fun getScrollOffset() = appBarConsumed + view.computeVerticalScrollOffset()
 
     /**
      * A DELTA, not an absolute seek — RecyclerView has no "set pixel scroll" to mirror `View.scrollTo`.
@@ -303,7 +432,10 @@ class PixelFastScrollViewHelper(
             lastFraction = fraction
             pendingPixels = 0.0
             val jump = offset - view.computeVerticalScrollOffset()
-            if (jump != 0) view.nestedScrollBy(0, jump)
+            if (jump != 0) {
+                logDrag(jump)
+                view.nestedScrollBy(0, jump)
+            }
             return
         }
         pendingPixels += (fraction - lastFraction) * gestureSpan
@@ -311,6 +443,7 @@ class PixelFastScrollViewHelper(
         val delta = pendingPixels.toInt()
         if (delta == 0) return
         pendingPixels -= delta
+        logDrag(delta)
         view.nestedScrollBy(0, delta)
     }
 
@@ -328,6 +461,11 @@ class PixelFastScrollViewHelper(
         view.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 onScrollChanged.run()
+            }
+
+            // REMOVE WITH THE TRACE.
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) logRest()
             }
         })
     }
