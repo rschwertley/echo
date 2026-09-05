@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import org.koin.androidx.viewmodel.ext.android.viewModel
@@ -171,9 +172,36 @@ class ExtensionsViewModel(
         else runCatching { installFile(app.context, extensionLoader.fileIgnoreFlow, id, file) }
     }
 
+    // SUBSCRIBE-THEN-EMIT, VIA onSubscription. NOT COSMETIC, AND DO NOT REORDER BACK.
+    //
+    // This used to be `installFileFlow.emit(file)` followed by `installedFlow.first { ... }` — emit first,
+    // subscribe second. Both flows are replay-0 MutableSharedFlows, and a replay-0 emission with no
+    // subscriber is DISCARDED, not deferred. So any path where the collector finishes installing before
+    // this coroutine gets as far as subscribing loses the result permanently, and `first { }` then waits
+    // forever: no message, no failure, and the caller has already written last_update_check, so nothing
+    // retries for 24h. A silent strand, on the app-update path that has never once executed.
+    //
+    // The window is normally closed by luck rather than by design: configureExtensionsUpdater's collector
+    // calls installApp, which suspends almost immediately at waitForResult (launching the installer), and
+    // that suspension hands the main thread back so this coroutine can subscribe. The luck runs out when
+    // installApp fails WITHOUT ever suspending — FileProvider.getUriForFile throws IllegalArgumentException
+    // synchronously for a path the provider does not cover — because runCatching then emits the failure
+    // with no suspension in between.
+    //
+    // onSubscription runs its block AFTER this collector is registered and BEFORE any value is collected,
+    // which is the exact guarantee needed: the install cannot start until someone is listening for how it
+    // ends. Same replay-0 mechanism as the Aug/Sep queueFlow defect, opposite direction — that one lost an
+    // emission because the SUBSCRIBER was gone, this one because the subscriber had not arrived yet.
+    //
+    // (!) THIS DOES NOT COVER the other half: if the ACTIVITY is destroyed (a config change) while an
+    // install is in flight, installFileFlow's emit reaches no collector at all and is dropped the same way.
+    // That one is deliberately left open — buffering does not fix it (a buffer holds values for existing
+    // slow subscribers; it does not retain them for a future one), and replay does, but replay changes what
+    // a LATE subscriber sees at subscribe time, which is what caused the cold-start hang. See the report.
     private suspend fun awaitInstallation(file: File): Result<Unit> {
-        installFileFlow.emit(file)
-        return installedFlow.first { it.first == file }.second
+        return installedFlow
+            .onSubscription { installFileFlow.emit(file) }
+            .first { it.first == file }.second
     }
 
     fun promptDismissed(

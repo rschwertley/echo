@@ -181,6 +181,7 @@
     <string name="allow_opening_links">Allow opening links</string>
     <string name="open_links_instruction">To allow opening these links, you need to:\n- Scroll down and click on \"Open by Default\"\n- Click on \"+ Add Link\"</string>
     <string name="downloading_update_for_x">Downloading update for %1$s</string>
+    <string name="install_permission_needed_for_update">Update ready, but %1$s is not allowed to install it. Allow installing unknown apps for %1$s, then check for updates again.</string>
     <string name="extension_updated_successfully">%1$s updated successfully</string>
     <string name="link">Link</string>
     <string name="link_or_code">Link or Code</string>

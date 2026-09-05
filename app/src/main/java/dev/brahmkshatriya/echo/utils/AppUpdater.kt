@@ -1,3 +1,19 @@
+// ⚠️ READ BEFORE REMOVING THE SUPPRESSION BELOW (or the @Suppress("KotlinConstantConditions") on
+// updateApp). BuildConfig.BUILD_TYPE is a compile-time constant, so in any single variant every arm of
+// updateApp's `when (appType)` except that variant's own is provably dead, and every `appType == "..."`
+// test is provably true or false. These two suppressions silence exactly the warnings that fact would
+// raise — and that is the mechanism by which three separate defects lived in this file undetected until
+// 2026-09-05, all of them in code no variant had ever executed:
+//   1. NO "release" ARM AT ALL, so this fork's only distributed variant fell to `else -> return null` and
+//      was never told about any update — silently, forever.
+//   2. The download branch read `if (appType == "stable")`, a test that is CONSTANT FALSE in every
+//      variant that can reach it except stable, which this fork never builds.
+//   3. (2) then routed the new release arm into unzipApk, failing every update with "No APK file found
+//      in the zip".
+// Kept rather than removed because they predate all of the above and their original reason is not
+// recorded anywhere I could find — an unexplained suppression is a reason for more caution, not less.
+// But whoever removes them should expect real findings, not noise: the warnings they hide are about
+// branches that cannot run, which is precisely the defect class this file keeps producing.
 @file:Suppress("UNREACHABLE_CODE")
 
 package dev.brahmkshatriya.echo.utils
@@ -92,9 +108,20 @@ object AppUpdater {
         // That is the reading that makes the requirement verifiable: install_source = com.android.vending
         // together with app_update_attempted = true is a violation, and nothing else can set this key
         // (updateApp has no extension callers). It can be true while no network call follows — a debug
-        // or plain release build returns null at the `else` branch — which is correct for this question.
+        // build returns null at the `else` branch — which is correct for this question. (Before the
+        // "release" arm was added on 2026-09-05 this sentence also said "or plain release build"; release
+        // now has its own arm and does reach the network.)
         CrashKeys.onAppUpdateGatePassed()
         val messageFlow = app.messageFlow
+        // (!) LOCALE-RESOLVED, AND THAT IS A HAZARD, NOT A DETAIL. This getString decides WHICH REPO the
+        // app fetches its own updates from, and values-bn/strings.xml carries its own copy of
+        // app_github_repo. The two are identical today (rschwertley/gladix, checked 2026-09-05), so
+        // nothing is wrong right now — but a device in that locale reads the override, not values/, and a
+        // divergence would silently point self-update at a different repo for those users only.
+        // `translatable="false"` does NOT prevent this: it is a tooling hint that keeps a string out of
+        // translation exports, and has no effect on resource resolution once an override exists in the
+        // tree. Same shape as the self-update string finding. If this ever needs to be guaranteed
+        // locale-invariant, it belongs in BuildConfig, not in resources.
         val githubRepo = app.context.getString(R.string.app_github_repo)
         val appType = BuildConfig.BUILD_TYPE
         val version = appVersion()
@@ -166,7 +193,66 @@ object AppUpdater {
         // APK. Gating at the call site instead would prompt every user every 24h even when nothing
         // is available; gating after the download would spend ~40MB on a user who then declines.
         // The default no-op keeps this a pure addition for any caller that doesn't pass one.
-        if (!ensureInstallPermission()) return null
+        //
+        // A DECLINE MUST NOT BE SILENT, and this is the only `return null` on the path that the user can
+        // do something about. Everything else that returns null here is either correct (no update, a store
+        // install) or already reported via throwFlow. This one meant: an update EXISTS, we resolved its
+        // url, and we then stopped — with no message, no error, and no way to tell it apart from "you are
+        // up to date". The next check is 24h away (ExtensionsViewModel saves last_update_check BEFORE
+        // calling us), so a single mis-tap postponed the update for a day and said nothing.
+        //
+        // A MESSAGE, NOT A LOG LINE: "allow installing unknown apps" is a setting the user owns and can
+        // fix in about ten seconds, which makes it worth their attention; a log line would only help us,
+        // and we are not the ones who can act. It is deliberately NOT gated on the caller's `force` flag,
+        // matching the "downloading update for X" emit below — the no-announcement rule covers checks that
+        // found nothing, not work that actually started and then stopped.
+        //
+        // PLAIN Message, NO Action button, for two reasons: Message.Action's handler is a plain
+        // `() -> Unit`, so it cannot call this suspend helper again to re-open the settings screen, and it
+        // has no Activity to launch one from — updateApp holds `app` and a lambda, not a host. The text
+        // therefore has to be self-contained about what to do.
+        //
+        // ⚠️ THIS MESSAGE MUST BE ABLE TO REPEAT — the user has to leave, grant the permission, come back
+        // and check again, so one showing is not enough. It does repeat, and the reason is worth stating
+        // because it is not obvious: emitting to app.messageFlow DIRECTLY bypasses SnackBarHandler.create,
+        // which is the only thing that touches the deduped, activity-recreation-surviving `messages` queue.
+        // MainActivity observes app.messageFlow itself, so a direct emit is shown and forgotten. Every
+        // other update-path message works this way too (ExtensionsViewModel.message, "Downloading update
+        // for X"), which is why those repeat on every check.
+        //
+        // ⚠️ SO DO NOT "TIDY" THIS INTO createSnack/SnackBarHandler.create. That would enrol it in the
+        // dedupe (by text + action name) and it would then be suppressed for as long as an identical entry
+        // sits in the queue — exactly wrong for a message whose whole purpose is to reappear on the next
+        // check. Queue entries are dropped on dismissal, so the suppression is not permanent, but the
+        // semantics are still wrong for this one.
+        //
+        // RESIDUAL RISK, ACCEPTED AND NOT FIXED HERE: app.messageFlow's only subscriber is a
+        // lifecycle-gated observe() (ContextUtils.observe -> flowWithLifecycle, STARTED). Its 64-slot
+        // DROP_OLDEST buffer stops an emit from suspending, but a buffer does not retain values for a
+        // subscriber that is not there yet, so a message emitted while MainActivity is STOPPED is still
+        // lost. That is a live concern for this particular message, because it is emitted immediately after
+        // returning from the system settings screen, i.e. right at the moment our Activity is coming back
+        // to STARTED. Making it survive that window needs a held-state mechanism (something the Activity
+        // drains on start), not a bigger buffer and not a different emit shape.
+        //
+        // In the normal case the user has ALREADY seen the system "install unknown apps" screen by now —
+        // ensureCanInstallPackages launches it and re-queries afterwards — so this reads as the follow-up
+        // to something they just did rather than an unprompted demand. The exception is a device with no
+        // handler for ACTION_MANAGE_UNKNOWN_APP_SOURCES: there the helper catches the failure and returns
+        // false having shown NOTHING, and this message is the only thing the user ever sees. That case is
+        // an argument for the message, not against it.
+        if (!ensureInstallPermission()) {
+            messageFlow.emit(
+                Message(
+                    app.context.run {
+                        getString(
+                            R.string.install_permission_needed_for_update, getString(R.string.app_name)
+                        )
+                    }
+                )
+            )
+            return null
+        }
 
         messageFlow.emit(
             Message(
@@ -177,7 +263,24 @@ object AppUpdater {
         )
         return runCatching {
             val download = downloadUpdate(app.context, url, client).getOrThrow()
-            if (appType == "stable") download else unzipApk(download)
+            // WHY THE UNZIP BRANCH EXISTS AT ALL: only "nightly" downloads a zip. Its url is
+            // nightly.link/<repo>/actions/runs/<id>/artifact.zip, and nightly.link serves GitHub ACTIONS
+            // ARTIFACTS, which the Actions API only ever exposes as a zip - the APK is an entry inside it.
+            // Every other channel points at a GitHub RELEASE ASSET, which is the plain .apk that was
+            // uploaded. So the zip is a property of one channel's artifact hosting, not of the app.
+            //
+            // (!) THE OLD FORM WAS `if (appType == "stable") download else unzipApk(download)` - AN
+            // EXCLUSION LIST OF ONE. It asked "is this not stable" when the real question is "is this
+            // nightly", so adding the "release" arm above on 2026-09-05 silently put this fork's ONLY
+            // distributed variant on the unzip side. The symptom is not a crash and does not name the
+            // cause: an APK is itself a zip, so ZipFile() opens it happily and unzipApk then fails looking
+            // for a nested ".apk" entry, giving the user "No APK file found in the zip" on every single
+            // update attempt, forever.
+            //
+            // In this form a future channel that serves a plain APK needs NO CHANGE HERE - it falls to
+            // `download` by default, which is the safe side. Only a channel that genuinely ships a zip
+            // has to be named.
+            if (appType == "nightly") unzipApk(download) else download
         }.getOrElse {
             if (it is CancellationException) throw it
             // Same reasoning as the check above, and this is the likelier half to fail: the APK

@@ -7,6 +7,52 @@
     android:orientation="vertical"
     android:paddingTop="0dp">
 
+    <!-- ⚠️ CONSTRAINTLAYOUT WRAPPER, NOT DECORATION. Moved here from fragment_media.xml's
+         CollapsingToolbarLayout on 2026-09-05 so the RecyclerView spans the screen and the fast-scroll
+         rail (drawn into its ViewGroupOverlay) starts at the visual top. The wrapper is REQUIRED, not
+         stylistic: @style/ItemCover is built entirely from ConstraintLayout.LayoutParams
+         (layout_constraintDimensionRatio, constraintWidth_max/constraintHeight_max,
+         constraintTop/Start/End_to*Of) and those are SILENTLY IGNORED inside a LinearLayout — the cover
+         would render unbounded and unsquared with no error. MediaHeaderAdapter's artist cap also does
+         updateLayoutParams<ConstraintLayout.LayoutParams>, which requires this parent type.
+
+         The style is applied UNCHANGED so @dimen/media_header_cover_size (250dp) keeps binding through it.
+         2026-06-15 proved that dimen is live — setting it to 219dp did shrink the cover — so it is
+         preserved by reusing the style rather than by copying numbers out of it.
+
+         layout_constraintBottom_toBottomOf is added HERE rather than in the style: the old parent was
+         height=match_parent inside the CTL, where the 1:1 ratio resolved against a fixed height. This
+         wrapper is wrap_content, so the cover is constrained top AND bottom and the ratio drives height
+         from the max-capped width. The style is shared, so the extra constraint stays local to this file. -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="16dp">
+
+        <androidx.cardview.widget.CardView
+            android:id="@+id/coverContainer"
+            style="@style/ItemCover"
+            app:layout_constraintBottom_toBottomOf="parent"
+            tools:ignore="MissingConstraints">
+
+            <ImageView
+                android:id="@+id/cover"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:importantForAccessibility="no"
+                tools:ignore="ImageContrastCheck" />
+
+        </androidx.cardview.widget.CardView>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!-- ⚠️ -32dp IS CALIBRATED (2026-06-11, -56dp -> -32dp). It is PRESERVED, not re-derived, because the
+         relationship it encodes is untouched by the cover move: marginBottom pulls the NEXT SIBLING (the
+         explicit/followers row) up by 32dp so that left-aligned text tucks beside this right-aligned
+         (layout_gravity="end") button row. Net footprint = buttonHeight + 8dp (inner marginBottom) - 32dp.
+         The cover is a NEW SIBLING ABOVE this one, so nothing between the buttons and the text below them
+         changes, and the gap above the buttons is set by the wrapper's paddingTop, not by this margin.
+         If the cover is ever placed BESIDE or BELOW the buttons, this number must be re-derived. -->
     <HorizontalScrollView
         android:id="@+id/buttonGroup"
         android:layout_width="wrap_content"

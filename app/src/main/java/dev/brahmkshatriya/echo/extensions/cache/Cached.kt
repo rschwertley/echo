@@ -70,6 +70,29 @@ object Cached {
     // more slowly than that). Every in-app mutation busts its own entry, so this bounds only EXTERNAL edits.
     private const val TRACKS_TTL_MS = 24L * 60 * 60 * 1000  // 24h
 
+    // ══ DURABLE-CACHE ELIGIBILITY ══
+    // GENERAL RULE: an item that carries its own expiry in `extras` is NOT written to, or read from, a
+    // durable store. It still gets the in-flight dedup and the 5-minute memory layer, which are bounded by
+    // the session; only the 24h on-disk entry is refused.
+    //
+    // The rule is about the EXPIRY, not about any particular kind of item. TRACKS_TTL_MS is our own 24h
+    // guess at how fast a list changes underneath us, and it is a good guess for a user-built playlist. An
+    // item that ships an expiry has told us the answer directly, and it is not our number: whatever the
+    // source says, it supersedes the guess. Caching such an item durably would serve a list the SOURCE has
+    // already declared dead, for up to a day, with pull-to-refresh as the only escape — the same failure
+    // shape the prefetch asymmetry above exists to prevent.
+    //
+    // Written as a rule rather than a type check so any future item type that carries an expiry is covered
+    // the day it lands, with no edit here. The first producer is Deezer's smarttracklist (the "Made for
+    // you" daily mixes, which regenerate ~05:00 and set `expires` from EXPIRATION_DATE — see
+    // DeezerParser.toSmartTracklist), but nothing below knows or cares about that.
+    //
+    // The VALUE is deliberately not parsed. Any format an extension chooses would have to be understood
+    // here, and a parse failure would silently fall back to caching — the exact outcome the rule exists to
+    // prevent. Presence of the key is the whole contract; "expires" is the reserved name.
+    private const val EXPIRES_EXTRA = "expires"
+    private fun EchoMediaItem.carriesExpiry() = extras.containsKey(EXPIRES_EXTRA)
+
     // History's toSlim drops ALL extras; a playlist track's NEXT / playlist_id are read by DeezerUtil.log
     // (play-logging context), so preserve exactly those two while dropping streamables + everything heavy.
     private fun Track.toPlaylistSlim(): Track =
@@ -283,7 +306,7 @@ object Cached {
         val itemId = item.id
         // Playlist tracks live in an isolated durable store (canonical re-resolve is expensive). Instant
         // cached read, age-agnostic; loadTracks owns the TTL/revalidate decision.
-        val durableFolder = when (item) {
+        val durableFolder = if (item.carriesExpiry()) null else when (item) {
             is Playlist -> DURABLE_PLAYLIST_FOLDER
             is Album -> DURABLE_ALBUM_FOLDER
             else -> null
@@ -371,7 +394,10 @@ object Cached {
     private suspend fun loadPlaylistTracksCached(
         app: App, extension: Extension<*>, item: Playlist,
     ): Feed<Track> {
-        val cached = app.context.getFromCache<CachedPlaylistTracks>(
+        // See carriesExpiry: an item with its own expiry skips BOTH the read and the write below, so it
+        // falls through to the coalesced fetch every open and is never served from disk.
+        val durable = !item.carriesExpiry()
+        val cached = if (!durable) null else app.context.getFromCache<CachedPlaylistTracks>(
             "${item.id}-tracks", DURABLE_PLAYLIST_FOLDER, durable = true
         )
         if (cached != null && System.currentTimeMillis() - cached.savedAtMs < TRACKS_TTL_MS)
@@ -388,7 +414,7 @@ object Cached {
             val feed = extension.getAs<PlaylistClient, Feed<Track>> { loadTracks(item) }.getOrThrow()
             feed.loadAll()
         }
-        app.context.saveToCache(
+        if (durable) app.context.saveToCache(
             "${item.id}-tracks",
             CachedPlaylistTracks(System.currentTimeMillis(), tracks.map { it.toPlaylistSlim() }),
             DURABLE_PLAYLIST_FOLDER, durable = true
@@ -442,7 +468,10 @@ object Cached {
     private suspend fun loadAlbumTracksCached(
         app: App, extension: Extension<*>, item: Album,
     ): Feed<Track>? {
-        val cached = app.context.getFromCache<CachedPlaylistTracks>(
+        // Same eligibility rule as the playlist path — see carriesExpiry. No album ships an expiry today;
+        // it is here so the rule is genuinely general and does not have to be rediscovered when one does.
+        val durable = !item.carriesExpiry()
+        val cached = if (!durable) null else app.context.getFromCache<CachedPlaylistTracks>(
             "${item.id}-tracks", DURABLE_ALBUM_FOLDER, durable = true
         )
         if (cached != null && System.currentTimeMillis() - cached.savedAtMs < TRACKS_TTL_MS)
@@ -457,7 +486,7 @@ object Cached {
             feed.loadAll()
         }
         if (tracks.isEmpty()) return null
-        app.context.saveToCache(
+        if (durable) app.context.saveToCache(
             "${item.id}-tracks",
             CachedPlaylistTracks(System.currentTimeMillis(), tracks.map { it.toAlbumSlim() }),
             DURABLE_ALBUM_FOLDER, durable = true

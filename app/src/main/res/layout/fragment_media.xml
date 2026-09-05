@@ -7,53 +7,41 @@
     android:layout_height="match_parent"
     android:fitsSystemWindows="true">
 
+    <!-- ⚠️ NON-COLLAPSING BY DESIGN (2026-09-05). Do not reintroduce a CollapsingToolbarLayout here.
+         WHY: the fast-scroll rail is drawn into the RecyclerView's ViewGroupOverlay (FastScroller's
+         constructor calls mView.getOverlay().add(...) three times), so the rail can only ever span the
+         RecyclerView. Under a CollapsingToolbarLayout, HeaderScrollingViewBehavior sized the RecyclerView
+         to `viewport - collapsedHeight` and positioned it BELOW the header, so the rail began ~633px down
+         the screen and the thumb rested there at the top of its own track. Four models were built hunting
+         a displaced thumb before a rest: capture showed offset=0 padTop=0 thumbFrac=0.000 — it had always
+         been at the top of a track that started too low. Drawing the rail higher dies on touch delivery:
+         a RecyclerView.OnItemTouchListener only sees events delivered to the RecyclerView.
+         With no `scroll` flag on any child, AppBarLayout.getTotalScrollRange() breaks its loop at i=0 and
+         returns Math.max(0, 0) = 0 (decoded from the 1.14.0 AAR), so PixelFastScrollViewHelper's composite
+         terms are both 0 and the arithmetic reduces to the flat-screen path exactly — the same reduction
+         Home already gets. The cover and expanded title moved into MediaHeaderAdapter (item 0).
+         DELIBERATELY GIVEN UP: the pinned collapsed title and the cover parallax/fade.
+
+         paddingBottom="49dp" IS NOT MISSING — it was DELETED, not lost. It was residue of the CTL's
+         circular measurement dependency (AppBarLayout and CTL both wrap_content, CTL height scaling ~1.5x
+         paddingBottom rather than 1:1, cover size and expanded-title space contending through one knob),
+         settled empirically at 43dp on 2026-06-15 after three uiautomator dumps and later carried at 49dp.
+         With the CTL gone none of those inputs exist and the value has no justification. Do not restore it
+         looking for a lost gap. The same applies to the 2026-06-13 title work — titleCollapseMode fade,
+         maxLines 2, expandedTitleMarginEnd, and the expandedTitleEllipsize attribute that does not exist in
+         Material 1.14.0 — all CTL attributes with no successor here. -->
     <com.google.android.material.appbar.AppBarLayout
         android:id="@+id/appBarLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:fitsSystemWindows="true">
 
-        <com.google.android.material.appbar.CollapsingToolbarLayout
-            android:id="@+id/collapsingToolbar"
-            style="@style/EchoCollapsingBar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:expandedTitleMarginBottom="14dp"
-            app:expandedTitleMarginEnd="24dp"
-            app:expandedTitleTextAppearance="@style/MediaHeaderTitle"
-            app:maxLines="2">
-
-            <androidx.constraintlayout.widget.ConstraintLayout
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:paddingTop="16dp"
-                android:paddingBottom="49dp">
-
-                <androidx.cardview.widget.CardView
-                    android:id="@+id/coverContainer"
-                    style="@style/ItemCover"
-                    tools:ignore="MissingConstraints">
-
-                    <ImageView
-                        android:id="@+id/cover"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:importantForAccessibility="no"
-                        tools:ignore="ImageContrastCheck" />
-
-                </androidx.cardview.widget.CardView>
-
-            </androidx.constraintlayout.widget.ConstraintLayout>
-
-
-            <com.google.android.material.appbar.MaterialToolbar
-                android:id="@+id/toolBar"
-                style="@style/Toolbar"
-                android:background="@android:color/transparent"
-                app:menu="@menu/more_menu"
-                tools:title="@tools:sample/full_names" />
-
-        </com.google.android.material.appbar.CollapsingToolbarLayout>
+        <com.google.android.material.appbar.MaterialToolbar
+            android:id="@+id/toolBar"
+            style="@style/Toolbar"
+            android:background="@android:color/transparent"
+            app:menu="@menu/more_menu"
+            tools:title="@tools:sample/full_names" />
 
     </com.google.android.material.appbar.AppBarLayout>
 

@@ -14,10 +14,12 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.util.concurrent.atomic.AtomicBoolean
 
 class DeezerHomeFeedClient(
     private val deezerExtension: DeezerExtension,
@@ -34,7 +36,13 @@ class DeezerHomeFeedClient(
         val homeSections = homePageResults["sections"]?.jsonArray ?: JsonArray(emptyList())
 
         supervisorScope {
-            homeSections.mapNotNull { section ->
+            // TEMPORARY PROBE - DELETE WITH DeezerParser's firstItem= DUMP AND RAW_ITEM_LOG_CAP.
+            // Runs concurrently with the section parse, but supervisorScope joins its children, so the
+            // FIRST Home load of each process still waits for one extra page.get round-trip. That cost is
+            // why it is one-shot and why it is temporary; it is not a permanent diagnostic like the
+            // titleless-section DROP line below.
+            val probe = async(dispatcher) { probeChannelModuleOnce(api, parser) }
+            val shelves = homeSections.mapNotNull { section ->
                 val obj = section.asObjectOrNull() ?: return@mapNotNull null
                 val id = obj.optString("module_id") ?: return@mapNotNull null
                 // ⚠️ PERMANENT — NOT A TEMPORARY DIAGNOSTIC. DO NOT STRIP.
@@ -78,6 +86,10 @@ class DeezerHomeFeedClient(
                     }
                 }
             }.awaitAll().filterNotNull()
+            // Awaited rather than dropped so a probe that somehow escapes its runCatching is visible here
+            // instead of being swallowed by the supervisor. Its body cannot throw except on cancellation.
+            probe.await()
+            shelves
         }
     }.toFeed()
 
@@ -110,6 +122,112 @@ class DeezerHomeFeedClient(
                 "$title/$layout/$moduleId/$target/items=${items.size}/types={$types}"
             }
             println("GladixDeezer PAGE[$label] sections: $summary")
+        }
+
+        // == TEMPORARY: /channels/module/<uuid> BODY CAPTURE ==========================================
+        // (!) DELETE THIS WHOLE BLOCK, its call in loadHomeFeed, and the AtomicBoolean, once the capture is
+        // in hand. It is NOT covered by the "these two printlns are permanent" carve-out above - those fire
+        // only on a failure and cost nothing; this one issues a network request nobody asked for.
+        //
+        // WHAT IT ANSWERS: four Home rows point at /channels/module/<uuid> - "Summer in slow-mo",
+        // "Playlists you will love", "Recently you have been loving", "Playlists you love". It is the
+        // largest target family, and DeezerParser's disabled fetch branch records that it "came back
+        // section-shaped but yielded nothing" while NOBODY HAS SEEN THE BODY.
+        //
+        // The "nothing behind it" reading is now REFUTED, not open: on Deezer's own app "Summer in
+        // slow-mo" expands from 12 items to 32. The content exists, so channelFeed is filtering it away,
+        // and this probe exists to say WHICH of the three filters does it -
+        //   (1) DeezerExtension.channelFeed drops any section with no `title`,
+        //   (2) toShelfItemsList reads obj()["items"] and gives up when the key is absent or not an array,
+        //   (3) every item returns null from toEchoMediaItem (no data.__TYPE__ it recognises).
+        // Each prints a distinguishable line below, so one capture separates them.
+        //
+        // The uuid is hardcoded from the 2026-09-05 Home capture ("Summer in slow-mo"). Module uuids look
+        // editorial and seasonal, so this one may stop resolving; a probe that returns an error body is
+        // itself an answer (it prints error=), it is just not the answer we are after.
+        private val channelModuleProbed = AtomicBoolean(false)
+        private const val PROBE_TARGET = "channels/module/46b377f1-fbd5-4e04-979e-177b5df21183"
+        // Same cap and same reason as DeezerParser.RAW_ITEM_LOG_CAP: logcat truncates a single line near
+        // 4000 chars with no marker, so a bigger number silently looks like a shorter object. Long bodies
+        // are CHUNKED across lines instead of being raised, bounded by PROBE_MAX_CHUNKS so a large page
+        // cannot flood the buffer and push the summary lines out of it.
+        private const val PROBE_LOG_CAP = 3000
+        private const val PROBE_MAX_CHUNKS = 4
+
+        private fun JsonElement?.prim(): String? = (this as? JsonPrimitive)?.contentOrNull
+
+        // Shape of one value, without printing it: "array[32]", "object{6}", "primitive". This is the line
+        // that answers the standing prediction - that a MODULE endpoint returns one module's contents
+        // rather than a page of sections, with the payload under some key other than `sections`. If that is
+        // right, `sections` is absent or empty here and some sibling key is an array of about 32.
+        private fun shapeOf(element: JsonElement?): String = when (element) {
+            is JsonArray -> "array[" + element.size + "]"
+            is JsonObject -> "object{" + element.size + "}"
+            null -> "absent"
+            else -> "primitive"
+        }
+
+        private suspend fun probeChannelModuleOnce(api: DeezerApi, parser: DeezerParser) {
+            if (!channelModuleProbed.compareAndSet(false, true)) return
+            runCatching {
+                val page = api.page(PROBE_TARGET)
+                // Top level first: page.get wraps everything in `results`, and a REQUEST that was rejected
+                // still returns 200 with a populated `error`, which would explain the empty rows outright.
+                println("GladixDeezer PROBE target=$PROBE_TARGET rootKeys=${page.keys}")
+                val results = page["results"] as? JsonObject
+                println(
+                    "GladixDeezer PROBE resultsKeys=${results?.keys ?: "<no-results>"} " +
+                        "error=${page["error"]?.toString()?.take(300) ?: "-"}"
+                )
+                // Every top-level key of `results` with its shape and size. If the payload is under a
+                // different key, this line names it and its length before any body is dumped.
+                println(
+                    "GladixDeezer PROBE resultsShapes=" +
+                        results?.entries?.joinToString { "${it.key}=${shapeOf(it.value)}" }
+                )
+                val sections = results?.get("sections") as? JsonArray ?: JsonArray(emptyList())
+                println("GladixDeezer PROBE sections=${sections.size}")
+                // Per-section summary in the SAME fields logSections prints for Home, so the two can be
+                // read side by side: whatever differs between a Home section and this page's sections is
+                // the reason one parses and the other does not.
+                sections.filterIsInstance<JsonObject>().forEachIndexed { i, sec ->
+                    val itemsRaw = sec["items"]
+                    val items = itemsRaw as? JsonArray ?: JsonArray(emptyList())
+                    // __TYPE__ is what toEchoMediaItem dispatches on. Items present with a populated outer
+                    // `type` and an EMPTY __TYPE__ map is the smarttracklist shape exactly - items there,
+                    // nothing parsed - so both levels are counted.
+                    val inner = parser.run {
+                        items.mapNotNull { (it as? JsonObject)?.unwrap()?.str("__TYPE__") }
+                            .groupingBy { it }.eachCount()
+                    }
+                    val outer = items.mapNotNull { (it as? JsonObject)?.get("type").prim() }
+                        .groupingBy { it }.eachCount()
+                    // parsed= is the whole question in one number: it runs the REAL parser over the items,
+                    // so it reports what channelFeed would actually have got rather than what we think the
+                    // types imply. parsed=0 with items>0 is filter (3); items=0 is filter (2);
+                    // title=<null> is filter (1).
+                    val parsed = parser.run { items.count { (it as? JsonObject)?.toEchoMediaItem() != null } }
+                    println(
+                        "GladixDeezer PROBE sec[$i] keys=${sec.keys} " +
+                            "title=${sec["title"].prim() ?: "<null>"} layout=${sec["layout"].prim() ?: "?"} " +
+                            "module_id=${sec["module_id"].prim() ?: "?"} target=${sec["target"].prim() ?: "?"} " +
+                            "itemsShape=${shapeOf(itemsRaw)} items=${items.size} parsed=$parsed " +
+                            "__TYPE__={$inner} outerType={$outer}"
+                    )
+                }
+                // Raw body last, so the summary lines survive even if this floods. First section when there
+                // is one - that is where items live; otherwise the whole `results`, which is the
+                // interesting object precisely BECAUSE it has no sections.
+                val raw = (sections.firstOrNull() ?: results)?.toString().orEmpty()
+                val chunks = raw.chunked(PROBE_LOG_CAP)
+                chunks.take(PROBE_MAX_CHUNKS).forEachIndexed { i, chunk ->
+                    println("GladixDeezer PROBE raw[${i + 1}/${chunks.size}] $chunk")
+                }
+            }.onFailure {
+                // A throw here is an answer too (a 4xx, a parse failure, a dead uuid), and it must not be
+                // silent: this runs detached from any user action, so nothing else would report it.
+                println("GladixDeezer PROBE FAILED ${it::class.simpleName}: ${it.message?.take(300)}")
+            }
         }
 
         private val dispatcher = Dispatchers.Default

@@ -26,6 +26,7 @@ import dev.brahmkshatriya.echo.common.models.Album.Type.LP
 import dev.brahmkshatriya.echo.common.models.Album.Type.PreRelease
 import dev.brahmkshatriya.echo.common.models.Album.Type.Show
 import dev.brahmkshatriya.echo.common.models.Album.Type.Single
+import androidx.constraintlayout.widget.ConstraintLayout
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Playlist
@@ -42,6 +43,8 @@ import dev.brahmkshatriya.echo.ui.common.GridAdapter
 import dev.brahmkshatriya.echo.ui.media.MediaFragment.Companion.getBundle
 import dev.brahmkshatriya.echo.ui.player.PlayerViewModel
 import dev.brahmkshatriya.echo.utils.ui.SimpleItemSpan
+import dev.brahmkshatriya.echo.ui.feed.viewholders.MediaViewHolder.Companion.placeHolder
+import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadInto
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.dpToPx
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.toCompactDurationString
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.toTimeString
@@ -184,7 +187,62 @@ class MediaHeaderAdapter(
         var clickEnabled = true
         var state: MediaState.Loaded<*>? = null
 
+        /**
+         * The cover's radius as inflated, before any artist override.
+         *
+         * ⚠️ THERE IS NO DIMEN FOR THIS. The radius comes from the CardView style's
+         * `cardCornerRadius = ?itemCorner` — a THEME ATTRIBUTE (themes.xml maps it to @dimen/item_corner).
+         * `R.dimen.item_corner_radius` does not exist and has been reached for twice; read it off the
+         * inflated view instead, which also survives a theme change.
+         */
+        private val defaultCoverRadius = binding.coverContainer.radius
+
         fun bind(state: MediaState.Loaded<*>) = with(binding) {
+            // ── COVER (moved here from MediaFragment on 2026-09-05) ──────────────────────────────────
+            // It used to live in fragment_media.xml's CollapsingToolbarLayout, which forced the
+            // RecyclerView to start below the header and so made the fast-scroll rail start ~633px down
+            // the screen. Loading it here puts it in item 0 and lets the list span the screen.
+            //
+            // ⚠️ RUNS PER BIND, NOT ONCE — the ViewHolder is reused. In MediaFragment this sat in an
+            // observe() that fired once per result, so a one-shot was correct there and is NOT correct
+            // here: a recycled holder that skipped the artist branch would keep the previous item's
+            // radius and matchConstraintMaxWidth. Hence the explicit else.
+            coverContainer.run {
+                if (state.item is Artist) {
+                    // Artist covers are hard-capped at 240dp and circular — INDEPENDENT of
+                    // @dimen/media_header_cover_size (250dp), which @style/ItemCover applies as
+                    // constraintWidth_max/constraintHeight_max and which 2026-06-15 proved is live.
+                    // Both caps must survive; this is the tighter one and applies to artists only.
+                    val maxWidth = 240.dpToPx(context)
+                    radius = maxWidth.toFloat()
+                    updateLayoutParams<ConstraintLayout.LayoutParams> {
+                        matchConstraintMaxWidth = maxWidth
+                    }
+                } else {
+                    // Restore the geometry a fresh holder has. `defaultCoverRadius` is captured at
+                    // construction from the inflated view rather than read from a dimen: the radius comes
+                    // from the CardView style's `cardCornerRadius = ?itemCorner`, a THEME ATTRIBUTE, so
+                    // hardcoding or re-resolving a dimen here would silently diverge if the theme changes.
+                    // matchConstraintMaxWidth = 0 means "no explicit max", handing the cap back to
+                    // @style/ItemCover's constraintWidth_max (media_header_cover_size).
+                    radius = defaultCoverRadius
+                    updateLayoutParams<ConstraintLayout.LayoutParams> {
+                        matchConstraintMaxWidth = 0
+                    }
+                }
+            }
+            // No size argument: loadInto's params are (placeholder, errorDrawable) and Coil sizes from
+            // the view, which is still capped by @style/ItemCover -> media_header_cover_size. So the
+            // request is identical to the one MediaFragment made before the move.
+            //
+            // ⚠️ NO STALE-DELIVERY GUARD IS NEEDED HERE, and don't add one. loadInto uses
+            // request.target(imageView) — a Coil ViewTarget — so enqueuing on the same ImageView disposes
+            // the in-flight request and a recycled holder cannot be painted by the previous item's
+            // delivery. This is the OPPOSITE of PlayerTrackAdapter's cover, which uses loadWithThumb's
+            // lambda target, gets no ViewTarget and therefore no automatic cancellation — which is why
+            // that one needs pendingMediaId/lastBoundMediaId and this one does not.
+            state.item.cover.loadInto(cover, null, state.item.placeHolder)
+
             this@Success.state = state
             followButton.isVisible = state.isFollowed != null
             followButton.isChecked = state.isFollowed ?: false

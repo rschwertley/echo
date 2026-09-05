@@ -237,6 +237,17 @@ class DeezerParser(private val session: DeezerSession) {
 
     fun JsonObject.toEchoMediaItem(): EchoMediaItem? {
         val data = unwrap()
+        // ⚠️ NARROW FALLBACK, MATCHED TO ONE VALUE — do not generalise to "any outer type key".
+        // Home's "Made for you" items carry their type at the OUTER level as `type`, not as `data.__TYPE__`,
+        // so unwrap() descends into `data`, finds no __TYPE__, and every item returned null — five playable
+        // daily mixes silently dropped, and the row never rendered at all (2026-09-05 capture).
+        // Accepting ANY outer `type` value would be unsafe: "channel" is one of them, and the `"channel" in
+        // t` arm below would then match items that DeezerHomeFeedClient.hasChannelItems had already routed
+        // to toShelfCategoryList — two paths claiming the same item. So this matches "smarttracklist" only.
+        // unwrap() is deliberately UNTOUCHED: it is shared with hasChannelItems, toShelfCategory and
+        // toChannel, all of which must keep reading __TYPE__.
+        val outerSmart = str("type")?.takeIf { it == "smarttracklist" }
+        if (data.str("__TYPE__") == null && outerSmart != null) return toSmartTracklist()
         return when (val t = data.str("__TYPE__")) {
             null -> null
             else -> when {
@@ -407,6 +418,58 @@ class DeezerParser(private val session: DeezerSession) {
                     if (nameList.isNotEmpty()) put("CONTRIB_${if (role == "writer") "AUTHOR" else role.uppercase()}", nameList)
                 }
             }
+        )
+    }
+
+    /**
+     * A Deezer "smarttracklist" — the daily mixes in Home's "Made for you" row.
+     *
+     * MODELLED AS A PLAYLIST, NOT A RADIO, on device evidence: tapping one in Deezer's own app opens a
+     * FIXED track list with a track count and a total duration. A radio is an endless stream with neither.
+     *
+     * ⚠️ ITS ID IS A SMARTTRACKLIST ID, NOT A PLAYLIST ID — api.playlist()/api.playlistSongs() cannot
+     * resolve it. The `smarttracklist` extra is what routes track loading back to the right endpoint; see
+     * DeezerPlaylistClient.loadTracks. Same pattern as extras["radio"] driving DeezerRadioClient.kind().
+     *
+     * ⚠️ EXPIRY: these regenerate daily (data.EXPIRATION_DATE, ~05:00 next day) and the expiry is carried
+     * into extras so Cached can refuse to durably cache them — see the note there.
+     *
+     * OPEN QUESTION, left deliberately unanswered: is "inspired-by-1" a SLOT that refills daily, or a
+     * SNAPSHOT id that stops resolving after EXPIRATION_DATE? WHAT DISTINGUISHES THEM: play one, wait past
+     * the expiry, then re-open the same persisted item. A slot returns a DIFFERENT track list with no
+     * error; a snapshot fails the track load. The id is in extras either way, so this is answerable without
+     * another payload capture — do not re-derive the question.
+     *
+     * COVER: data.COVER{TYPE, MD5} feeds getCover directly and yields a usable CDN image, so the four
+     * artist md5s in `pictures` and COVER_COMPOSITION (THREE_TAPERED_CIRCLES) are ignored — that is
+     * Deezer's client-side collage template, and the 2026-08-06 4-grid deferral stays deferred.
+     */
+    private fun JsonObject.toSmartTracklist(): Playlist? {
+        val data = unwrap()
+        val id = data.str("SMARTTRACKLIST_ID") ?: return null
+        val cover = data["COVER"]?.jsonObject
+        return Playlist(
+            id = id,
+            // Outer first, inner as fallback: the captured Home item carries the display strings at the
+            // OUTER level (title/subtitle, already localised), while the gateway's own uppercase keys sit
+            // in data. Reading both costs nothing and means a shape change on either side degrades the
+            // subtitle rather than blanking the row's name.
+            title = str("title") ?: data.str("TITLE").orEmpty(),
+            isEditable = false,
+            isPrivate = false,
+            cover = getCover(cover?.str("MD5"), cover?.str("TYPE")),
+            subtitle = str("subtitle") ?: data.str("SUBTITLE"),
+            extras = buildMap {
+                put("smarttracklist", id)
+                data.str("EXPIRATION_DATE")?.let { put("expires", it) }
+            },
+            // ⚠️ RADIO OFF, and this is not a preference. DeezerRadioClient.radio(item) seeds a Playlist
+            // radio with api.playlist(item).randomTracksFromSongs — a playlist call on an id that is not a
+            // playlist — so the seed list comes back empty and it fails at `?: error("No Radio")`. Leaving
+            // the default true would put a "Radio" action on the item that can only ever error.
+            isRadioSupported = false,
+            isSaveable = false,
+            isShareable = false,
         )
     }
 

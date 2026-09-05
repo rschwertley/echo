@@ -157,6 +157,16 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
                 feedAdapter.withLoading(this)
             ),
         )
+        // ⚠️ KNOWN DEFECT, PRE-EXISTING, NOT INTRODUCED BY THE 2026-09-05 HEADER MIGRATION.
+        // This safe cast is ALWAYS NULL here: fragment_media_details.xml declares a plain
+        // androidx.recyclerview.widget.RecyclerView, not TvAwareRecyclerView. The 2026-06-06 pass that
+        // swapped four layouts to TvAwareRecyclerView covered fragment_home, fragment_library,
+        // fragment_search and fragment_recycler_with_refresh — fragment_media_details was not among them.
+        // So this D-pad nav-rail wiring has never run on artist, album or playlist detail on TV, and the
+        // `as?` swallows it silently.
+        // Deliberately left alone: changing the view class mid-migration would alter measurement and focus
+        // behaviour on the exact screens being changed. Fix it as its own pass, and note there is no
+        // layout-land-television variant of this file, so the swap would be in the single shared layout.
         (binding.recyclerView as? TvAwareRecyclerView)?.navRailView =
             requireActivity().findViewById(R.id.navRailContainer)
         val loadingFlow = viewModel.isRefreshingFlow

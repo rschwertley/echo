@@ -30,6 +30,14 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
     fun getShelves(playlist: Playlist): Feed<Shelf>? = null
 
     suspend fun loadPlaylist(playlist: Playlist): Playlist {
+        // A smarttracklist ("Made for you" daily mix) is NOT a playlist to Deezer: its id resolves in
+        // neither deezer.pagePlaylist nor playlist.getSongs, so api.playlist() below would return an error
+        // body and `results!!` would NPE. The feed row already carries everything the detail header shows
+        // (title, subtitle, cover) because DeezerParser.toSmartTracklist builds it from the Home payload,
+        // so returning the item unchanged loses nothing — there is no richer form to fetch.
+        // Keyed on the extra rather than on the id's shape: ids are opaque strings and "inspired-by-1"
+        // happens to be non-numeric today, which is an observation about one id, not a contract.
+        if (playlist.extras.containsKey(SMART_TRACKLIST_EXTRA)) return playlist
         deezerExtension.handleArlExpiration()
         val jsonObject = api.playlist(playlist)
         val resultsObject = jsonObject["results"]!!.jsonObject
@@ -38,6 +46,7 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
 
     fun loadTracks(playlist: Playlist): Feed<Track> = PagedData.Single {
         deezerExtension.handleArlExpiration()
+        playlist.extras[SMART_TRACKLIST_EXTRA]?.let { return@Single smartTracklistTracks(it) }
         // Tracks come from the dedicated playlist.getSongs (the app/deezer-py authoritative path), NOT from
         // deezer.pagePlaylist's inline SONGS (a summary that can carry a wrong same-named-artist twin).
         // pagePlaylist is still used for playlist METADATA in loadPlaylist above.
@@ -89,4 +98,64 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
             )
         }
     }.toFeed()
+
+    /**
+     * Tracks for a smarttracklist, via page.get on "smarttracklist/<id>" — the same gateway method Home
+     * itself uses, with the id substituted into PAGE. That is the only endpoint reachable from what we
+     * hold: the playlist methods take a playlist id, and this is not one.
+     *
+     * ⚠️ THE RESPONSE SHAPE IS INFERRED, NOT OBSERVED. Only the Home payload has been captured; the page
+     * for an individual smarttracklist has not. The traversal below therefore assumes only the shape every
+     * page.get response has shared so far — results.sections[].items[] — and finds tracks by asking each
+     * item whether it parses as a song, rather than by indexing a section position or a module id.
+     *
+     * ON-DEVICE FAILURE MODE IF THAT ASSUMPTION IS WRONG, so the first build's symptom is legible:
+     *  - Unexpected but well-formed JSON (sections elsewhere, or none) -> zero tracks -> throw below ->
+     *    the track list shows an ERROR, not an endless spinner. IT DOES NOT STRAND, and that chain was
+     *    read rather than assumed: Cached.loadPlaylistTracksCached materialises this PagedData.Single
+     *    eagerly (feed.loadAll() inside coalescedTracks), so the throw lands in Cached.loadTracks's
+     *    runCatching -> MediaDetailsViewModel.tracksLoadedFlow carries a failed Result -> the fragment's
+     *    `loader` rethrows it into FeedData's `loadedState = runCatching { load(...) }`, which is the
+     *    feed's error surface. Deliberately a throw and not an empty list — an empty list is
+     *    indistinguishable from a mix Deezer legitimately emptied, and would look like a working feature
+     *    quietly returning nothing.
+     *  - An error body (bad/expired id) -> also zero tracks -> same error. The GladixDeezer line below
+     *    names the id and the section count, which separates "we asked wrong" from "the page is empty".
+     * Either way the failure is bounded to this one row: Home still renders, and nothing is cached (see
+     * Cached.carriesExpiry — an item with an `expires` extra is never written to the durable store, so a
+     * bad first load cannot stick for 24h).
+     */
+    private suspend fun smartTracklistTracks(stlId: String): List<Track> {
+        val jsonObject = api.page("smarttracklist/$stlId")
+        val sections = jsonObject["results"]?.jsonObject?.get("sections")?.jsonArray
+            ?: JsonArray(emptyList())
+        val tracks = sections.filterIsInstance<JsonObject>().flatMap { section ->
+            section["items"]?.jsonArray?.filterIsInstance<JsonObject>().orEmpty()
+        }.mapNotNull { item ->
+            parser.run {
+                val data = item.unwrap()
+                // Song-only: a mix page may also carry artist/album promo tiles, and toTrack() on one of
+                // those would produce a track with no SNG_ID rather than fail loudly.
+                if (data.str("__TYPE__")?.contains("song") != true) null
+                else runCatching { data.toTrack() }.getOrNull()
+            }
+        }.distinctBy { it.id }
+        if (tracks.isEmpty()) {
+            println(
+                "GladixDeezer DROP smarttracklist=$stlId reason=no-tracks sections=${sections.size}"
+            )
+            throw Exception("Failed to load tracks for this mix")
+        }
+        return tracks.mapIndexed { index, track ->
+            // NEXT only — no "playlist_id". DeezerUtil.log maps that key to ctxtT="playlist_page" plus the
+            // id, and this id is not a playlist, so it would report a context Deezer cannot resolve. The
+            // else-branch's empty context is the honest value for a context we have no logging name for.
+            track.copy(extras = track.extras + mapOf("NEXT" to tracks.getOrNull(index + 1)?.id.orEmpty()))
+        }
+    }
+
+    companion object {
+        // Set by DeezerParser.toSmartTracklist; the sole routing signal for the two branches above.
+        const val SMART_TRACKLIST_EXTRA = "smarttracklist"
+    }
 }

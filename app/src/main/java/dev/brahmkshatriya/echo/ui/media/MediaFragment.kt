@@ -2,14 +2,11 @@ package dev.brahmkshatriya.echo.ui.media
 
 import android.os.Bundle
 import android.view.View
-import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePaddingRelative
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.models.Artist
-import dev.brahmkshatriya.echo.utils.ui.UiUtils.isTv
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.databinding.FragmentMediaBinding
@@ -17,17 +14,14 @@ import dev.brahmkshatriya.echo.ui.common.UiViewModel
 import dev.brahmkshatriya.echo.ui.common.UiViewModel.Companion.applyBackPressCallback
 import dev.brahmkshatriya.echo.ui.common.UiViewModel.Companion.applyGradient
 import dev.brahmkshatriya.echo.ui.feed.viewholders.MediaViewHolder.Companion.icon
-import dev.brahmkshatriya.echo.ui.feed.viewholders.MediaViewHolder.Companion.placeHolder
 import dev.brahmkshatriya.echo.ui.media.more.MediaMoreBottomSheet
 import dev.brahmkshatriya.echo.ui.playlist.delete.DeletePlaylistBottomSheet
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.Serializer.getSerialized
 import dev.brahmkshatriya.echo.utils.Serializer.putSerialized
-import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadInto
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadWithThumb
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.setupTransition
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.configureAppBar
-import dev.brahmkshatriya.echo.utils.ui.UiUtils.dpToPx
 import kotlinx.coroutines.launch
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
 import org.koin.androidx.viewmodel.ext.android.viewModel
@@ -59,9 +53,13 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
         val binding = FragmentMediaBinding.bind(view)
         setupTransition(view)
         applyBackPressCallback()
+        // coverContainer.alpha = 1 - offset removed 2026-09-05 with the CollapsingToolbarLayout: the
+        // cover now lives in MediaHeaderAdapter (item 0) and there is no collapse to fade against.
+        // `offset` is still meaningful for the outline — a non-scrolling AppBarLayout reports 0, so the
+        // outline simply stays hidden until something scrolls, which is the behaviour it already had at
+        // rest.
         binding.appBarLayout.configureAppBar { offset ->
             binding.appbarOutline.alpha = offset
-            binding.coverContainer.alpha = 1 - offset
         }
         // Landscape (nav rail) only: the CTL/AppBar header is otherwise rail-unaware, so its
         // content (cover, back button, collapsed + expanded title) sits behind the left rail.
@@ -84,20 +82,27 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
             )
             true
         }
-        val isTV = requireContext().isTv()
-        if (isTV) binding.appBarLayout.setExpanded(false, false)
+        // ⚠️ `if (isTV) appBarLayout.setExpanded(false, false)` REMOVED 2026-09-05, not lost. It existed so
+        // TV opened with the header collapsed and content D-pad-reachable without scrolling past a
+        // full-size cover. Two reasons it goes rather than being replaced:
+        //   1. It is now INERT. With no `scroll` flag on any AppBarLayout child, getTotalScrollRange()
+        //      returns 0 (decoded from the Material 1.14.0 AAR), so there is nothing to collapse. Leaving
+        //      the call would read as active TV handling while doing nothing.
+        //   2. The need it served should now be met by focus-driven scrolling: the cover is a CardView
+        //      with no click listener and is not focusable, while item 0's buttons are — so the first
+        //      D-pad focus lands on a button and RecyclerView scrolls it into view on its own.
+        // ⚠️ (2) IS REASONED, NOT MEASURED — verify on a TV that opening an artist/album lands focus on a
+        // button rather than stranding it above a full-height cover. If it does strand, the fix is a
+        // values-land-television override of @dimen/media_header_cover_size (that folder already exists),
+        // NOT scrollToPosition(1) — position 1 skips item 0 entirely and takes the buttons off screen with
+        // it, which the collapsed header never did.
 
         observe(viewModel.itemResultFlow) { result ->
             val item = result?.getOrNull()?.item ?: item
             binding.toolBar.title = item.title.trim()
-            if (item is Artist) binding.coverContainer.run {
-                val maxWidth = 240.dpToPx(context)
-                radius = maxWidth.toFloat()
-                updateLayoutParams<ConstraintLayout.LayoutParams> {
-                    matchConstraintMaxWidth = maxWidth
-                }
-            }
-            item.cover.loadInto(binding.cover, null, item.placeHolder)
+            // The cover load and the artist 240dp/circle cap moved to MediaHeaderAdapter.Success.bind on
+            // 2026-09-05 — the cover is item 0 now, and a ViewHolder is reused, so both must run per bind
+            // rather than once per result as they did here.
             val gradientScope = viewLifecycleOwner.lifecycleScope
             item.background.loadWithThumb(view) { gradientScope.launch { applyGradient(view, it) } }
         }
