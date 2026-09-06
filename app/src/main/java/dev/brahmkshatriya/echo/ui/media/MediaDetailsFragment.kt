@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.ui.media
 import android.os.Bundle
 import android.view.View
 import androidx.core.view.ViewCompat
+import androidx.core.view.updatePaddingRelative
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.paging.LoadState
@@ -32,6 +33,7 @@ import dev.brahmkshatriya.echo.ui.feed.FeedViewModel
 import dev.brahmkshatriya.echo.ui.media.MediaHeaderAdapter.Companion.getMediaHeaderListener
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.UiUtils.resolveStyledDimension
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import kotlinx.coroutines.flow.combine
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
@@ -121,13 +123,24 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
         applyInsets(viewModel.uiResultFlow, uiViewModel.tvMiniPlayerVisible) {
             val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(binding.recyclerView.context) else 0
             binding.recyclerView.applyContentInsets(it, 20, 0, 16 + miniExtra)
-            // top = 0, disagreeing with the full-bleed screens ON PURPOSE — see applyInsets' `top` param.
-            // This RecyclerView sits BELOW the AppBarLayout in a CoordinatorLayout, so it never extends
-            // under the status bar; the header does. Adding insets.top here inset the scroll TRACK by a
-            // status bar that is not in this view, parking the thumb below the top of its own track (the
-            // "mid-track at rest" symptom). Matches the `0` passed to applyContentInsets on the line above:
-            // one view, one answer about the top inset.
-            // ⚠️ This fixes the thumb's POSITION, not the dead drag — that was the listener order above.
+            // ⚠️ CONTENT PADDING AND TRACK PADDING NOW DISAGREE, DELIBERATELY. Since 2026-09-06 this
+            // RecyclerView spans the FULL viewport and is drawn under the AppBarLayout
+            // (OverlapScrollingViewBehavior — read the class doc before changing either line here).
+            //   CONTENT must start below the toolbar, or the cover would sit under the back button at
+            //     rest instead of only when scrolled. applyContentInsets above sets top = 0 (its third
+            //     argument is a symmetric dp value, not an inset), so the real top padding is written
+            //     here: the status-bar inset the AppBarLayout consumes via fitsSystemWindows, plus
+            //     ?actionBarSize for the toolbar itself. clipToPadding is already false in
+            //     fragment_media_details.xml, which is what lets the art scroll up through it.
+            //   THE TRACK must NOT be inset — that is the entire point of the overlap. top = 0 keeps the
+            //     fast-scroll rail spanning the whole screen with the thumb grabbable at the very top.
+            // ⚠️ The `top = 0` below is UNCHANGED but its ORIGINAL REASON IS NOW FALSE and must not be
+            // quoted back: it used to read "this RecyclerView sits BELOW the AppBarLayout, so it never
+            // extends under the status bar". It does now. The value stays 0 for the new reason above, and
+            // the old symptom it fixed (thumb parked mid-track at rest, because the track was inset by a
+            // status bar the view did not contain) cannot recur while the view does contain it.
+            val toolbarPx = binding.recyclerView.context.resolveStyledDimension(R.attr.actionBarSize)
+            binding.recyclerView.updatePaddingRelative(top = it.top + toolbarPx)
             scroller.applyInsets(binding.recyclerView.context, it, top = 0)
         }
         val lineAdapter = LineAdapter()

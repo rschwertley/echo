@@ -19,22 +19,116 @@
          With no `scroll` flag on any child, AppBarLayout.getTotalScrollRange() breaks its loop at i=0 and
          returns Math.max(0, 0) = 0 (decoded from the 1.14.0 AAR), so PixelFastScrollViewHelper's composite
          terms are both 0 and the arithmetic reduces to the flat-screen path exactly — the same reduction
-         Home already gets. The cover and expanded title moved into MediaHeaderAdapter (item 0).
+         Home already gets. The cover moved into MediaHeaderAdapter (item 0); the
+         TITLE did not follow it there - it is set on the toolbar instead (MediaFragment,
+         binding.toolBar.title).
          DELIBERATELY GIVEN UP: the pinned collapsed title and the cover parallax/fade.
 
          paddingBottom="49dp" IS NOT MISSING — it was DELETED, not lost. It was residue of the CTL's
          circular measurement dependency (AppBarLayout and CTL both wrap_content, CTL height scaling ~1.5x
          paddingBottom rather than 1:1, cover size and expanded-title space contending through one knob),
          settled empirically at 43dp on 2026-06-15 after three uiautomator dumps and later carried at 49dp.
-         With the CTL gone none of those inputs exist and the value has no justification. Do not restore it
-         looking for a lost gap. The same applies to the 2026-06-13 title work — titleCollapseMode fade,
+         With the CTL gone none of those inputs exist and the value has no justification HERE.
+         (!) BUT IT WAS DOING A SECOND JOB, AND THIS NOTE ORIGINALLY MISSED IT (corrected 2026-09-06): the
+         padding sat below the cover, so its visual effect was the cover-to-buttons gap, which is a design
+         element and outlived the CTL. Deleting it flattened that gap to 0 and was reported from device as
+         a regression on artist, album and playlist. The gap is now rebuilt where it belongs - as
+         paddingBottom on the cover wrapper in item_media_header.xml, at 49dp + the RecyclerView's 8dp
+         paddingTop = 57dp, since that 8dp now falls above the cover instead of below it. Read the note
+         there before touching either number. What stays true is the narrow claim: do not restore 49dp TO
+         THIS FILE, where nothing measures against it any more. The same applies to the 2026-06-13 title work — titleCollapseMode fade,
          maxLines 2, expandedTitleMarginEnd, and the expandedTitleEllipsize attribute that does not exist in
          Material 1.14.0 — all CTL attributes with no successor here. -->
+    <!-- ⚠️ DECLARED FIRST, ON PURPOSE (2026-09-06). Z-ORDER IS THE WHOLE REASON. With the overlap
+         behavior below, this view's bounds now COVER the toolbar region, and a CoordinatorLayout
+         hit-tests its children in reverse declaration order — so declared last, as it was until now, it
+         would swallow every touch aimed at the back button and the overflow menu. Moving it first makes
+         the AppBarLayout the later sibling: drawn on top, touched first.
+         CHOSEN OVER elevation/translationZ deliberately. Both work, but a Z override competes with
+         Material's own elevation and lift-on-scroll machinery and with appbarOutline's translationZ=1dp,
+         and it is invisible when reading the file. Declaration order is static, local and obvious.
+         Layout is unaffected by the move: ScrollingViewBehavior.layoutDependsOn finds the AppBarLayout by
+         type, and CoordinatorLayout measures in dependency order regardless of declaration order.
+         (appbarOutline still comes AFTER the AppBarLayout — layout_anchor requires its anchor to be
+         declared before it.)
+
+         ⚠️ WHAT THIS DOES TO D-PAD FOCUS ON TV, since there is no values-television variant of this file
+         and artist/album/playlist detail get this layout on TV too. Answered from the android-34 framework
+         sources, not from device:
+           DIRECTIONAL D-PAD (UP/DOWN/LEFT/RIGHT) — UNAFFECTED. FocusFinder.findNextFocus routes those to
+             findNextFocusInAbsoluteDirection (FocusFinder.java:264-270), which is geometric. The toolbar is
+             still physically above the list, so UP from the top row still reaches it.
+           FOCUS_FORWARD/BACKWARD — ALSO EFFECTIVELY UNAFFECTED. It walks the focusables list, but
+             ViewGroup.addFocusables sorts that list with FocusFinder.sort (ViewGroup.java:1341), whose
+             comparator orders by rect.top then sides (FocusFinder.java:792-822). Geometry again, not
+             declaration order.
+           INITIAL FOCUS — THIS ONE DOES CHANGE, and it is the only one that does.
+             ViewGroup.onRequestFocusInDescendants (ViewGroup.java:3355-3380) iterates mChildren in RAW
+             INDEX ORDER with no sort. The AppBarLayout used to be child 0, so first focus landed on the
+             toolbar's navigation icon; the FragmentContainerView is child 0 now, so first focus lands in
+             the RecyclerView — on item 0's buttons. That is the behaviour MediaFragment's own note (at the
+             removed `if (isTV) setExpanded(false, false)`) says it wants: "the first D-pad focus lands on a
+             button". Before this reorder that note's premise was actually false.
+           IS THE TOOLBAR FOCUSABLE ON TV? The MaterialToolbar ViewGroup is not, but the views it inflates
+             are — the navigation icon is an ImageButton and menu items are ActionMenuItemViews, both
+             focusable by default, and @style/Toolbar sets no focusability attributes. So it is D-pad
+             reachable before and after; only the ORDER of the first landing changed.
+           ⚠️ AND THE RecyclerView paddingTop IS LOAD-BEARING FOR TV, not just cosmetic: the list now spans
+             under the toolbar, so a focused row could sit beneath it. requestChildRectangleOnScreen
+             scrolls a focused child into the PADDED content area, and paddingTop = insets.top +
+             ?actionBarSize is what keeps that area clear of the toolbar. (Inference: LinearLayoutManager
+             honours padding when computing that scroll — not decoded here.) -->
+    <androidx.fragment.app.FragmentContainerView
+        android:id="@+id/mediaFragmentContainer"
+        android:name="dev.brahmkshatriya.echo.ui.media.MediaDetailsFragment"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_behavior="dev.brahmkshatriya.echo.utils.ui.OverlapScrollingViewBehavior"
+        tools:layout="@layout/fragment_media_details" />
+
+    <!-- ⚠️ THIS SCRIM IS NEW UI, NOT A RESTORATION — stated because the opposite is easy to assume. No
+         contentScrim was ever set on this screen: @style/EchoCollapsingBar never had one, and the only
+         contentScrim line in the project is a COMMENTED-OUT item in @style/TopCollapsingBar (styles.xml).
+         The multi-line title overlapping the cover during CTL expansion was recorded at the time as
+         standard Material 3 CTL behaviour with no contentScrim set. So nothing was lost when the CTL went;
+         this gradient is a new element, introduced because the art now scrolls under the toolbar.
+
+         ⚠️ NOT THE TV-PLAYER BUG, AND THE DIFFERENCE IS THE POINT. An earlier session found the TV
+         player's cover and MaterialToolbar sharing the same top strip because a layout_marginTop had been
+         trimmed from ?actionBarSize to 24dp while the cover stayed constrained to parent top; the fix was
+         to restore ?actionBarSize and accept a ~32dp cover give-back. That overlap was ACCIDENTAL and
+         UNSCRIMMED — two opaque things colliding with nothing between them. This one is DELIBERATE,
+         SCRIMMED, and paired with RecyclerView paddingTop = insets.top + ?actionBarSize (see
+         MediaDetailsFragment), so content STARTS below the toolbar and only travels under it while
+         scrolling. Different screen, different mechanism; do not "fix" this one by restoring a margin.
+
+         ⚠️ BACKGROUND IS A SCRIM, NOT A COLOUR, and that is the whole readability answer. Material's
+         default (Widget.Material3.AppBarLayout via ?appBarLayoutStyle) paints ?colorSurface here, which
+         would sit as an opaque band over the album art now that the art scrolls underneath. A flat
+         transparent background would leave the back arrow and overflow icons unreadable on light artwork.
+         The gradient does both jobs in one attribute: opaque-ish at the status bar, fully transparent at
+         the toolbar's bottom edge, over exactly the region this view occupies (status-bar inset via
+         fitsSystemWindows + ?actionBarSize).
+         FALLBACK IF IT STILL READS BADLY ON LIGHT ART, recorded so it is a decision rather than a
+         rediscovery: per-icon scrims — small translucent circles behind the navigation and overflow icons
+         only, which is what YouTube Music does on its artist header. Not chosen first because it needs a
+         drawable and a style override per icon, and because it does not help the toolbar TITLE, which is
+         also drawn over the art here. The gradient is one attribute and covers all three.
+         liftOnScroll=false + stateListAnimator=null: without them, AppBarLayout raises elevation and
+         paints a surface tint as soon as the list scrolls, which puts the opaque band back the moment the
+         user moves. Setting liftOnScroll=false also stops BaseBehavior.onStartNestedScroll accepting the
+         scroll at all — decoded from the 1.14.0 AAR, it returns true only when lift-on-scroll is on, the
+         bar is already lifted, or the bar has scrollable children, and with no scroll flags there are
+         none. It consumed no scroll pixels before (totalScrollRange is 0), so nothing downstream of
+         PixelFastScrollViewHelper changes. -->
     <com.google.android.material.appbar.AppBarLayout
         android:id="@+id/appBarLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:fitsSystemWindows="true">
+        android:background="@drawable/bg_toolbar_scrim"
+        android:fitsSystemWindows="true"
+        android:stateListAnimator="@null"
+        app:liftOnScroll="false">
 
         <com.google.android.material.appbar.MaterialToolbar
             android:id="@+id/toolBar"
@@ -50,13 +144,5 @@
         style="@style/AppBarOutline"
         app:layout_anchor="@id/appBarLayout"
         app:layout_anchorGravity="bottom" />
-
-    <androidx.fragment.app.FragmentContainerView
-        android:id="@+id/mediaFragmentContainer"
-        android:name="dev.brahmkshatriya.echo.ui.media.MediaDetailsFragment"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior"
-        tools:layout="@layout/fragment_media_details" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

@@ -58,6 +58,13 @@ open class FeedClickListener(
     open fun onSortClicked(view: View?, feedId: String?): Boolean {
         val vm by fragment.viewModel<FeedViewModel>()
         val feedData = vm.feedDataMap[feedId] ?: return notFoundSnack(R.string.feed)
+        // ⚠️ ARMS THE STATE, AND DELIBERATELY DOES NOT PERSIST IT. Opening the sheet is not a user
+        // choice of sort, so there is nothing to save yet; adding a persistSortState() call here to
+        // "match" the other feedSortState writers would write an empty sort on every sheet open.
+        // ⚠️ THE ARMING ITSELF IS LOAD-BEARING — do not remove it as a no-op. A non-null feedSortState is
+        // what puts the feed on getFeedSourceData's sort branch, and that branch is what assigns
+        // loadedShelves, which FeedSortBottomSheet reads to build its chip list (getSorts). Without it the
+        // sheet opens with no sorts to choose from.
         feedData.feedSortState.value = feedData.feedSortState.value ?: FeedSort.State()
         FeedSortBottomSheet.newInstance(feedId!!).show(fragment.childFragmentManager, null)
         return true

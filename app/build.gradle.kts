@@ -281,6 +281,12 @@ tasks.register("verifyExtensionAbi") {
         // across 2.x→4.x. Deliberately NOT an experimental type (v36.0 removed the experimental
         // FieldOrder enum). Anchor added 2026-08-24 (rule 4 was previously unverified).
         "com.google.protobuf.MessageLite",
+        // XML-instantiated behavior (rule 5) - NOT extension ABI. Anchored here because the convention in
+        // proguard-rules.pro is that EVERY keep rule in that file gets a verified anchor, and because the
+        // check itself is the same question: did R8 leave the class under its original name? Nothing in
+        // code references this class (CoordinatorLayout reflects on the app:layout_behavior string), so
+        // without the rule it is renamed and fragment_media.xml fails to inflate in minified builds only.
+        "dev.brahmkshatriya.echo.utils.ui.OverlapScrollingViewBehavior",
     )
     doLast {
         val mappingFiles: List<File> = (mappingRoot.listFiles()?.toList().orEmpty())
@@ -296,14 +302,15 @@ tasks.register("verifyExtensionAbi") {
             critical.forEach { fqcn ->
                 val selfMapped = lines.any { line -> line.startsWith("$fqcn -> $fqcn:") }
                 if (!selfMapped) throw GradleException(
-                    "Extension ABI broken: $fqcn was repackaged/renamed by R8 in variant '$variant'. " +
-                        "An extension-ABI -keep rule is missing or not applied — extensions will fail to " +
-                        "load (NoClassDefFoundError). The kept ABI is common.** + kotlin.** + " +
-                        "kotlinx.coroutines.** + kotlinx.serialization.** + okhttp3.** + okio.** + " +
-                        "com.google.protobuf.**. See app/proguard-rules.pro."
+                    "Kept class broken: $fqcn was repackaged/renamed by R8 in variant '$variant'. " +
+                        "A -keep rule is missing or not applied. If the class is part of the extension " +
+                        "ABI (common.** + kotlin.** + kotlinx.coroutines.** + kotlinx.serialization.** + " +
+                        "okhttp3.** + okio.** + com.google.protobuf.**), extensions will fail to load " +
+                        "with NoClassDefFoundError; if it is an XML-instantiated class (rule 5), the " +
+                        "layout naming it will fail to inflate. See app/proguard-rules.pro."
                 )
             }
-            println("verifyExtensionAbi: '$variant' ABI intact (${critical.size} core classes self-mapped).")
+            println("verifyExtensionAbi: '$variant' kept classes intact (${critical.size} anchors self-mapped).")
         }
     }
 }

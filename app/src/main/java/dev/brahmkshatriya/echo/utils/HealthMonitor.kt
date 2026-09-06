@@ -186,6 +186,13 @@ class HealthMonitor(private val app: App) {
             setCustomKey("extension_id", app.crashExtensionId)
             setCustomKey("player_state", app.crashPlayerState)
             setCustomKey("is_playing", app.crashIsPlaying)
+            // Twin of the call in App.kt's throwFlow collector, and it must stay a twin. report_age_s is
+            // the only key carrying the instant a report was RECORDED (every age_s_* is the age at its own
+            // checkpoint; process_age_s is first-write). A key present on one recording path and absent on
+            // the other is worse than one that exists nowhere: on a HealthMonitor report the absence would
+            // read as a value — "this arrived at an unknown time" is indistinguishable from "this key
+            // isn't set on this build" once both kinds of report sit in the same issue list.
+            CrashKeys.onReportRecorded()
             recordException(exception)
         }
     }

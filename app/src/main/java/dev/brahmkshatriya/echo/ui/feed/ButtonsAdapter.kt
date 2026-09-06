@@ -152,7 +152,14 @@ class ButtonsAdapter(
                 chip.isChecked = true
                 addView(chip)
                 chip.setOnClickListener {
+                    // ⚠️ persistSortState() IS LOAD-BEARING HERE, NOT TIDINESS. This clear used to persist
+                    // only as a SIDE EFFECT of the feed re-rendering afterwards (the removed write in
+                    // FeedData.getFeedSourceData). With that gone, omitting this call would clear the sort
+                    // on screen and leave it on disk — it would come back on the next feed load, which is
+                    // exactly the failure the 2026-09-06 change exists to remove. `state.copy` keeps
+                    // save = true, so this writes a cleared state rather than deleting the entry.
                     viewModel.feedSortState.value = state.copy(feedSort = null)
+                    viewModel.persistSortState()
                 }
             }
             if (state?.reversed == true) {
@@ -163,7 +170,10 @@ class ButtonsAdapter(
                 chip.isChecked = true
                 addView(chip)
                 chip.setOnClickListener {
+                    // Same as the sort chip above — see that comment. Without this call the "reversed"
+                    // clear survives only until the next feed load.
                     viewModel.feedSortState.value = state.copy(reversed = false)
+                    viewModel.persistSortState()
                 }
             }
             isVisible = visible

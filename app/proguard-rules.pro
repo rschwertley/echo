@@ -46,6 +46,17 @@
 -keep class com.google.protobuf.** { *; }
 # anchor: com.google.protobuf.MessageLite
 
+# 5. XML-INSTANTIATED, CODE-UNREFERENCED. Not extension ABI - a different failure mode that this file
+#    is nonetheless the only place to fix. CoordinatorLayout instantiates a CoordinatorLayout.Behavior by
+#    REFLECTION from the class-name string in `app:layout_behavior`, so nothing in code references
+#    OverlapScrollingViewBehavior and R8 is free to rename or remove it; the result is an inflation
+#    exception on fragment_media.xml, in MINIFIED BUILDS ONLY. Keep the two-arg (Context, AttributeSet)
+#    constructor specifically - that is the signature CoordinatorLayout looks up.
+-keep class dev.brahmkshatriya.echo.utils.ui.OverlapScrollingViewBehavior {
+    public <init>(android.content.Context, android.util.AttributeSet);
+}
+# anchor: dev.brahmkshatriya.echo.utils.ui.OverlapScrollingViewBehavior
+
 # Preserve generics + all annotation variants + nested/lambda linkage so kotlinx.serialization type
 # resolution and suspend/lambda types crossing the extension classloader boundary still resolve after
 # shrinking (proguard-android-optimize keeps *Annotation* but NOT Signature/InnerClasses/EnclosingMethod).

@@ -111,47 +111,45 @@ interface GridAdapter {
                 .currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
                 context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
             val layoutManager = GridLayoutManager(context, 1)
-            // ── SPAN-AWARE SCROLLBAR ESTIMATION (2026-09-05) ────────────────────────────────────────
-            // GridLayoutManager ships two estimators and defaults to the WRONG ONE for a mixed feed.
-            // Default (ScrollbarHelper.computeScrollRange): laidOutArea / itemRange * itemCount
-            // Enabled  (computeScrollRangeWithSpanInfo):    laidOutArea / laidOutSpans * totalSpans
-            // The difference is the divisor: ITEMS versus SPAN GROUPS. On Home, Search and media pages,
-            // full-span shelves sit beside 2-up tiles — two tiles are TWO ITEMS BUT ONE ROW — so the
-            // default's per-item figure roughly halves whenever tile rows are on screen and doubles back
-            // when shelves are. That is the mechanism behind the measured 3415→5371 range swing (57%) on a
-            // static artist page, and behind Search's deterministic stall two-thirds down, where the
-            // estimate grows as denser rows attach mid-drag and offset/range plateaus.
+            // ══ DO NOT RE-ENABLE setUsingSpansToEstimateScrollbarDimensions(true) ═══════════════════
+            // Added 2026-09-05, REVERTED 2026-09-06 after it shipped in build 1081 and produced a FATAL
+            // crash: 10 events, 7 users, including Play installs (install_source_installer =
+            // com.android.vending).
             //
-            // ⚠️ IT MOVES RANGE AND OFFSET TOGETHER, and that is why it is safe to enable globally.
-            // computeScrollOffsetWithSpanInfo is the paired method — both switch on this one flag — so the
-            // `offset + extent == range` identity that puts the fast-scroll thumb exactly at the rail
-            // bottom cannot be broken by enabling it. A range-only change (e.g. a measured row-height
-            // cache over liveRange()) WOULD break it, which is why that larger proposal was not taken.
+            //   java.lang.IllegalArgumentException: Cannot find wrapper for 4
+            //     ConcatAdapter.getWrappedAdapterAndPosition
+            //     GridAdapter$Concat.getSpanSize          (this file, the getSpanSize above)
+            //     GridLayoutManager$SpanSizeLookup.getSpanSize
+            //     GridLayoutManager.getCachedSpanGroupIndex
+            //     GridLayoutManager.computeScrollOffsetWithSpanInfo
+            //     GridLayoutManager.computeVerticalScrollOffset
+            //     RecyclerView.canScrollVertically
+            //     SwipeRefreshLayout.canChildScrollUp / onInterceptTouchEvent
             //
-            // ⚠️ NO-OP ON SINGLE-COLUMN SCREENS, by construction rather than by test: with spanCount 1 and
-            // every item spanning 1, getCachedSpanGroupIndex(pos, 1) == pos, so totalSpans == itemCount and
-            // laidOutSpans == itemRange — the two expressions are arithmetically identical. Screens that
-            // resolve to one column compute exactly what they computed before. (HistoryFragment is not
-            // affected at all: fragment_history.xml uses a LinearLayoutManager and never calls this.)
+            // WHY IT IS FATAL RATHER THAN COSMETIC: the entry point is a TOUCH, not a scroll.
+            // SwipeRefreshLayout asks canChildScrollUp on every intercepted touch, so with the flag on,
+            // ANY tap on a feed screen runs the span-info estimator, which walks positions through our
+            // ConcatAdapter-backed getSpanSize. If the adapter set has changed since the positions the
+            // estimator is working from, getWrappedAdapterAndPosition cannot resolve one and throws
+            // IllegalArgumentException — out of a touch handler, so it takes the process down.
             //
-            // ⚠️ STILL AN EXTRAPOLATION. It divides by a better denominator; it does not measure content.
-            // The range will still move as the laid-out window changes, so it should SHRINK the swing, not
-            // remove it. If a capture shows the Search stall unchanged at the same row, row density is not
-            // the driver — and that also weakens the case for the row-height cache, which attacks the same
-            // quantity from the same premise.
+            // ⚠️ THE SAFETY ARGUMENT THAT WAS ACCEPTED FOR THIS WAS EXACTLY BACKWARDS. The scoping
+            // question was "does enabling it globally matter", and the answer taken was that the flag
+            // moves RANGE and OFFSET together — computeScrollRangeWithSpanInfo and
+            // computeScrollOffsetWithSpanInfo both switch on this one flag — so the offset+extent==range
+            // identity could not break. That pairing is real, and it is the thing that crashes: the
+            // OFFSET half is what reaches getCachedSpanGroupIndex, and the default offset path never
+            // calls it. The argument for why it was safe was a description of the defect.
             //
-            // Requires the span-group index cache, which is already enabled below.
+            // AND IT BOUGHT NOTHING. Measured on device before the crash arrived: Search still stalled at
+            // the same row, Home and History unchanged. So row density was never the driver of the range
+            // swing — which also weakens the row-height-cache proposal that attacks the same quantity
+            // from the same premise.
             //
-            // ⚠️ "Scrollbar", LOWERCASE b — the ACCESSORS DISAGREE WITH THE FIELD. Verified against the
-            // recyclerview 1.4.0 jar with javap, not from docs:
-            //     public void    setUsingSpansToEstimateScrollbarDimensions(boolean)
-            //     public boolean isUsingSpansToEstimateScrollbarDimensions()
-            // while the private field is `mUsingSpansToEstimateScrollBarDimensions` (capital B), and so is
-            // the setter's own PARAMETER name. Reading the field name and inferring the accessor is what
-            // produced an "Unresolved reference" here on 2026-09-05. Property-synthesis is not the issue —
-            // Kotlin synthesises `isX`/`setX` pairs fine, as `view.isVerticalScrollBarEnabled = false` in
-            // FastScrollerHelper already proves — the name was simply spelt wrong by one letter.
-            layoutManager.isUsingSpansToEstimateScrollbarDimensions = true
+            // DO NOT "FIX" THIS BY GUARDING getSpanSize (returning 1 for an unresolvable position, or
+            // catching IllegalArgumentException). That would hide a real staleness signal to buy back an
+            // estimator that has already been refuted on device, on the path where a wrong span size
+            // silently corrupts layout instead of crashing. The flag stays off.
             recycler.adapter = gridAdapter.adapter
             recycler.layoutManager = layoutManager
             recycler.addItemDecoration(VerticalSpacingItemDecoration(8.dpToPx(context), gridAdapter))

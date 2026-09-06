@@ -622,6 +622,31 @@ class PlayerService : MediaLibraryService() {
             // where the budget bounds renderer/codec teardown, not media-source teardown, so it does NOT
             // scale with queue size. Do not re-tighten without a concrete ANR attributable to this line.
             .setReleaseTimeoutMs(500)
+            // Media3's stuck-buffering backstop, lowered from its 600_000 default (ExoPlayer
+            // .DEFAULT_STUCK_BUFFERING_DETECTION_TIMEOUT_MS). It fires a StuckPlayerException with
+            // ERROR_CODE_TIMEOUT into onPlayerError, where PlayerEventListener's generic tail re-prepares
+            // and plays — which also produces the state transition that re-arms our own watchdog.
+            //
+            // WHAT THE 600s DEFAULT COST: two field reports on 2026-09-05 (same device, same build 1078,
+            // 14 minutes apart) each show TEN MINUTES of unchanged buffered position on a one-item
+            // timeline. BUFFERING_WATCHDOG_MS is 5_000 with one retry, so a live watchdog resolves or
+            // gives up inside ~15s — meaning in both cases OUR WATCHDOG WAS NOT RUNNING AT ALL and this
+            // detector was the only thing that ever noticed. It noticed after ten minutes of silence.
+            //
+            // ⚠️ 60s, NOT 30s, AND THE TWO NUMBERS IT MUST CLEAR ARE REAL: PlayerEventListener's
+            // RESOLVE_GRACE_MS is 25_000 and StreamableLoader wraps a resolve in withTimeout(30_000).
+            // media3's detector knows nothing about either — it counts any window with no change in
+            // buffered position, and a stream that has not resolved yet has none — so a 30s threshold
+            // would fire at the same instant the loader times out, racing two error paths onto one item.
+            // 60s clears both with margin while still leaving this an order of magnitude below the
+            // default. It is a BACKSTOP, not a competitor: at 60s it can only fire when the 5s watchdog
+            // has already failed to act, which is exactly the condition worth reporting.
+            //
+            // Also note the detector's own precondition (StuckBufferingDetector.update, media3 1.11.0):
+            // it counts only while STATE_BUFFERING && playWhenReady && no playback suppression, and any
+            // change of period uid or buffered position restarts its clock. A paused stall is invisible
+            // to it, so this does not bound every hang — only the ones the user is waiting on.
+            .setStuckBufferingDetectionTimeoutMs(60_000)
             .build()
             .also {
                 it.trackSelectionParameters = it.trackSelectionParameters

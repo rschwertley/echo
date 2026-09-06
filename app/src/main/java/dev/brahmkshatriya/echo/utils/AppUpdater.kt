@@ -188,6 +188,10 @@ object AppUpdater {
             app.throwFlow.emit(it)
             return null
         }
+        // An update EXISTS and its asset url resolved. Everything above this line is "we looked";
+        // everything below is "we are updating". See CrashKeys.onAppUpdateStage for how to read the
+        // furthest-stage-reached semantics.
+        CrashKeys.onAppUpdateStage("offered")
 
         // Ask for the install permission HERE — after we know an update exists, before we pull the
         // APK. Gating at the call site instead would prompt every user every 24h even when nothing
@@ -242,6 +246,7 @@ object AppUpdater {
         // false having shown NOTHING, and this message is the only thing the user ever sees. That case is
         // an argument for the message, not against it.
         if (!ensureInstallPermission()) {
+            CrashKeys.onAppUpdateStage("permission_denied")
             messageFlow.emit(
                 Message(
                     app.context.run {
@@ -263,6 +268,10 @@ object AppUpdater {
         )
         return runCatching {
             val download = downloadUpdate(app.context, url, client).getOrThrow()
+            // Transfer complete and length-checked. If this is the LAST stage a report shows, the failure
+            // is between here and the installer — which for builds 1072-1078 was the unzip branch below
+            // running on a plain release APK.
+            CrashKeys.onAppUpdateStage("downloaded")
             // WHY THE UNZIP BRANCH EXISTS AT ALL: only "nightly" downloads a zip. Its url is
             // nightly.link/<repo>/actions/runs/<id>/artifact.zip, and nightly.link serves GitHub ACTIONS
             // ARTIFACTS, which the Actions API only ever exposes as a zip - the APK is an entry inside it.
@@ -280,7 +289,9 @@ object AppUpdater {
             // In this form a future channel that serves a plain APK needs NO CHANGE HERE - it falls to
             // `download` by default, which is the safe side. Only a channel that genuinely ships a zip
             // has to be named.
-            if (appType == "nightly") unzipApk(download) else download
+            val apk = if (appType == "nightly") unzipApk(download) else download
+            CrashKeys.onAppUpdateStage("ready")
+            apk
         }.getOrElse {
             if (it is CancellationException) throw it
             // Same reasoning as the check above, and this is the likelier half to fail: the APK

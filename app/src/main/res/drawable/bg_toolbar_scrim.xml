@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NEW UI as of 2026-09-06, not a restoration of anything: this screen never had a CollapsingToolbar
+     contentScrim (the only contentScrim in the project is commented out, in @style/TopCollapsingBar).
+     Top scrim for the overlay toolbar on media detail pages (fragment_media.xml). The AppBarLayout is
+     transparent so the cover scrolls under it; this keeps the back arrow, overflow icon and title legible
+     over album art. 40% black at the top edge, fully transparent at the bottom, so it is heaviest behind
+     the status bar and gone by the toolbar's lower edge. Black rather than ?colorSurface on purpose: a
+     theme colour would tint differently in light and dark mode, and the thing being covered is arbitrary
+     artwork, not a themed surface. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#66000000"
+        android:endColor="@android:color/transparent"
+        android:type="linear" />
+</shape>

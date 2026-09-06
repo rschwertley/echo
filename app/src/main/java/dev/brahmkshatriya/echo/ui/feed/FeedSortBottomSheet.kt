@@ -80,13 +80,25 @@ class FeedSortBottomSheet : BottomSheetDialogFragment() {
                 reversed = binding.reversedSwitch.isChecked,
                 save = binding.saveCheckbox.isChecked
             )
+            // The ONLY moment a sort is deliberately saved. Persisting from here rather than from the feed
+            // render path is the 2026-09-06 fix — see FeedData.persistSortState for why. Note this is also
+            // strictly MORE reliable than the old behaviour: applying with the checkbox ticked and then
+            // navigating away used to lose the save if no further render pass happened to run.
+            // An UNTICKED checkbox reaches the same call and REMOVES any existing entry; it does not
+            // simply skip the write, or unticking would leave the previous sort armed on disk.
+            feedData.persistSortState()
             dismiss()
         }
         binding.topAppBar.setNavigationOnClickListener {
             dismiss()
         }
         binding.topAppBar.setOnMenuItemClickListener {
+            // RESET. FeedSort.State() is save = false, which persistSortState treats as DELETE — the whole
+            // point. Before 2026-09-06 this cleared only the in-memory state: the `if (sortState.save)`
+            // write in the render path was skipped, the old entry stayed on disk, and the next feed load
+            // restored it. That is why a saved sort looked impossible to clear from the sheet.
             sortState.value = FeedSort.State()
+            feedData.persistSortState()
             dismiss()
             true
         }

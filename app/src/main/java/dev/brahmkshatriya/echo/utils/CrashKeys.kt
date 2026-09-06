@@ -230,7 +230,60 @@ object CrashKeys {
      */
     fun onAppUpdateGatePassed() {
         stampAge("age_s_app_update_gate")
-        set("app_update_attempted", true)
+        // (!) RENAMED 2026-09-05, from "app_update_attempted". Reports before build 1079 carry the OLD
+        // name; it means the same thing, which is the problem. The old name was read in triage as "the
+        // user tried to update", and it does not say that: this fires at process birth on EVERY non-store
+        // install, before any tag check, before any network call, and regardless of whether an update
+        // exists. It records ONE fact — the install-source gate let us proceed. See AppUpdater.updateApp.
+        // What an actual attempt looks like is app_update_stage below.
+        set("app_update_gate_passed", true)
+    }
+
+    /**
+     * How far an app self-update actually got. Written only when a run reaches each point, so the LAST
+     * value is the furthest stage reached in this process:
+     *   "offered"    a release exists whose tag differs from the running build; nothing downloaded yet.
+     *                Absence of this key with app_update_gate_passed=true means no update was on offer,
+     *                which is the normal state.
+     *   "permission_denied"  an update existed and the install permission was refused or unavailable.
+     *   "downloaded" the APK/zip transferred and passed the length check.
+     *   "ready"      the file is a plain APK, or was successfully unwrapped from nightly's artifact zip,
+     *                and is being handed to the installer.
+     * "downloaded" as the last value means the step between download and installer failed — which for
+     * builds 1072-1078 was the unzip branch running on a plain release APK (fixed 2026-09-05). Without
+     * this key that failure was only distinguishable by hunting for a companion non-fatal.
+     */
+    fun onAppUpdateStage(stage: String) {
+        set("app_update_stage", stage)
+    }
+
+    /**
+     * Process age at the moment a report is recorded. WITHOUT THIS, NO KEY CARRIES THE REPORT INSTANT:
+     * every age_s_* key is the age at ITS checkpoint, and process_age_s is first-write (see stampAge), so
+     * reconstructing "when did this happen" meant inferring it from whichever checkpoint happened to fire
+     * last — which cost two rounds of arithmetic on the 2026-09-05 StuckPlayerDetector pair and produced
+     * one wrong reading before it produced a right one.
+     *
+     * Deliberately NOT routed through stampAge: this is not a checkpoint. It must not claim a _first slot
+     * (its first value is meaningless — it is just the first report) and must not be able to win the
+     * process_age_s first-write race away from a real checkpoint.
+     */
+    fun onReportRecorded() {
+        set("report_age_s", ageS())
+    }
+
+    /**
+     * State at the instant media3's StuckPlayerDetector reported a stall. See
+     * PlayerEventListener.stuckDetail for the field list and what each value discriminates.
+     *
+     * A KEY, NOT A recordSkip DETAIL, and that is deliberate: recordSkip's `detail` string is folded into
+     * safeCause and thence into report()'s dedupe SIGNATURE, so every continuous value in it multiplies
+     * the number of distinct reports. A custom key feeds no signature, so it can carry raw numbers.
+     * Sticky like every key here: always written on this path, never conditionally, or the previous
+     * stall's values would ride along on the next unrelated report.
+     */
+    fun onStuckDetail(detail: String) {
+        set("stuck_detail", detail)
     }
 
     fun onQueueBuild(itemCount: Int) {

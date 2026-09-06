@@ -86,6 +86,58 @@ open class MainActivity : AppCompatActivity() {
             this, applyUiChanges(this, uiViewModel)
         )
 
+        // ══ KNOWN OEM LIMITATION — HONOR Magic V3 / MagicOS, Android 16. NOT OUR BUG, NOT GUARDED ══
+        // One fatal, one user, build 1081 (device FCP-AN10, a foldable):
+        //   RuntimeException: Unable to start activity MainActivity
+        //   Caused by NPE: read field 'android.graphics.Rect ContentFrameLayout.y' on a null object
+        //     ContentFrameLayout.setDecorPadding(ContentFrameLayout.java:90)
+        //     AppCompatDelegateImpl.applyFixedSizeWindow(:1021)  <- the real throwing frame
+        //     AppCompatDelegateImpl.ensureSubDecor(:829) <- setContentView(:689) <- this line
+        //
+        // MECHANISM, read from appcompat 1.8.0 sources. createSubDecor (:973-986) assigns
+        // android.R.id.content to the subdecor's ContentFrameLayout ONLY inside
+        // `if (windowContentView != null)`, where windowContentView is mWindow.findViewById(
+        // android.R.id.content). On this ROM that lookup returns NULL, so the subdecor's frame keeps its
+        // original R.id.action_bar_activity_content, applyFixedSizeWindow's unconditional lookup at :1014
+        // finds nothing, and :1021 dereferences it. Note :1021 is NOT gated by windowFixedWidthMajor /
+        // windowFixedHeightMajor — those only gate the a.hasValue() blocks from :1025 on — so no theme
+        // attribute of ours is involved and none would prevent it. We set none of them anyway.
+        //
+        // WHY IT IS THE ROM: on a stock Window this null is UNREACHABLE. PhoneWindow.generateLayout
+        // (android-34 sources, :2711-2714) does `if (contentParent == null) throw new RuntimeException(
+        // "Window couldn't find content container view")`, installDecor (:2771) assigns mContentParent
+        // from it, and Window.findViewById delegates to getDecorView(), which installs the decor. Stock
+        // either has the content parent or throws a different, explicit exception — it never returns null.
+        // Foldables are exactly where OEMs replace or wrap Window for fold/unfold continuity and display
+        // switching, which is what this needs.
+        //
+        // ⚠️ WHY THE REPORT READS AS A NULL FIELD ACCESS RATHER THAN A NULL RECEIVER — this paragraph is
+        // the one that saves the next person a retrace. R8 inlined ContentFrameLayout.setDecorPadding into
+        // applyFixedSizeWindow into ensureSubDecor, merging all three into `za.y()` (za =
+        // AppCompatDelegateImpl; the field `y` on ContentFrameLayout is mDecorPadding). Inlining removes
+        // the receiver null-check at the invoke, so the fault surfaces at the callee's first field read.
+        // mapping.txt carries R8's own annotation at that offset:
+        //   {"id":"com.android.tools.r8.rewriteFrame","conditions":["throws(Ljava/lang/NullPointerException;)"],
+        //    "actions":["removeInnerFrames(1)"]}
+        // i.e. R8 states that for an NPE here the innermost frame should be dropped. R8 shaped the REPORT;
+        // it did not create the null, and the same minified config ships to Play without this crash.
+        //
+        // UPSTREAM STATUS: appcompat is pinned at 1.8.0 and 1.8.0 IS the newest release (maven
+        // group-index, checked 2026-09-06) — there is no patch to bump to. Tracker issue 157633857 was
+        // checked and is UNRELATED (a 2020 Compose BottomAppBar/FAB cutout frame-lag bug, fixed in 2020;
+        // the search matched on adjacency, not substance). Issue 67675432 requires sign-in and remains
+        // UNCHECKED. Record this as SEARCHED, NOTHING FOUND — not as "not a known upstream defect".
+        //
+        // ⚠️ DELIBERATELY NOT GUARDED. There is no injection point: the dereference is inside AppCompat's
+        // private method. try/catch around this line would leave an Activity with no content view, turning
+        // a crash into a blank window plus downstream NPEs that are far harder to attribute. Touching
+        // window.decorView early to force decor installation is a GUESS about someone else's Window — it
+        // helps only if their null means "not installed yet" rather than "findViewById is broken", and we
+        // cannot tell which.
+        //
+        // ESCALATION CONDITION: if this signature appears on a SECOND UNRELATED DEVICE FAMILY, the
+        // stock-unreachability read above is wrong somewhere and that is the thread to pull. Until then it
+        // is one ROM, one user.
         setContentView(binding.root)
 
         enableEdgeToEdge(

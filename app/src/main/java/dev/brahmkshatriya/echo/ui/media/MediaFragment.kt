@@ -91,8 +91,13 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
         //   2. The need it served should now be met by focus-driven scrolling: the cover is a CardView
         //      with no click listener and is not focusable, while item 0's buttons are — so the first
         //      D-pad focus lands on a button and RecyclerView scrolls it into view on its own.
-        // ⚠️ (2) IS REASONED, NOT MEASURED — verify on a TV that opening an artist/album lands focus on a
-        // button rather than stranding it above a full-height cover. If it does strand, the fix is a
+        // ⚠️ (2) WAS REASONED, NOT MEASURED — and as written on 2026-09-05 its premise was wrong: the
+        // AppBarLayout was child 0 of fragment_media.xml, and ViewGroup.onRequestFocusInDescendants
+        // (android-34 sources, :3355-3380) walks mChildren in RAW INDEX ORDER, so the first D-pad focus
+        // landed on the toolbar's navigation icon, not on a button. The 2026-09-06 overlay-toolbar change
+        // reorders that file so the FragmentContainerView is child 0, which makes the claim true. Still
+        // verify on a TV that opening an artist/album lands focus on a button rather than stranding it
+        // above a full-height cover. If it does strand, the fix is a
         // values-land-television override of @dimen/media_header_cover_size (that folder already exists),
         // NOT scrollToPosition(1) — position 1 skips item 0 entirely and takes the buttons off screen with
         // it, which the collapsed header never did.

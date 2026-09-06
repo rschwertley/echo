@@ -13,6 +13,7 @@ import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.models.Message
 import dev.brahmkshatriya.echo.common.models.NetworkConnection
 import dev.brahmkshatriya.echo.extensions.exceptions.AppException
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -209,6 +210,11 @@ data class App(
                         setCustomKey("health_report_type", "none")
                         setCustomKey("player_state", crashPlayerState)
                         setCustomKey("is_playing", crashIsPlaying)
+                        // Age at THIS instant, not at any checkpoint. See CrashKeys.onReportRecorded for
+                        // why the checkpoint keys cannot answer "when did this happen".
+                        // ⚠️ HealthMonitor.kt has the OTHER recordException call site; a report arriving
+                        // through it carries no report_age_s unless the same call is added there.
+                        CrashKeys.onReportRecorded()
                         recordException(it)
                     }
                 }

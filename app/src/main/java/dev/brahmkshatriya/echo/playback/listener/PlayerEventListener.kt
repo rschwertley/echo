@@ -11,6 +11,7 @@ import androidx.media3.common.ParserException
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.util.StuckPlayerException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.HttpDataSource
@@ -44,6 +45,7 @@ import dev.brahmkshatriya.echo.playback.PlayerState
 import dev.brahmkshatriya.echo.playback.ResumptionUtils
 import dev.brahmkshatriya.echo.playback.ShufflePlayer
 import dev.brahmkshatriya.echo.playback.exceptions.PlayerException
+import dev.brahmkshatriya.echo.utils.CrashKeys
 import dev.brahmkshatriya.echo.playback.source.StreamableDataSource
 import dev.brahmkshatriya.echo.playback.exceptions.TrackUnavailableException
 import dev.brahmkshatriya.echo.ui.common.ErrorCategory
@@ -539,6 +541,34 @@ class PlayerEventListener(
                             "item=$item net=$net play=${if (wasPlaying) "yes" else "no"} " +
                             probeDetail()
                     )
+                    // ══ THE GIVE-UP BRANCHES, AND WHY THEIR SILENCE IS STRUCTURAL ══════════════════
+                    // Both `pause(); return` paths below end the watchdog with the player still in
+                    // STATE_BUFFERING — pause() moves playWhenReady only, because the load never
+                    // completed. Nothing re-arms from there: onPlaybackStateChanged needs a STATE change
+                    // and BUFFERING -> BUFFERING is not one, and onPlayWhenReadyChanged's arm requires
+                    // playWhenReady TRUE, which pause() has just cleared. The player is parked.
+                    //
+                    // ⚠️ AND A STALL PARKED HERE IS SILENT BY CONSTRUCTION, NOT BY OVERSIGHT. Both
+                    // 2026-09-05 field reports (build 1078, same device, 14 minutes apart) happened with
+                    // NO UI ATTACHED: last_disconnected_pkg was our OWN package — the app's controller
+                    // disconnecting from its own session, i.e. the Activity going away — and in the long
+                    // session that disconnect landed ONE SECOND before the stuck window opened. The
+                    // service went on running headless with the notification still showing a track that
+                    // never played.
+                    //
+                    // ⚠️ SO ANY "REPORT IT ONCE" DESIGN ADDED HERE MUST NOT USE app.messageFlow. Its only
+                    // subscriber is SnackBarHandler's lifecycle-gated observe (ContextUtils.observe ->
+                    // flowWithLifecycle, STARTED), and a shared flow with no subscriber DISCARDS the
+                    // emission — a buffer does not hold values for a subscriber that is not there yet.
+                    // With no Activity there is nothing to render into and no record that anything was
+                    // said. To be seen at all, a give-up notice has to reach somewhere that survives the
+                    // UI: the media notification, the playback error state the session already exposes
+                    // (stop() preserves getPlayerError(), which is how the phone shows "Login" on the
+                    // login-required path), or Crashlytics for the after-the-fact case.
+                    //
+                    // The breaker branch has an out the end-of-queue branch does not: it calls
+                    // reportAndResetConsecutiveSkips, which does reach Crashlytics. End-of-queue reports
+                    // nothing anywhere.
                     if (consecutiveUnavailableSkips >= maxConsecutiveUnavailableSkips) {
                         reportAndResetConsecutiveSkips(player.currentMediaItem?.extensionId, "pause")
                         player.pause()
@@ -546,6 +576,21 @@ class PlayerEventListener(
                     }
                     // hasNextMediaItem() compares the inner full index against the full count — a
                     // correct end-of-queue guard.
+                    //
+                    // ⚠️ DELIBERATE END-OF-QUEUE BEHAVIOUR — do not "fix" the pause away. Introduced with
+                    // the watchdog itself in 22a3c064 (2026-05-10, "Fix infinite STATE_BUFFERING on
+                    // session restore: … add 20s buffering watchdog"), whose diff shows this same
+                    // `pause(); return` pair from the first version; 8256ca3b (2026-06-29) only replaced
+                    // the predicate, because the old `currentMediaItemIndex < mediaItemCount - 1` mixed a
+                    // WINDOWED index with a FULL count and was always true past 50 items.
+                    // Not skipping when there is nothing to skip to is correct and stays. What is
+                    // incidental to that intent — and is the part worth changing — is the state it leaves
+                    // behind, described above.
+                    //
+                    // Note this branch is reachable BY CONSTRUCTION on a one-item timeline, which is what
+                    // both 2026-09-05 reports had. It is NOT what produced them: media3's
+                    // StuckBufferingDetector requires playWhenReady to count at all, so a stall parked by
+                    // this pause() is invisible to it, and those reports each carry a full 600s window.
                     if (!player.hasNextMediaItem()) {
                         player.pause()
                         return@withContext
@@ -809,6 +854,53 @@ class PlayerEventListener(
     // of them passed detail = null, so a stall that surfaced through onPlayerError carried no probe data at
     // all - the instrument was blind on exactly the path a StuckPlayerDetector report takes.
     // Cheap and side-effect free: three field reads and an AtomicInteger get. REMOVE WITH THE PROBE.
+    /**
+     * What was true when media3's StuckPlayerDetector gave up. Read alongside probeDetail's fields, which
+     * are appended verbatim.
+     *
+     * ⚠️ STATE THE EXPECTED VALUES BEFORE READING THE FIRST REPORT, or the numbers are data rather than
+     * evidence. The question this exists to settle is WHY OUR OWN 5s WATCHDOG DID NOT ACT — both
+     * 2026-09-05 reports were 600s of unchanged buffered position, and BUFFERING_WATCHDOG_MS is 5_000,
+     * so a live watchdog would have retried twice and skipped or paused inside ~15s. Three outcomes,
+     * each falsifying the others:
+     *   wd=null pwr=true   -> NO WATCHDOG WAS ARMED while the detector's own preconditions held. The
+     *                         fault is in ARMING: an arm site never fired, or the job was cancelled with
+     *                         no following state transition to re-arm it (the BUFFERING -> BUFFERING
+     *                         non-event described at onPlayWhenReadyChanged). This is the predicted case.
+     *   wd=live pwr=true   -> the watchdog WAS running and did not fix it. Arming is fine; the fault is
+     *                         inside the watchdog body — most likely the resolve-in-flight re-arm at
+     *                         armBufferingWatchdog, in which case loads>0 will corroborate.
+     *   pwr=false          -> IMPOSSIBLE as written, and its appearance falsifies the model rather than
+     *                         the code: StuckBufferingDetector.update (media3 1.11.0) requires
+     *                         playWhenReady before it will count at all. Seeing it means the flag changed
+     *                         between the detector's last sample and this line.
+     * `next` is the other half of the pair: both reports had a ONE-ITEM timeline, and next=no is the
+     * input that makes the watchdog's end-of-queue branch reachable. next=yes with wd=null would rule
+     * that branch out entirely.
+     *
+     * Raw numbers are fine here — this string feeds a Crashlytics key, not report()'s dedupe signature.
+     */
+    private fun stuckDetail(e: StuckPlayerException): String {
+        val type = when (e.stuckType) {
+            StuckPlayerException.STUCK_BUFFERING_NOT_LOADING -> "buffering-not-loading"
+            StuckPlayerException.STUCK_BUFFERING_NO_PROGRESS -> "buffering-no-progress"
+            StuckPlayerException.STUCK_PLAYING_NO_PROGRESS -> "playing-no-progress"
+            StuckPlayerException.STUCK_PLAYING_NOT_ENDING -> "playing-not-ending"
+            StuckPlayerException.STUCK_SUPPRESSED -> "suppressed"
+            else -> "unknown(${e.stuckType})"
+        }
+        val graceAge = System.currentTimeMillis() - resolveGraceStart
+        return "type=$type to=${e.timeoutMs} " +
+            // wd is THE field. Everything else is context for whichever branch it selects.
+            "wd=${if (bufferingWatchdog?.isActive == true) "live" else "null"} " +
+            "pwr=${player.playWhenReady} state=${player.playbackState} " +
+            "items=${player.mediaItemCount} next=${if (player.hasNextMediaItem()) "yes" else "no"} " +
+            "bufAhead=${player.bufferedPosition - player.currentPosition} " +
+            "totalBuf=${player.totalBufferedDuration} loads=${activeLoadCount()} " +
+            "graceAge=$graceAge wdRetries=$retriedWatchdogCount errRetries=$currentRetries " +
+            probeDetail()
+    }
+
     private fun probeDetail(): String {
         val opens = (StreamableDataSource.openCount.get() - openCountAtItemStart).coerceAtLeast(0)
         val dur = when (lastReadyDurationKnown) {
@@ -1431,6 +1523,19 @@ class PlayerEventListener(
             .firstOrNull()
             ?.timeoutOperation == ExoTimeoutException.TIMEOUT_OPERATION_RELEASE
         if (releaseTimeout) return
+
+        // STALL DETAIL, ATTACHED HERE BECAUSE NOTHING ELSE ON THIS PATH CAN CARRY IT. A first
+        // StuckPlayerException reaches neither recordSkip gate below (see the isTimeout note above: the
+        // tail does not consume the retry budget on a first occurrence), so probeDetail() — which only
+        // ever travels as recordSkip's `detail` — is structurally unreachable for it. The two reports on
+        // 2026-09-05 arrived with nothing attached for exactly that reason.
+        // Written BEFORE the emit: throwableFlow.emit is launched asynchronously, so the key must already
+        // be set when App.kt's collector reaches recordException.
+        val stuck = generateSequence(cause) { it.cause }
+            .take(MAX_CAUSE_DEPTH)
+            .filterIsInstance<StuckPlayerException>()
+            .firstOrNull()
+        if (stuck != null) CrashKeys.onStuckDetail(stuckDetail(stuck))
 
         scope.launch { throwableFlow.emit(PlayerException(mediaItem, cause)) }
 

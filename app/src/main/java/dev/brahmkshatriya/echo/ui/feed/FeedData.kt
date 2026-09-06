@@ -19,6 +19,7 @@ import dev.brahmkshatriya.echo.extensions.builtin.offline.MediaStoreUtils.search
 import dev.brahmkshatriya.echo.ui.common.PagedSource
 import dev.brahmkshatriya.echo.ui.feed.FeedType.Companion.toFeedType
 import dev.brahmkshatriya.echo.ui.feed.viewholders.HorizontalListViewHolder
+import dev.brahmkshatriya.echo.utils.CacheUtils.cacheDir
 import dev.brahmkshatriya.echo.utils.CacheUtils.getFromCache
 import dev.brahmkshatriya.echo.utils.CacheUtils.saveToCache
 import dev.brahmkshatriya.echo.utils.CoroutineUtils.combineTransformLatest
@@ -45,6 +46,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.lang.ref.WeakReference
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
@@ -119,6 +121,55 @@ data class FeedData(
     var searchToggled: Boolean = false
     var searchQuery: String? = null
     val feedSortState = MutableStateFlow<FeedSort.State?>(null)
+
+    // The (extensionId, tabId) the CURRENT feedSortState was loaded for. Captured at the disk read below,
+    // in the same block and from the same source, so persistSortState can never pair a fresh tab with a
+    // stale state — the defect this whole change exists to remove. feedId is a constructor property and
+    // needs no capture.
+    private var sortStateExtensionId: String? = null
+    private var sortStateTabId: String? = null
+
+    /**
+     * Persist (or remove) the CURRENT [feedSortState] under the key it was loaded for.
+     *
+     * ⚠️ CALL THIS FROM USER ACTIONS ONLY. Saving a sort is something a person asks for; it is not a
+     * property of having rendered the feed. Until 2026-09-06 the write lived inside getFeedSourceData and
+     * fired on EVERY pass through the sort branch, pairing `selectedTabFlow.value` (already advanced by a
+     * tab switch) with `feedSortState.value` (not yet re-read for the new tab, because that read lives in
+     * a SEPARATE collector — see dataFlow). A saved sort on one tab was therefore written to a different
+     * tab's key, silently and permanently.
+     *
+     * WHY THAT MATTERED MORE THAN IT LOOKS. The gate it arms is not cosmetic: getFeedSourceData's sort
+     * branch runs data.loadTill(shelfLimit = 2000, itemLimit = MAX_SORT_SEARCH_ITEMS) BEFORE the flatMap,
+     * materialising up to 2000 raw Shelf objects each still holding its full track list. That is the shape
+     * that OOM'd on Combine's feed; MAX_SORT_SEARCH_ITEMS exists as a CAP added in response (015428a5,
+     * 2026-07-19), sized on the assumption that the branch is user-requested. A spurious write breaks that
+     * assumption — it arms an eager load on a feed nobody chose to sort.
+     *
+     * ⚠️ WHO WAS AFFECTED: everyone who has ever applied a saved sort on ANY tab of a MULTI-TAB feed.
+     * Library and Home both qualify. The damaged tab is not the sorted one — it is whichever tab the user
+     * switched TO while the previous tab's state was still loaded, and because the entry is on disk it
+     * survived restarts. It went unnoticed on flat tabs (Library's Playlists/Albums/Tracks/Artists), where
+     * every shelf is already a Shelf.Item and the flatMap is a no-op; it is glaring on a tab of carousels.
+     *
+     * ⚠️ save == false MEANS DELETE, NOT SKIP. Applying with the checkbox unticked, or resetting from the
+     * sheet's toolbar, must REMOVE any existing entry. Skipping the write instead (what the old code did)
+     * left the previous entry on disk to be restored on the next feed load — which is why the reset action
+     * appeared to work and then silently un-did itself.
+     *
+     * The delete is a direct File.delete() HERE rather than a CacheUtils API, matching
+     * Cached.bustTracksCache: CacheUtils states a deliberate no-delete policy in getFromCache's comment,
+     * and this keeps that intact. Deliberately NOT saveToCache(key, null) — that writes the JSON literal
+     * `null`, which getFromCache then fails to decode into a non-nullable State and logs as
+     * "getFromCache unreadable: folder=sort" on EVERY feed load, forever.
+     */
+    fun persistSortState() = scope.launch(Dispatchers.IO) {
+        val extensionId = sortStateExtensionId ?: return@launch
+        val key = "$extensionId-$feedId-$sortStateTabId"
+        val state = feedSortState.value
+        if (state?.save == true) app.context.saveToCache(key, state, "sort")
+        else runCatching { File(cacheDir(app.context, "sort"), key.hashCode().toString()).delete() }
+    }
     val searchClickedFlow = MutableSharedFlow<Unit>()
 
     private val stateFlow = cachedState.combine(loadedState) { a, b -> a to b }
@@ -156,6 +207,16 @@ data class FeedData(
         searchQuery = null
         searchToggled = false
         val id = "$extensionId-$feedId-$tabId"
+        // Captured HERE, with the value, from the same locals — see persistSortState. Any later write uses
+        // these rather than re-reading selectedTabFlow, which is what makes a stale pairing impossible
+        // rather than merely unlikely.
+        sortStateExtensionId = extensionId
+        sortStateTabId = tabId
+        // ⚠️ NO persistSortState() HERE, and that is not an oversight — this assignment is the LOAD. It
+        // writes what disk already holds, so persisting it would be a pure write-back, and it is not a
+        // user action. Every OTHER writer of feedSortState either calls persistSortState (the sheet's
+        // Apply and reset, the two header chip clears) or carries a comment saying why it must not
+        // (FeedClickListener's arm-on-open). Keep that invariant: one writer, one explicit answer.
         feedSortState.value = extensionId?.let {
             withContext(Dispatchers.IO) { app.context.getFromCache(id, "sort") }
         }
@@ -226,6 +287,16 @@ data class FeedData(
             emit(getFeedSourceData(loaded))
         }.stateIn(scope, Lazily, null)
 
+    // ⚠️ KNOWN, SEPARATE DEFECT — the Library double-render flash. This rebuilds a PagedSource on every
+    // upstream emission with no equality gate, so identical cache-then-network content renders twice. It
+    // shares a CAUSE FAMILY with the sort-write race fixed on 2026-09-06 — combineTransformLatest is
+    // combine(*flows).transformLatest(…), which re-runs its transform on every emission and does not
+    // coordinate the independent collectors of the same upstreams — but it is NOT the same defect: the
+    // flash is redundant work with CORRECT inputs, while that race was single work with MISMATCHED inputs
+    // (a fresh tabId against a stale sortState, from two separate collectors).
+    // Moving the sort write out of the render path does NOT fix the flash. What it does is make an extra
+    // render pass HARMLESS: an extra pass is no longer an extra chance to persist a wrong sort. A previous
+    // fix for the flash was reverted over stale-content risk and it remains open.
     val pagingFlow =
         cachedFeedTypeFlow.combineTransformLatest(loadedFeedTypeFlow) { cached, loaded ->
             emitAll(PagedSource(loaded, cached).flow)
@@ -246,6 +317,38 @@ data class FeedData(
                 var shelves = data.loadTill(
                     shelfLimit = 2000, itemLimit = MAX_SORT_SEARCH_ITEMS,
                 ) { shelf -> if (shelf is Shelf.Lists<*>) shelf.list.size.coerceAtLeast(1) else 1 }
+                // ⚠️ THIS flatMap DESTROYS SECTION STRUCTURE, AND THAT IS THE INTENDED BEHAVIOUR — but it
+                // is invisible from the outside and cost several rounds of investigation on 2026-09-06.
+                // Read this before chasing "my carousels turned into a flat list" again.
+                //
+                // WHAT IT DOES: every Shelf.Lists.* is exploded into its contents (Shelf.Lists.Items ->
+                // shelf.list.map { it.toShelf() }), because sorting or searching only means anything over
+                // individual items, not over container shelves. FeedType then maps each resulting
+                // Shelf.Item to a full-width Media row and emits NO Header — headers come only from
+                // Shelf.Lists. So a feed whose shelves ARE its organisation (Library -> All, Home) turns
+                // into one flat, headerless, mixed list the moment a sort or a search is active.
+                //
+                // ⚠️ AND THE TRIGGER IS INVISIBLE AND STICKY. The outer gate above is
+                // `feedSortState.value != null || searchQuery != null`; feedSortState is restored FROM
+                // DISK on every dataFlow emission (see the read near the top of this file, key
+                // "$extensionId-$feedId-$tabId") and written back below when sortState.save is set. So a
+                // sort applied once — possibly on a DIFFERENT tab, since the key is per-tab but the state
+                // flow is shared — survives process death and re-arms itself on the next feed load, with
+                // nothing on screen at rest to say why the sections vanished except the sort chip in the
+                // header.
+                //
+                // 2026-09-06 field case: Library -> All rendered as one flat mixed list of playlists,
+                // albums, tracks and artists with no section titles, on Deezer, surviving force-stop.
+                // DeezerLibraryClient.loadAll was correct throughout — it returns four
+                // Shelf.Lists.Items(type = Linear) and nothing between it and FeedType alters them. The
+                // whole effect was produced here.
+                //
+                // ⚠️ THE RESET MENU ITEM DOES NOT CLEAR THE SAVED ENTRY. FeedSortBottomSheet's toolbar
+                // action sets FeedSort.State(), i.e. save = false, so the `if (sortState.save)` write
+                // below is skipped and the OLD saved entry stays on disk — the next restore re-arms it.
+                // Nothing in this file ever deletes a saved sort. The header chip path
+                // (ButtonsAdapter.configure -> state.copy(feedSort = null)) does persist a cleared state,
+                // because it keeps save = true and therefore rewrites the entry.
                 shelves = if (sortState?.feedSort != null || query != null)
                     shelves.flatMap { shelf ->
                         when (shelf) {
@@ -265,8 +368,14 @@ data class FeedData(
                 if (sortState != null) {
                     shelves = sortState.feedSort?.sorter?.invoke(app.context, shelves) ?: shelves
                     if (sortState.reversed) shelves = shelves.reversed()
-                    if (sortState.save)
-                        app.context.saveToCache("$extensionId-$feedId-$tabId", sortState, "sort")
+                    // ⚠️ NO PERSISTENCE HERE. Until 2026-09-06 this block ended with
+                    //     if (sortState.save) app.context.saveToCache("$extensionId-$feedId-$tabId", …)
+                    // which fired on every render pass and paired a fresh tabId with a stale sortState.
+                    // Saving now happens only from user actions — see FeedData.persistSortState for the
+                    // mechanism, the blast radius and why the branch above is worth protecting.
+                    // ⚠️ `extensionId` and `tabId` remain in scope and are still correct for RENDERING;
+                    // they are simply not a safe key to WRITE with from here, because the state they would
+                    // be paired with belongs to whichever tab was selected when it was read.
                 }
                 if (query != null) {
                     shelves = shelves.searchBy(query) {
