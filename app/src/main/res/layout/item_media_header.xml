@@ -32,8 +32,8 @@
                    constraint, so this padding sat entirely below it and set the AppBarLayout's bottom edge.
               8dp  fragment_media_details.xml, RecyclerView paddingTop — the RecyclerView began at the
                    AppBar's bottom, so this fell between the cover and the first item (then the buttons).
-             ----
-             57dp  total.
+             ====
+             57dp  total (49 + 8).
          VerticalSpacingItemDecoration contributes nothing: it only ever writes outRect.bottom, never top,
          so position 0 has no top offset in either layout. fragment_media_details.xml was NOT touched by
          the migration (empty diff at 5e4b9413), so its 8dp still exists — but it now sits ABOVE the cover
