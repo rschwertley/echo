@@ -97,13 +97,42 @@ class PlayerCallback(
 
     override val historyRepository: HistoryRepository get() = histRepo
 
+    // TIER 1 WAS UNDER-FILTERED — FIXED 2026-09-07. This is the LIVE implementation (PlayerCallback is
+    // AndroidAutoCallback's only subclass). Tiers 2 and 3 already applied the full aaEligible; TIER 1 APPLIED
+    // ONLY `it != UNIFIED_ID` to the STRING and never checked isEnabled. The id it reads is written by
+    // AndroidAutoCallback.onGetChildren from an unfiltered parse of parentId, so a DISABLED extension reached
+    // through a browse node the head unit still had cached became the voice-search target and STAYED it,
+    // because lastBrowsedExtId persists. Reachable with no version history at all: cache a browse tree, then
+    // disable the extension. Tier 1 now resolves first and runs the extension through aaEligible, so all
+    // three tiers share one predicate.
+    // ⚠️ THE SOURCE OF THE ID IS STILL UNFILTERED — AndroidAutoCallback.onGetChildren's per-node dispatch
+    // resolves extId against the raw extensionList and writes it here. That gap is open and scoped in the
+    // note at that dispatch. This fix hardens the CONSUMER only; it does not make the field trustworthy.
+    //
+    // ⚠️ THE TIER-1 FIX DID NOT MAKE THIS FUNCTION CORRECT, ONLY LESS WRONG. It closed the
+    // DISABLED/UNIFIED axis. TWO OTHERS SURVIVE IT, and they are DISTINCT — do not conflate them:
+    //   (i)  RACINESS — "WHICH CONCURRENT WRITE WON". lastBrowsedExtId is @Volatile and shared across all
+    //        in-flight browse futures; under concurrency it holds whichever future wrote last, so which
+    //        extension wins is nondeterministic independently of enablement. An earlier session searched for
+    //        a per-request discriminator at the onGetChildren boundary (parentId, browser.packageName,
+    //        params, page/pageSize, ordering, time-since-connect) and concluded none exists.
+    //   (ii) STALENESS — "THE VALUE WAS NEVER UPDATED AT ALL". It is set only on an AA browse-into and NEVER
+    //        on a phone-side extension switch, so switching extension on the phone while AA is connected
+    //        leaves this naming the last one browsed in the car. That id is stale but ENABLED, so aaEligible
+    //        passes it through. Nothing raced here; the write never happened.
+    // Both are unsolved and neither is addressed by a stronger predicate.
+    //
+    // It does not crash — the search runs and returns real results from an extension the user turned off.
+    // See the frequency-drop trap at AndroidAutoCallback.onGetChildren's per-node dispatch: the May guard was
+    // read as complete because Crashlytics auto-resolved a falling count, and these two gaps produce no
+    // count at all. Do not read quiet as fixed.
     override fun getCurrentExtension(): MusicExtension? {
         val aaEligible = { ext: MusicExtension ->
             ext.isEnabled && ext.id != UnifiedExtension.UNIFIED_ID
         }
         return lastBrowsedExtId
-            ?.takeIf { it != UnifiedExtension.UNIFIED_ID }
             ?.let { id -> extensionList.value.firstOrNull { it.id == id } }
+            ?.takeIf(aaEligible)
             ?: extensions.current.value?.takeIf { aaEligible(it) }
             ?: extensionList.value.firstOrNull(aaEligible)
     }
@@ -265,6 +294,28 @@ class PlayerCallback(
     // with no empty-save wipe; and the current-observer is hadTrack-gated, so the bar shows once. It is the
     // "restore finished, then user played new" sequence, not a spurious double-restore.
     suspend fun applyRestoreIfCold(player: Player) {
+        // ⚠️ THE KEEP_QUEUE GATE BELONGS HERE AND ONLY HERE. Its absence elsewhere is not a missed case.
+        //
+        // The setting's own label is the only statement of intent that exists — nothing about KEEP_QUEUE
+        // is recorded anywhere in this project's history; it is inherited from upstream. The label reads:
+        //     "Keep Player Queue — Recover the player queue, when you reopen the app"
+        // "when you reopen the app" is precisely this function: the app-open cold-start restore. A
+        // Bluetooth or headset media button is NOT reopening the app, so onPlaybackResumption being
+        // ungated matches what the setting promises rather than contradicting it — a media button is an
+        // explicit play request, and Media3's resumption contract is "give me something to play".
+        // PlayerViewModel's at-rest seed (the mini-bar's current track) is display, not queue recovery, and
+        // is ungated for the same reason.
+        //
+        // ⚠️ SO ADDING A GATE TO onPlaybackResumption WOULD CHANGE WHAT THE SETTING MEANS, not fix a gap.
+        // It would make "don't recover my queue when I reopen the app" also mean "don't resume when I
+        // press play on my headphones", which the label does not say and which no record supports.
+        //
+        // WHAT IS *NOT* SETTLED BY THIS, kept separate so the two are not conflated: with the setting off
+        // the snapshot is still BUILT — PlayerService's producer runs recoverPlaylist unconditionally and
+        // constructs up to QUEUE_CAP_UPCOMING + 1 MediaItems. That is justified semantically (the two
+        // ungated consumers above legitimately want the data) but wasteful in degree: consumer 3 needs ONE
+        // item and consumer 2 needs the list only if a media button ever arrives. That is the parked
+        // lazy-RestoreData-construction work, and it is a performance question, not a semantics one.
         if (!app.settings.getBoolean(KEEP_QUEUE, true)) return
         val data = state.restoreDeferred?.await() ?: return
         withContext(Dispatchers.Main) {

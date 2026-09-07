@@ -94,12 +94,22 @@ class DeezerParser(private val session: DeezerSession) {
      * If you come back to make the arrow fetch, the section `target` is where to look — and note that a
      * fetched page returning Lists would make the termination note above no longer hold.
      */
-    // `block` is RETAINED BUT UNUSED while the fetch branch is off — see the ⚠️ note below. Keeping the
-    // parameter (and channelFeed, and the target read) means re-enabling is a one-expression change rather
-    // than a re-plumb, and it keeps the two call sites that pass a resolver honest about their intent.
-    @Suppress("UNUSED_PARAMETER")
+    // `block` was RETAINED BUT UNUSED from 2026-09-05 to 2026-09-07 while the fetch branch was off, with
+    // an @Suppress("UNUSED_PARAMETER") here. Keeping the parameter (and channelFeed, and the target read)
+    // is what made re-enabling a one-expression change rather than a re-plumb. It is used again; the
+    // suppression is gone with it.
+    /**
+     * @param name the DISPLAY title. May be blank — see the shelf construction below.
+     * @param id the STABLE identity. Defaults to [name] for callers that have nothing better, but a
+     *   caller holding a section_id/module_id should pass it. ⚠️ NEVER KEY ON A DEEZER MODULE'S TITLE:
+     *   module 46b377f1 was "Summer in slow-mo" and is now "Hello, sunshine" — same module, rotating
+     *   label. The id reaches Shelf.Lists.Items.id, which is what Cached.getFeedShelf builds its cache
+     *   key from and what two untitled sections of one page would otherwise collide on.
+     *   `block` stays LAST so existing trailing-lambda call sites keep binding to it.
+     */
     fun JsonElement.toShelfItemsList(
         name: String = "Unknown",
+        id: String = name,
         block: (suspend (String) -> List<Shelf>)? = null,
     ): Shelf? {
         val rawItems = obj()["items"]?.jsonArray
@@ -131,7 +141,7 @@ class DeezerParser(private val session: DeezerSession) {
 
         return items.takeIf { it.isNotEmpty() }?.let { list ->
             Shelf.Lists.Items(
-                id = name,
+                id = id,
                 title = name,
                 list = list,
                 // ⚠️ FETCH BRANCH DISABLED 2026-09-05 — EVERY SECTION RE-WRAPS. Do not re-enable without
@@ -155,11 +165,55 @@ class DeezerParser(private val session: DeezerSession) {
                 // existing items as a vertical page. That is the only thing the arrow has ever done
                 // usefully — "Your top genres" showing 6 on Home and 12 expanded is this path working.
                 //
-                // ⚠️ RE-ENABLING MEANS HANDLING FAMILIES, NOT A SHAPE. A per-target dispatch needs three
-                // response bodies nobody has captured; an allowlist that only fetches known-good targets
-                // fails safe but must not treat "/channels/" as one family, since /channels/module/ is
-                // among the broken ones. Blocked on a /channels/module/<uuid> capture either way.
-                more = PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
+                // ══ RE-ENABLED 2026-09-07, WITH A FALLBACK — AND THE FALLBACK IS WHY IT IS SAFE ══
+                // The 2026-09-05 version (f03492fc) fetched and, when the fetch produced nothing, showed
+                // NOTHING. That is why it had zero working cases: a family it could not parse became an
+                // empty page, which is strictly worse than not fetching. This version fetches and falls
+                // back to the re-wrap, so the WORST case equals the disabled behaviour exactly.
+                //
+                // WHAT THE 2026-09-07 CAPTURE CHANGED. channels/module/46b377f1 returns ONE section,
+                // title=<null>, layout=grid, items=array[25], and ALL 25 parse with the existing code.
+                // The items were never the problem — channelFeed required a section title and dropped the
+                // whole section without one. That is fixed there. Per family now:
+                //   /channels/module/<uuid>  WORKS. 25 items against the 12 Home shows, so the fetch is
+                //                            worth having. Title falls back to the page title.
+                //   /artist/<id>             NO "sections" KEY. channelFeed's guards return an empty list
+                //                            and this falls back to the re-wrap — the row's own items,
+                //                            i.e. today's behaviour. It can no longer throw.
+                //   /channels/explore        NOT ON THIS PATH AT ALL: channel-item sections route to
+                //                            toShelfCategoryList, whose `more` is cats.toFeed().
+                //   /channels/new            NEVER CAPTURED. If it is page-shaped it works; if not it
+                //                            degrades to the re-wrap. Bounded either way.
+                //
+                // runCatching is belt to the guards' braces: a throw from ANY family — including one
+                // nobody has seen — becomes the re-wrap instead of an error page under the arrow.
+                // ⚠️ The empty check is `isNotEmpty()`, not null-only: channelFeed returns an EMPTY LIST
+                // for an unparseable page, not null, so a null-only check would show a blank page.
+                // ⚠️ THE FALLBACK IS LOGGED, AND THAT IS NOT OPTIONAL. It exists to make a failure
+                // invisible to the user — the row's own items appear whether the fetch worked or not — so
+                // without a line here nobody can tell on device whether a family fetched or degraded.
+                // Fires ONLY on the fallback path: a working family prints nothing. channelFeed prints the
+                // REASON (no-results / no-sections / no-section-parsed); this prints that it happened and
+                // which section it happened to, so the two compose into one story per target.
+                more = if (block != null && !target.isNullOrBlank()) PagedData.Single<Shelf> {
+                    val fetched = runCatching { block(target) }
+                        .onFailure { e ->
+                            println(
+                                "GladixDeezer FALLBACK target=$target section=\"$name\" " +
+                                    "reason=threw:${e::class.simpleName} msg=${e.message?.take(120)}"
+                            )
+                        }
+                        .getOrNull()
+                    if (fetched.isNullOrEmpty()) {
+                        // Only when it did NOT throw — a throw has already printed its own line above and
+                        // saying "empty" as well would double-count one failure as two.
+                        if (fetched != null) println(
+                            "GladixDeezer FALLBACK target=$target section=\"$name\" reason=empty"
+                        )
+                        list.map { item -> item.toShelf() }
+                    } else fetched
+                }.toFeed()
+                else PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
             )
         }
     }

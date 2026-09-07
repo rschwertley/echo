@@ -82,6 +82,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -416,6 +417,128 @@ class PlayerService : MediaLibraryService() {
         // empty player + the resumption marker; KEEP_QUEUE is honored inside applyRestoreIfCold. It does
         // NOT prepare() — same lazy-STATE_READY reason as before; prepare() waits for play().
         scope.launch { callback.applyRestoreIfCold(player) }
+        scheduleRestoreSnapshotRelease(player)
+    }
+
+    /**
+     * Frees the cold-start restore snapshot once it can no longer be needed.
+     *
+     * ⚠️ WHY: PlayerState.restoreCache and restoreDeferred were set once and NEVER cleared — a grep for
+     * assignments in the whole tree returned only the two writes. Both hold the SAME RestoreData, whose
+     * `items` is the full list of built MediaItems, and PlayerState is a Koin singleton. Measured on the
+     * 2026-09-07 OOM reports: heap_used_mb_build is 45-63 MB at restore_build_count = 2001, i.e. ~20-30 KB
+     * per MediaItem, so the snapshot retained 40-60 MB for the whole session — held TWICE, beside a live
+     * timeline of 5,432 items that is a separate copy of the same class of data, on a device whose growth
+     * limit is 384 MB.
+     *
+     * ⚠️ WHY A TTL AND NOT A SIZE CAP. The cache exists for the build-1039 service-creation storm: ~1050
+     * creations in 42-73 s, each of which re-read the queue and rebuilt every MediaItem (~85,000 builds in
+     * a minute, 20 MB -> 255 MB, fatal). That storm is bounded in TIME and unbounded in QUEUE SIZE, and
+     * the cache's BENEFIT scales with queue size exactly as its cost does — a storm over 2,001 items is
+     * 25x worse than the 81-item queue it was justified against. Capping what the cache retains would
+     * therefore disable it precisely where it matters most. Time is the correct knob; size is not.
+     *
+     * ⚠️ EXPIRY COSTS A DISK READ, NOT CORRECTNESS. A service re-created after release simply re-reads and
+     * rebuilds — the pre-cache behaviour, which PlayerState.restoreCache's own note describes as "merely
+     * wasteful" rather than fatal. The failure mode of releasing too early is the state the cache was
+     * added to improve, never the state it was added to prevent.
+     *
+     * ⚠️ THE RELEASE CONDITION IS THE PART THAT COULD BREAK RESTORE, so it is a conjunction, not a timer.
+     *
+     * THERE ARE THREE AWAITERS OF restoreDeferred AT HEAD, not two — grep it before changing this gate:
+     *   1. PlayerCallback.applyRestoreIfCold  — service create. Done once the timeline is non-empty; its
+     *      own gate is `mediaItemCount != 0 || resumptionApplying` anyway, the same layer we release on.
+     *   2. PlayerCallback.onPlaybackResumption — media button. Media3 invokes it ONLY when
+     *      getCurrentMediaItem() == null, so a non-empty timeline means it cannot be called again.
+     *   3. ⚠️ PlayerViewModel:164 — THE BINDING CONSTRAINT, and the reason the timeline alone is not a
+     *      sufficient gate. It awaits inside getController { … }, i.e. when the UI's MediaController
+     *      connects, which happens AFTER the service has applied the queue BY DESIGN — and again on every
+     *      later Activity creation. Releasing on a non-empty timeline alone would null the Deferred out
+     *      from under a UI that opens minutes later (e.g. after a Bluetooth resume).
+     *
+     * (An older record counts FOUR consumers. That predates this cache: PlayerViewModel is listed among
+     * the files the restoreCache change itself touched, so consumer 3 was added or reworked in the same
+     * commit and the older count describes a different set — the same drift as its cited PlayerService.kt
+     * :293, which is :391 here. THREE is the count at HEAD. Other disk-restore paths — AndroidAutoCallback
+     * x2, the widget's ControllerHelper, PlayerCallback:235 and onPlaybackResumption's isForPlayback=false
+     * branch — call recoverTracks() DIRECTLY and never touch the Deferred, so this release cannot affect
+     * them.)
+     *
+     * SO THE GATE IS `mediaItemCount != 0 && current.value != null`. A non-null `current` means either the
+     * service's own listener or consumer 3's seed has already run, which is exactly the write consumer 3
+     * would otherwise be making — so nothing is still owed the snapshot.
+     *
+     * ⚠️ BOTH TERMS ARE LOAD-BEARING. NEITHER SUBSUMES THE OTHER. DO NOT DELETE EITHER.
+     * There is a recorded claim that "playerState.current is safe to observe — it only goes null when
+     * mediaItemCount == 0", and reading it as "current != null implies mediaItemCount != 0" makes term 1
+     * look redundant. IT IS NOT: that claim is about when current goes NULL, and the converse is false.
+     * PlayerEventListener.updateCurrentFlow has a third branch —
+     *     } else if (player.mediaItemCount == 0 && currentFlow.value?.isPlaceholder == true) {
+     *         // Keep the placeholder until we have real items or decide to clear
+     * — and consumer 3 writes exactly such a placeholder (PlayerState.Current(..., isPlaceholder = true)).
+     * So `current != null` WITH `mediaItemCount == 0` is a real, deliberately-preserved state: the UI has
+     * seeded from this snapshot and the service has not applied the queue yet. Releasing there would
+     * destroy THE ONLY COPY of data the UI is still displaying from.
+     * The two terms do NOT cover symmetric halves, and term 1's scope is the narrower one:
+     *   current != null      is the ROUTINE guard — queue applied, consumer 3 not yet seeded.
+     *   mediaItemCount != 0  covers the states where the queue is NEVER APPLIED, so a placeholder is all
+     *                        there is. Transiently that is a millisecond race on any cold start (both
+     *                        awaiters resume from the same Deferred onto Main in unspecified order), which
+     *                        would never survive to a 90s deadline. DURABLY it is at least two real
+     *                        configurations: the BT-reconnect-cold-start-before-restore path, and
+     *                        KEEP_QUEUE disabled — applyRestoreIfCold returns on its first line when that
+     *                        setting is off, while consumer 3 has no such gate and seeds anyway, leaving a
+     *                        placeholder against an empty timeline for the whole session.
+     * VERIFIED 2026-09-07, not inferred: isPlaceholder is written in exactly two places, both consumer 3
+     * (PlayerViewModel:182 restore branch, :202 history fallback). updateCurrentFlow never sets it — it
+     * constructs Current(index, item, isLoaded, isPlaying, false) positionally.
+     * And there is no flicker to worry about in the other direction: updateCurrentFlow nulls `current`
+     * only when currentMediaItem is null AND that placeholder branch does not apply, i.e. when the player
+     * genuinely holds nothing — so a track playing at the deadline always satisfies term 2.
+     *
+     * ⚠️ AND YES, THIS GATE DOES OPEN ON AN AT-REST COLD RESTORE — the case this whole change exists for,
+     * where the queue is restored and nothing is ever played. Recorded as a MECHANISM so it is not
+     * re-derived: `current` is PlayerState.current (PlayerService passes state.current into
+     * PlayerEventListener as currentFlow), written by updateCurrentFlow, which onEvents calls on
+     * EVENT_TIMELINE_CHANGED / EVENT_MEDIA_ITEM_TRANSITION (among others). setMediaItems fires BOTH of
+     * those on its own, and updateCurrentFlow then reads a non-null player.currentMediaItem and writes
+     * Current. NO prepare() IS INVOLVED. An earlier observation of `current` appearing after a restore
+     * that did setMediaItems AND prepare is consistent with this but does not make prepare necessary — it
+     * was incidental to that path. applyRestoreIfCold deliberately does not prepare(), and the gate opens
+     * anyway. (Belt: consumer 3 also writes `current` itself while consuming the snapshot, so even absent
+     * the service listener the gate would open precisely when consumer 3 is finished with the data.)
+     *
+     * ⚠️ WHAT A LOOSENED GATE LOOKS LIKE, since the failure is silent and does NOT resemble a crash: the
+     * QUEUE STAYS INTACT and only the UI degrades. Consumer 3 is the sole initial writer of `current`; with
+     * a null snapshot it falls to the last-played history track, which is the documented path for "no
+     * restorable queue". So a restorable queue looks UNRESTORABLE TO THE UI ONLY — the mini-bar seeds from
+     * the wrong track, AND the scrubber loses its position, because history tracks always start from the
+     * beginning and there is no equivalent of RestoreData.pos in that fallback. Two wrong things, both
+     * silent, neither of which points at this release.
+     *
+     * ⚠️ THIS GATE READS current.value; IT NEVER WRITES IT. That distinction is deliberate. The position/
+     * current area has form — an earlier session found three independent writers racing (current.value,
+     * viewModel.queue, adapter.currentList) and fixed it by REMOVING a writer, so adding one here would be
+     * the exact shape that went wrong. A read introduces one ordering dependency and only one: this
+     * release must not run before whoever sets `current` first, which the gate enforces by construction —
+     * if it is still null we return and, being a one-shot delay, never retry.
+     *
+     * If the player is STILL EMPTY at the deadline we keep the snapshot: that is the case where a later
+     * media button genuinely still needs it, and it is also the case where the snapshot is the ONLY copy
+     * rather than a duplicate, so holding it costs nothing this change was meant to save. Same for a null
+     * `current`. Because the delay is one-shot, either miss keeps the snapshot for the SESSION — accepted
+     * for the same reason: in both states it is not the duplicate this change exists to remove.
+     */
+    private fun scheduleRestoreSnapshotRelease(player: Player) {
+        scope.launch {
+            delay(RESTORE_SNAPSHOT_TTL_MS)
+            withContext(Dispatchers.Main) {
+                if (player.mediaItemCount == 0 || state.current.value == null) return@withContext
+                state.restoreCache = null
+                state.restoreDeferred = null
+                Log.d("GladixPlayback", "restore snapshot released after ${RESTORE_SNAPSHOT_TTL_MS}ms")
+            }
+        }
     }
 
     // Called at the very top of onCreate() to satisfy Android's 5-second startForeground()
@@ -676,6 +799,12 @@ class PlayerService : MediaLibraryService() {
     }
 
     companion object {
+        // 90s, chosen against the OBSERVED storm rather than a round number: the build-1039 service
+        // creation storms ran 42-73 s, so this clears the worst measured case with ~25% margin while
+        // holding 40-60 MB for a quarter less time than a 120 s window would. Expiring mid-storm is not a
+        // correctness risk (see scheduleRestoreSnapshotRelease) — it costs one disk read and rebuild.
+        private const val RESTORE_SNAPSHOT_TTL_MS = 90_000L
+
         const val CLOSE_PLAYER = "close_player"
         private const val ACTION_CLEAR_QUEUE = "dev.rschwertley.gladix.auto.CLEAR_QUEUE"
         const val SKIP_SILENCE = "skip_silence"

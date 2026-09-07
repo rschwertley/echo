@@ -57,13 +57,23 @@
          empty — the CollapsingToolbarLayout drew the expanded title into it (expandedTitleMarginBottom
          14dp, maxLines 2). The title now lives in the toolbar (MediaFragment sets binding.toolBar.title),
          so 57dp of genuinely empty space may read as MORE air than the old page did even though the
-         geometry is identical. The number is the old one by instruction; if it looks too generous on
-         device, the honest adjustment is a smaller value here, not a re-derivation of where it came from. -->
+         geometry is identical.
+
+         ⚠️ 57dp -> 4dp ON 2026-09-07, BECAUSE THE BAND IS OCCUPIED AGAIN. The 57dp was right as a GAP and
+         wrong as EMPTINESS: it read as too much air on device precisely because the thing that used to
+         live in it was missing. The title below is that thing. Reconstructing the old geometry inside the
+         band: the CollapsingToolbarLayout drew the expanded title with expandedTitleMarginBottom="14dp",
+         so a single HeadlineSmall line (~32dp) sat with its top roughly 3dp under the cover and its
+         bottom 14dp above the AppBar's edge, with the RecyclerView's own 8dp below that. Rebuilt here as
+             cover -> 4dp -> title -> 22dp (the old 14 + the 8 that came from the list) -> buttons
+         which reproduces the pre-migration spacing with the band filled rather than blank.
+         DERIVED FROM THE OLD LAYOUT'S NUMBERS, NOT MEASURED ON DEVICE. If it still reads wrong, adjust
+         these two values — do NOT re-derive where 49 and 8 came from; that history is above and settled. -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:paddingTop="16dp"
-        android:paddingBottom="57dp">
+        android:paddingBottom="4dp">
 
         <androidx.cardview.widget.CardView
             android:id="@+id/coverContainer"
@@ -81,6 +91,34 @@
         </androidx.cardview.widget.CardView>
 
     </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!-- ⚠️ THE ITEM'S NAME LIVES HERE, AND UNTIL 2026-09-07 IT LIVED NOWHERE ON THE PAGE.
+         The CollapsingToolbarLayout used to draw it twice over the scroll — large beside the cover
+         (expandedTitleTextAppearance) and pinned small in the bar. The 2026-09-05 migration dropped the
+         CTL and kept only MediaFragment's `binding.toolBar.title`, so an album page carried its name in
+         the bar and nowhere else; this restores the expanded copy.
+
+         @style/MediaHeaderTitle IS NOT AN APPROXIMATION — it is the exact style the old layout passed to
+         app:expandedTitleTextAppearance (TextAppearance.Material3.HeadlineSmall + bold, styles.xml), and
+         maxLines=2 matches the CTL's app:maxLines="2". Reusing the style rather than copying its values
+         is what keeps the two in step if the type scale ever moves.
+
+         ⚠️ marginBottom 22dp IS HALF OF SOMEWHERE ELSE — see the band note above the cover wrapper: it is
+         the CTL's 14dp expandedTitleMarginBottom plus the 8dp the RecyclerView's own paddingTop used to
+         contribute between the AppBar and the first item. Change it together with the wrapper's 4dp, not
+         separately.
+
+         The toolbar still sets its own title (MediaFragment). Both are visible at once until the
+         scroll-driven toolbar fade lands; that is expected in the interim, not a bug. -->
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="22dp"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:textAppearance="@style/MediaHeaderTitle"
+        tools:text="@tools:sample/full_names" />
 
     <!-- ⚠️ -32dp IS CALIBRATED (2026-06-11, -56dp -> -32dp). It is PRESERVED, not re-derived, because the
          relationship it encodes is untouched by the cover move: marginBottom pulls the NEXT SIBLING (the

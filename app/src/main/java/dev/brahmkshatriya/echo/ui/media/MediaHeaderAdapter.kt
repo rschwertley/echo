@@ -71,6 +71,28 @@ class MediaHeaderAdapter(
     }
 
     override val adapter = this
+
+    /**
+     * Top inset for the NON-COVER header states, in px. Set from MediaDetailsFragment's insets block.
+     *
+     * ⚠️ WHY THIS EXISTS AT ALL. Since 2026-09-07 the RecyclerView's own paddingTop is 0 on phones, so
+     * item 0 starts at y=0 and the cover sits behind the transparent toolbar — that is the point of the
+     * overlap, and it is what lets the fast-scroll rail span the screen. But item 0 is not always the
+     * cover: getItemViewType returns 1 (Error) or 2 (Loading) while the item is failing or still loading,
+     * and neither of those wants to be under a bar. Nothing else can be at rest up there — the header
+     * adapter is first in the Concat and always reports exactly one item — so this covers the whole
+     * exposure.
+     *
+     * Loading is invisible anyway (its holder sets itemView.alpha = 0f) and is padded only for
+     * consistency; Error is the state this is actually for.
+     */
+    var topInset: Int = 0
+        set(value) {
+            if (field == value) return
+            field = value
+            notifyItemChanged(0)
+        }
+
     override fun getSpanSize(position: Int, width: Int, count: Int) = count
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) = when (viewType) {
         0 -> Success(parent, listener, fromPlayer)
@@ -81,6 +103,9 @@ class MediaHeaderAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         super.onBindViewHolder(holder, position)
+        // Success keeps 0 — the cover is MEANT to start at the top of the screen and travel under the
+        // toolbar. Error/Loading are inset instead, since the list no longer insets them. See topInset.
+        holder.itemView.updatePaddingRelative(top = if (holder is Success) 0 else topInset)
         when (holder) {
             is Success -> {
                 val state = result?.getOrNull() ?: return
@@ -241,6 +266,11 @@ class MediaHeaderAdapter(
             // delivery. This is the OPPOSITE of PlayerTrackAdapter's cover, which uses loadWithThumb's
             // lambda target, gets no ViewTarget and therefore no automatic cancellation — which is why
             // that one needs pendingMediaId/lastBoundMediaId and this one does not.
+            //
+            // The expanded title, restored 2026-09-07 — see the note in item_media_header.xml.
+            // state.item is the same source MediaFragment uses for the toolbar title, so the two
+            // cannot drift apart.
+            title.text = state.item.title.trim()
             state.item.cover.loadInto(cover, null, state.item.placeHolder)
 
             this@Success.state = state

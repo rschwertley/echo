@@ -170,6 +170,32 @@ object CrashKeys {
         if (processAgeStamped.compareAndSet(false, true)) set("process_age_s", age)
     }
 
+    /**
+     * ⚠️ TWO WAYS THESE KEYS MISLEAD, AND THEY ARE DIFFERENT. Both have cost a round of investigation.
+     *
+     * 1. WRONG END OF A REPEATED CHECKPOINT. stampAge and sampleHeap re-write on EVERY occurrence, so
+     *    age_s_* and heap_used_mb_* are the LAST occurrence, not the one being attributed. Under a storm
+     *    the last one is the moment of death. That is what the CAS-guarded *_first companions exist for:
+     *    read <key>_first when attributing, and the bare key only as "state at the end". heap_peak_mb
+     *    survives as the one order-independent value, because a running max does not care when it was
+     *    sampled.
+     *
+     * 2. ⚠️ THE HEAP IS ONLY EVER OBSERVED AT CHECKPOINTS — there is no continuous sampling anywhere in
+     *    this class. heapPeakMb is a running max over sampleHeap calls, and sampleHeap is called only from
+     *    onServiceCreate / onControllerConnected / onQueueBuild / onQueueSize / onFeedLoad /
+     *    onExtensionSwitch. So "the peak was at a feed load" means only that the highest CHECKPOINT SAMPLE
+     *    happened to be a feed load — and feed loads are by far the most frequent checkpoint. IT IS A
+     *    SAMPLING ARTIFACT, NOT ATTRIBUTION.
+     *    Worked example, 2026-09-07: five OOM reports appeared to show that the FEWER feed loads a session
+     *    had, the FASTER it reached the ceiling (383 MB in 82 s on 13 loads, versus 1062 s on 56). Read as
+     *    causation that is nonsense; read as sampling it is obvious — the fast sessions died sooner, so
+     *    fewer checkpoints of ANY kind fired first. Feed count was a CLOCK, not a cause. The real
+     *    discriminator was player_media_item_count (~5,430 versus 1), which nothing in the heap keys
+     *    pointed at directly.
+     *
+     * Between them: (1) says a repeated checkpoint reports its last firing, (2) says an event you did not
+     * checkpoint is invisible and the checkpoint you did fire will get the blame.
+     */
     private fun sampleHeap(usedKey: String, headroomKey: String) {
         val rt = Runtime.getRuntime()
         val used = rt.totalMemory() - rt.freeMemory()

@@ -26,9 +26,20 @@ data class PlayerState(
     val activeLoadCount = AtomicInteger(0)
 
     // Single cold-start restore: the queue is read from disk ONCE at service creation
-    // (PlayerService.onCreate) into this Deferred, and shared by every consumer — the app-open apply
-    // (applyRestoreIfCold), resume(), and onPlaybackResumption — so no path runs its own recoverPlaylist
-    // and races another. A null payload means the disk was empty.
+    // (PlayerService.onCreate) into this Deferred, and shared by every consumer — so no path runs its own
+    // recoverPlaylist and races another. A null payload means the disk was empty.
+    //
+    // ⚠️ THE CONSUMERS, VERIFIED AT HEAD 2026-09-07 — THERE ARE EXACTLY THREE. Grep `restoreDeferred`
+    // before trusting any other list, including this one:
+    //   1. PlayerCallback.applyRestoreIfCold   — the app-open apply, at service create.
+    //   2. PlayerCallback.onPlaybackResumption — a media button (isForPlayback = true).
+    //   3. PlayerViewModel (getController)     — the UI's at-rest seed for `current` and the scrubber.
+    // This comment previously read "applyRestoreIfCold, resume(), and onPlaybackResumption": it named a
+    // `resume()` consumer that does not exist anywhere at HEAD, and OMITTED consumer 3 — which is the one
+    // that turned out to bind the restore-snapshot release gate (see
+    // PlayerService.scheduleRestoreSnapshotRelease), because it awaits AFTER the timeline is populated by
+    // design. A stale list here is how a "four consumers" count went on being quoted; the count is three
+    // and the names are above.
     var restoreDeferred: Deferred<RestoreData?>? = null
 
     // Cache of the last built restore, keyed on ResumptionUtils.queueGeneration. Survives PlayerService

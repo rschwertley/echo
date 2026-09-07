@@ -10,6 +10,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.di.App
 import dev.brahmkshatriya.echo.download.Downloader
 import dev.brahmkshatriya.echo.extensions.MediaState
+import dev.brahmkshatriya.echo.extensions.builtin.unified.UnifiedExtension
 import dev.brahmkshatriya.echo.history.db.toSlim
 import dev.brahmkshatriya.echo.history.db.toSlimContext
 import dev.brahmkshatriya.echo.playback.MediaItemUtils.context
@@ -73,6 +74,36 @@ object ResumptionUtils {
         val track: Track,
         val extensionId: String,
     )
+
+    /**
+     * Puts the extension stamp back on a restored track.
+     *
+     * ⚠️ WHY THIS IS NEEDED AT ALL. saveQueue persists `QueueEntry(s.item.toSlim(), s.extensionId)`, and
+     * History's Track.toSlim() sets `extras = emptyMap()` — so the track's own `extension_id` is destroyed
+     * on every save. The id survives BESIDE the track and is restored into MediaState.Unloaded, which is
+     * why `mediaItem.extensionId` has always been correct; the TRACK's copy is what goes missing.
+     * Introduced by 92af04f5 (2026-07-26), whose own comment says "toSlim dropping streamables/extras/
+     * nested" — the loss was stated and never traced. de6d344b (2026-08-10) only re-routed the surviving
+     * copy and is innocent.
+     *
+     * WHAT THE MISSING STAMP BROKE: UnifiedExtension resolves a sub-extension from `track.extras`, so a
+     * restored track threw ExtensionNotFoundException(null) in radio() (the reported non-fatal, via
+     * PlayerRadio.loadPlaylist on a cold start restoring a one-item queue with auto-radio on), in
+     * loadFeed(track), and — on EVERY restored track — in loadTrack(), where Cached.loadMedia's fallback
+     * caught it and served the cached copy instead. See the note on UnifiedExtension.loadTrack.
+     *
+     * ⚠️ RESTORE SIDE, NOT SAVE SIDE, DELIBERATELY. Preserving the key through the slim would only help
+     * queues saved AFTER the change; re-stamping here repairs the queues already on disk, using data that
+     * is already in the entry. The systematic follow-up — a queue-local slimmer that keeps routing keys,
+     * the way Cached.toPlaylistSlim already keeps NEXT/playlist_id — is parked; it only affects
+     * DeezerUtil.log's play-context telemetry, which is the one other thing toSlim drops that nothing
+     * repopulates.
+     *
+     * Only ADDS the key, never overwrites: a track that somehow kept its own stamp keeps it.
+     */
+    private fun Track.restamped(extensionId: String) =
+        if (extras.containsKey(UnifiedExtension.EXTENSION_ID)) this
+        else copy(extras = extras + (UnifiedExtension.EXTENSION_ID to extensionId))
 
     private fun queueDir(context: Context) =
         File(context.filesDir, "context/queue").apply { mkdirs() }
@@ -242,7 +273,8 @@ object ResumptionUtils {
         getFromQueue<List<QueueEntry>>(QUEUE_ENTRIES)?.let { entries ->
             val contexts = getFromQueue<List<EchoMediaItem?>>(CONTEXTS)
             return entries.mapIndexed { index, entry ->
-                MediaState.Unloaded(entry.extensionId, entry.track) to contexts?.getOrNull(index)
+                MediaState.Unloaded(entry.extensionId, entry.track.restamped(entry.extensionId)) to
+                    contexts?.getOrNull(index)
             }
         }
         // Legacy three-file fallback (pre-composite installs, one migration restore). Try the current
@@ -322,13 +354,69 @@ object ResumptionUtils {
         val current = resolveCurrentIndex(tracks, coercedIndex, savedCurrentId) { it.first.item.id }
             .coerceIn(0, tracks.size - 1)   // valid, non-empty window: current is always in range
         // ResumeIndexMismatch telemetry (relocated from recoverPlaylist; track.id in place of mediaId).
+        //
+        // ⚠️ THIS FIRES PRE-HEAL, BY DESIGN — it compares against coercedIndex (the SAVED index), not
+        // against `current` (the index resolveCurrentIndex just resolved by id). That is deliberate: the
+        // question being reported is "was the persisted INDEX stale", and comparing post-heal would answer
+        // a different question and report nothing whenever the heal worked.
+        //
+        // ⚠️ WHICH IS WHY THE TWO OUTCOMES GET DIFFERENT SCOPES. DO NOT "SIMPLIFY" THIS BACK TO ONE.
+        // Until 2026-09-07 both were reported identically at PERSISTENT and were indistinguishable in
+        // triage, which made the signal far weaker than it looked — most of its volume is the harmless
+        // case:
+        //   found = true  -> the saved CURRENT_ID IS somewhere in the restored list; resolveCurrentIndex
+        //                    starts the window there and THE RESTORE IS CORRECT. A stale INDEX corrected
+        //                    by id is cosmetic, so MEMORY_ONLY: visible in a session, not competing for
+        //                    attention with real breakage.
+        //   found = false -> the saved current track is ABSENT from the restored list. resolveCurrentIndex
+        //                    falls back to the stale index and THE USER RESUMES ON A DIFFERENT TRACK.
+        //                    That is a real defect surfacing, so PERSISTENT with the 24h window.
+        //
+        // `found` is computed DIRECTLY — tracks.any { it.first.item.id == savedCurrentId } — rather than
+        // derived from (current != coercedIndex). The derived form is equivalent today but says the wrong
+        // thing: it asks "did the index move", and it would answer `false` for a saved id that happens to
+        // sit at the stale index for some other reason. The direct form asks the question the severity
+        // actually turns on.
         val actualId = tracks.getOrNull(coercedIndex)?.first?.item?.id
         if (savedCurrentId != null && actualId != null && savedCurrentId != actualId) {
+            val found = tracks.any { it.first.item.id == savedCurrentId }
             healthMonitor?.report(
-                HealthMonitor.ResumeIndexMismatchException(savedCurrentId, actualId, coercedIndex, tracks.size),
-                HealthMonitor.Scope.PERSISTENT, 24 * 60 * 60 * 1000L
+                HealthMonitor.ResumeIndexMismatchException(
+                    savedCurrentId, actualId, coercedIndex, tracks.size, current, found
+                ),
+                if (found) HealthMonitor.Scope.MEMORY_ONLY else HealthMonitor.Scope.PERSISTENT,
+                24 * 60 * 60 * 1000L
             )
         }
+        // ⚠️ CONSIDERED AND DROPPED 2026-09-07: making this build LAZY — deferring MediaItemUtils.build
+        // out of here and into each restoreDeferred consumer, so a consumer that needs one item builds one
+        // item. Do not revive it on the memory argument; the reason it was dropped is structural and holds
+        // even if every number changes.
+        //
+        // 1. IT DOWNGRADES A STRUCTURAL BOUND TO A CONVENTION. The cap below is applied to the WINDOW
+        //    BEFORE the build, at the ONLY site that builds over persisted state (19 MediaItemUtils.build
+        //    call sites exist at HEAD; exactly two are over persisted state and both are in this function).
+        //    That is why "bounding this one site bounds all of them" is true. Deferring the build moves the
+        //    cap into RestoreData and makes THREE consumer sites each responsible for honouring W — a
+        //    property that currently cannot be violated becomes one that three future call sites must
+        //    remember. That trade is bad at any queue size.
+        // 2. IT SAVES NOTHING ON THE DEFAULT PATH. With KEEP_QUEUE on, applyRestoreIfCold calls
+        //    setMediaItems(data.items, …) with the WHOLE list on every cold start, so the UI's one-item
+        //    consumer reads work already caused, not work it causes. An earlier scoping claimed otherwise
+        //    ("consumer 3 pays for 2,001 builds to display one track") and that was simply wrong. The only
+        //    default-path saving is a sub-second race where applyRestoreIfCold loses its CAS to a user
+        //    play. The real benefit is confined to KEEP_QUEUE-OFF users with large queues, and someone who
+        //    turned queue restore off is the least likely person to be carrying a 5,000-track queue.
+        // 3. IT IS THE SAME SIDE OF A DISTINCTION ALREADY DRAWN. A previous audit refuted withUnloaded()
+        //    as a bound ("a per-item flag flip, if anything an extra full-N pass"). Lazy construction is a
+        //    different mechanism — it prevents builds rather than transforming built items — but it lands
+        //    in the same place: per-item work is not where the bound lives. The bound lives in HOW MANY
+        //    ITEMS ENTER THE PIPELINE, which is QUEUE_CAP_UPCOMING, right here.
+        //
+        // The work that DOES help is orthogonal and parked at MediaItemUtils.toMetaData: shrink the
+        // PER-ITEM PAYLOAD. That changes the size of each item rather than how many are built or when, so
+        // it relocates no bound, and it compounds into the retained timeline, every remote controller
+        // connect, every save decode and the restore snapshot at once.
         val end = (current + 1 + QUEUE_CAP_UPCOMING).coerceAtMost(tracks.size)
         val window = tracks.subList(current, end)   // current at window index 0; before-current dropped
         CrashKeys.onQueueBuild(window.size)   // restore_build_count + heap sample BEFORE the OOM-prone build

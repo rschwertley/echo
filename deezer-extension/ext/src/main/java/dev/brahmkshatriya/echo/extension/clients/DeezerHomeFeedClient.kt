@@ -41,7 +41,7 @@ class DeezerHomeFeedClient(
             // FIRST Home load of each process still waits for one extra page.get round-trip. That cost is
             // why it is one-shot and why it is temporary; it is not a permanent diagnostic like the
             // titleless-section DROP line below.
-            val probe = async(dispatcher) { probeChannelModuleOnce(api, parser) }
+            val probe = async(dispatcher) { probeOnce(api, parser, jsonObject) }
             val shelves = homeSections.mapNotNull { section ->
                 val obj = section.asObjectOrNull() ?: return@mapNotNull null
                 val id = obj.optString("module_id") ?: return@mapNotNull null
@@ -160,6 +160,56 @@ class DeezerHomeFeedClient(
         // that answers the standing prediction - that a MODULE endpoint returns one module's contents
         // rather than a page of sections, with the payload under some key other than `sections`. If that is
         // right, `sections` is absent or empty here and some sibling key is an array of about 32.
+        /**
+         * ⚠️ TEMPORARY — DELETE WITH THE REST OF THIS PROBE BLOCK.
+         *
+         * Dumps the page for ONE smarttracklist, to settle why api.page("smarttracklist/<id>") comes back
+         * with sections=0 while DeezerPlaylistClient.smartTracklistTracks assumes results.sections[].items[].
+         * That traversal was marked INFERRED at the time; this is the capture that confirms or replaces it.
+         *
+         * ⚠️ THE ID IS DISCOVERED FROM THE HOME PAYLOAD, NOT HARDCODED. Smarttracklist ids are daily-mix
+         * slots and Deezer rotates its editorial labels under stable module ids (46b377f1 was "Summer in
+         * slow-mo", now "Hello, sunshine"), so a literal captured days ago is the least reliable thing to
+         * key on. Taking the first one Home actually returned means the dump is always of a live id.
+         *
+         * WHAT TO READ IN THE OUTPUT: if resultsShapes names some array other than `sections` — `data`,
+         * `items`, `songs` — that key is the real payload and smartTracklistTracks' traversal is wrong.
+         * If `sections` is present but empty, the id resolves and the page is genuinely sectionless, and
+         * the tracks are somewhere else in results. If `error` is populated, the id is not addressable
+         * this way at all and the whole page.get route for smarttracklists is the wrong idea.
+         */
+        private suspend fun probeSmartTracklist(api: DeezerApi, home: JsonObject) {
+            runCatching {
+                val sections = home["results"]?.jsonObject?.get("sections") as? JsonArray
+                val id = sections?.filterIsInstance<JsonObject>()
+                    ?.flatMap { it["items"]?.jsonArray?.filterIsInstance<JsonObject>().orEmpty() }
+                    ?.firstOrNull { it["type"].prim() == "smarttracklist" }
+                    ?.let { (it["data"] as? JsonObject)?.get("SMARTTRACKLIST_ID").prim() }
+                if (id == null) {
+                    println("GladixDeezer PROBE stl=<none-in-home> (no outer type=smarttracklist item)")
+                    return@runCatching
+                }
+                val page = api.page("smarttracklist/$id")
+                println("GladixDeezer PROBE stl=$id rootKeys=${page.keys}")
+                val results = page["results"] as? JsonObject
+                println(
+                    "GladixDeezer PROBE stl resultsKeys=${results?.keys ?: "<no-results>"} " +
+                        "error=${page["error"]?.toString()?.take(300) ?: "-"}"
+                )
+                println(
+                    "GladixDeezer PROBE stl resultsShapes=" +
+                        results?.entries?.joinToString { "${it.key}=${shapeOf(it.value)}" }
+                )
+                val raw = (results ?: page).toString()
+                val chunks = raw.chunked(PROBE_LOG_CAP)
+                chunks.take(PROBE_MAX_CHUNKS).forEachIndexed { i, chunk ->
+                    println("GladixDeezer PROBE stl raw[${i + 1}/${chunks.size}] $chunk")
+                }
+            }.onFailure {
+                println("GladixDeezer PROBE stl FAILED ${it::class.simpleName}: ${it.message?.take(300)}")
+            }
+        }
+
         private fun shapeOf(element: JsonElement?): String = when (element) {
             is JsonArray -> "array[" + element.size + "]"
             is JsonObject -> "object{" + element.size + "}"
@@ -167,8 +217,9 @@ class DeezerHomeFeedClient(
             else -> "primitive"
         }
 
-        private suspend fun probeChannelModuleOnce(api: DeezerApi, parser: DeezerParser) {
+        private suspend fun probeOnce(api: DeezerApi, parser: DeezerParser, home: JsonObject) {
             if (!channelModuleProbed.compareAndSet(false, true)) return
+            probeSmartTracklist(api, home)
             runCatching {
                 val page = api.page(PROBE_TARGET)
                 // Top level first: page.get wraps everything in `results`, and a REQUEST that was rejected

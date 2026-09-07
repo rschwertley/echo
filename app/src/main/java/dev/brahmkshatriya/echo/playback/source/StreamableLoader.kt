@@ -81,7 +81,11 @@ class StreamableLoader(
         val stub = item.state.item
         Log.d("GladixPlayback", "loadTrack stub: id=${stub.id} servers=${stub.servers.map { it.id }} extras=${stub.extras}")
         val track = withClient(item) {
-            Cached.loadMedia(app, it, item.state)
+            // preferCache = true: the ONLY caller that passes it. See Cached.loadMedia — this keeps a
+            // restored queue resolving from cache instantly, which is what makes offline playback work,
+            // and which was previously happening only as a side effect of UnifiedExtension.loadTrack
+            // throwing on a missing extension_id.
+            Cached.loadMedia(app, it, item.state, preferCache = true)
         }
         val result = track.getOrThrow()
         Log.d("GladixPlayback", "loadTrack result: id=${result.item.id} servers=${result.item.servers.map { it.id }}")

@@ -233,6 +233,97 @@ object MediaItemUtils {
             )
             .setExtras(Bundle().apply {
                 putAll(bundle)
+                // ══ PARKED MEMORY WORK — READ BEFORE "OPTIMISING" THIS BUNDLE (2026-09-07) ═══════════
+                // Measured: ~20-30 KB per MediaItem (heap_used_mb_build 45-63 MB at 2,001 items). At the
+                // 5,432-item queues one user normally carries, that is 110-160 MB retained by the timeline
+                // alone, on a device with a 384 MB growth limit. Three candidates were scoped; only the
+                // restoreCache TTL was taken. The other two are PARKED WITH REASONS so they are not
+                // rediscovered from scratch — or, worse, taken in the wrong order.
+                //
+                // (2) PER-ITEM PAYLOAD — ⚠️ DOWNGRADED 2026-09-07 AFTER THE AUDIT. It was recorded here
+                //     as "the largest number and the real lever". THE NUMBERS DO NOT SUPPORT THAT, and the
+                //     claim is corrected rather than left standing.
+                //
+                //     MEASURED (modelled on DeezerParser.toTrack's shape with realistic field LENGTHS;
+                //     compact JSON, UTF-16 in memory):
+                //       user-set item   3053 chars ~ 6.0 KB   display fields 55%   remainder 2.6 KB
+                //       restored item   1742 chars ~ 3.4 KB   display fields 88%   remainder 0.4 KB
+                //       of the user-set remainder: extras 0.9 KB (TRACK_TOKEN dominates), streamables
+                //       0.7 KB, description 0.2 KB, genres 0.1 KB
+                //       per-item bundle beyond `state`: context 1.3 KB, unloadedCover 0.3 KB
+                //
+                //     ⚠️ THE RECONCILIATION FAILS, AND THAT IS THE FINDING. Modelled total is ~15 KB per
+                //     item (Track + context + metadata). The DEVICE says 20-30 KB (heap_used_mb_build
+                //     45-63 MB / restore_build_count 2001). So A THIRD TO A HALF OF THE REAL PER-ITEM COST
+                //     IS NOT THE JSON AT ALL — it is Bundle overhead, the MediaItem/MediaMetadata object
+                //     graphs, and the parcel machinery around them. No amount of field slimming reaches
+                //     that half.
+                //
+                //     ⚠️ SO THE LEVER IS NOT "WHICH FIELDS THE TRACK CARRIES". It is HOW MANY SERIALIZED
+                //     BLOBS AND BUNDLES EXIST PER ITEM. Two candidates follow from that framing, and only
+                //     one survives:
+                //       - context hoisting (1.3 KB x N, pure duplication of ONE shared object) — the only
+                //         survivor, and it STILL needs a lifetime-managed process-level map, which is the
+                //         exact shape that produced the restoreCache leak fixed in the same investigation.
+                //       - not storing display data twice — considered and rejected, see below.
+                //
+                //     ⚠️ AND THE RISK FRAMING WAS WRONG. It was recorded as "answerable by reading: does
+                //     anyone read this field". THAT HOLDS FOR APP-SIDE CONSUMERS ONLY. The stored Track is
+                //     handed VERBATIM to extensions on three paths — PlayerCallback.applyRating ->
+                //     likeItem(track), StreamableLoader -> loadStreamableMedia(app, ext, track, streamable),
+                //     and TrackingListener -> TrackDetails(…, track, …) -> TrackerClient. Those receivers
+                //     are separate APKs loaded by DexClassLoader; what they read is UNKNOWABLE BY READING.
+                //     The standing extension-adjacent caution already held a change that HAD a clean
+                //     single-writer proof; this one cannot produce one.
+                //     EVIDENCE FROM OUR OWN HISTORY, not principle: partial ABI slimming has been live
+                //     since 92af04f5 (2026-07-26), because toSlim strips extras from every persisted
+                //     track. It silently killed Unified TRACKING for restored queues for six weeks
+                //     (UnifiedExtension's four TrackerClient callbacks) and nobody noticed. "An extension
+                //     receives a Track with an empty field where it used to have data" is a real,
+                //     already-realised failure mode, and it is SILENT — unlike the R8 repackaging break,
+                //     which was loud, total and is now guarded by verifyExtensionAbi.
+                //
+                //     ⚠️ APP-SIDE-ONLY VARIANT — CONSIDERED AND REJECTED 2026-09-07. The idea: stop
+                //     storing display data twice by having the queue UI read MediaMetadata (title /
+                //     artist / artworkUri, which toMetaData already derives) instead of deserializing
+                //     `state` per row in PlayerTrackAdapter:333,357,358,372. The question that could have
+                //     made it attractive was answered YES — MediaMetadata DOES stay in sync, because
+                //     buildLoaded re-derives it from the loaded state — and it still does not save it:
+                //       SAVES ~0.3-0.5 KB per item (only the MediaMetadata copy; the Track must still
+                //         carry display fields for saveQueue and for the ABI paths above).
+                //       COSTS two live regression risks in the file with six sessions of display defects:
+                //         (a) cover flash on rotation before DiffUtil completes — unloadedCover's
+                //             synchronous getCachedDrawable exists precisely for that window;
+                //         (b) stale-cover self-correction, which today happens when bind() re-reads the
+                //             Track, would instead depend on buildLoaded having replaced the timeline item
+                //             AND the adapter seeing it — one more link in a chain that has already failed
+                //             twice.
+                //     Bad trade. Do not revive it on the "we already know MediaMetadata is fresh" argument;
+                //     that was checked and is not the blocker.
+                //
+                //     OBSERVATION ONLY, NOT A THREAD TO PULL (2026-09-07): the user-set remainder is
+                //     dominated by `extras` at 0.9 KB, and TRACK_TOKEN dominates that. Deezer's token is
+                //     time-limited and DeezerTrackClient.loadTrack already self-heals when it is empty, so
+                //     a token stored on a RESTORED queue is very likely dead weight. Recorded rather than
+                //     acted on: that self-heal has a documented defect — it re-fetches by TOP-LEVEL id and
+                //     overwrites grafted art — so anything that leans on it inherits that. Do not start
+                //     here.
+                //
+                //     Asymmetry worth keeping regardless: RESTORED items are already slim (toSlim at save
+                //     time), USER-SET items carry the full extension graph — so restored queues are near a
+                //     floor already and any measurement taken on one understates the user-set case.
+                //
+                // (3) CONTEXT HOISTING — 5,432 copies of ONE object, roughly 5-16 MB. NOT TAKEN because
+                //     MediaItem is the unit Media3 carries into the timeline; there is no per-queue side
+                //     channel, so hoisting needs a process-level map keyed by queue generation, with its
+                //     own lifetime to manage. An unmanaged lifetime of exactly that shape is what produced
+                //     the restoreCache leak this same investigation fixed.
+                //
+                // ⚠️ unloadedCover — WITHDRAWN, DO NOT PROPOSE AGAIN. It looks like pure duplication of
+                // state.item.cover and is not: its three consumers (PlayerFragment, PlayerTrackAdapter x2)
+                // read it via getCachedDrawable on a hot UI path, and reading the cover off `state` instead
+                // would force a full getSerialized<MediaState<Track>> parse on every bind and every pager
+                // scroll frame. It trades a few hundred bytes per item to avoid a decode. Keep it.
                 putSerialized("unloadedCover", bundle.stateNullable?.item?.cover)
                 putSerialized("state", this@toMetaData)
                 putSerialized("context", context)

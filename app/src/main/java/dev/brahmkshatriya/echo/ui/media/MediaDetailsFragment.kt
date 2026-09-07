@@ -5,6 +5,12 @@ import android.util.TypedValue
 import android.view.View
 import androidx.core.view.ViewCompat
 import androidx.core.view.updatePaddingRelative
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.appbar.MaterialToolbar
+import androidx.recyclerview.widget.RecyclerView
+import androidx.core.graphics.ColorUtils
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.ColorDrawable
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.paging.LoadState
@@ -34,6 +40,7 @@ import dev.brahmkshatriya.echo.ui.feed.FeedViewModel
 import dev.brahmkshatriya.echo.ui.media.MediaHeaderAdapter.Companion.getMediaHeaderListener
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper
+import dev.brahmkshatriya.echo.utils.ui.UiUtils.isTv
 import dev.brahmkshatriya.echo.utils.ui.FastScrollerHelper.applyInsets
 import kotlinx.coroutines.flow.combine
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
@@ -119,6 +126,7 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
         // from the parent rather than from binding.
         val appBar = requireParentFragment().view?.findViewById<AppBarLayout>(R.id.appBarLayout)
         val scroller = FastScrollerHelper.applyTo(binding.recyclerView, appBar, traceTag = "media")
+        setupToolbarFade(appBar, binding.recyclerView)
         val uiViewModel by activityViewModel<UiViewModel>()
         applyInsets(viewModel.uiResultFlow, uiViewModel.tvMiniPlayerVisible) {
             val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(binding.recyclerView.context) else 0
@@ -159,7 +167,24 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
                     )
                 else 0
             }
-            binding.recyclerView.updatePaddingRelative(top = it.top + toolbarPx)
+            // ⚠️ PHONE 0 / TV toolbarPx, AND THE SPLIT IS DELIBERATE (2026-09-07).
+            //
+            // PHONE: 0, so item 0 — the cover — starts at y=0 and reads as being at the very top of the
+            // screen, travelling under the transparent toolbar as the page scrolls. That was the point of
+            // the overlap; padding the list down to clear the toolbar put the visual order back exactly
+            // where the migration had found it. The header's NON-COVER states are inset instead, per
+            // state, via MediaHeaderAdapter.topInset — read that before changing this line.
+            //
+            // TV: the padding stays. The fast scroller is disabled on TV outright
+            // (FastScrollerHelper.isFastScrollUsable -> !context.isTv()), so the overlap buys TV nothing
+            // and would only cost it: RecyclerView.requestChildRectangleOnScreen scrolls a D-pad-focused
+            // child into the PADDED area, and with 0 here a focused row could be parked under the bar
+            // with no pointer to drag it back out. Keeping the inset leaves TV's geometry exactly as it
+            // was before the 2026-09-05 migration in this respect — the only TV-visible change from this
+            // whole line of work is the item title moving from the toolbar into the header content.
+            val topPad = if (binding.recyclerView.context.isTv()) it.top + toolbarPx else 0
+            binding.recyclerView.updatePaddingRelative(top = topPad)
+            mediaHeaderAdapter.topInset = it.top + toolbarPx
             scroller.applyInsets(binding.recyclerView.context, it, top = 0)
         }
         val lineAdapter = LineAdapter()
@@ -217,5 +242,76 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
             binding.swipeRefresh.isEnabled = false
             ViewCompat.setNestedScrollingEnabled(binding.recyclerView, true)
         }
+    }
+
+    /**
+     * Fades the toolbar from transparent-over-artwork to a solid bar as the header scrolls under it, and
+     * fades the toolbar title in on the same curve so the name appears only once the header's own copy has
+     * gone. This is what the CollapsingToolbarLayout used to do for free.
+     *
+     * ⚠️ NO CollapsingToolbarLayout AND NO SCROLL FLAGS, deliberately. Those are what make
+     * AppBarLayout.getTotalScrollRange() non-zero, and a non-zero range is incompatible with the overlap
+     * that lets this RecyclerView span the screen — see OverlapScrollingViewBehavior for the decoded
+     * arithmetic. This reproduces the one visible behaviour we actually wanted, and nothing else about a
+     * CTL, which is the whole point.
+     *
+     * ⚠️ COLOUR IS ?navBackground, NOT ?colorSurface. That is the app's own bar-surface attribute
+     * (attributes.xml), resolving to ?colorSurfaceContainer in the light theme and
+     * ?colorSurfaceContainerLowest in the dark/AMOLED one (themes.xml), and it is what the nav bar styles
+     * already tint with. ?colorSurface would be a near-miss that diverges in the AMOLED theme.
+     *
+     * ⚠️ bg_toolbar_scrim SURVIVES — it is layer 0 and stays visible at rest, which is the ONLY thing
+     * keeping the back arrow and overflow legible over a bright cover once the title is gone. The solid
+     * colour is layer 1, painted OVER it, animated 0..255. Do not replace the gradient with the solid.
+     *
+     * ⚠️ THE ALPHA GOES ON THE DRAWABLE LAYER, NOT ON THE VIEW. appBar.alpha would fade the navigation
+     * icon and the overflow along with the background, which is exactly backwards — they must stay solid
+     * throughout.
+     *
+     * ⚠️ THE FADE IS DRIVEN BY ITEM 0'S REAL BOTTOM, not by a distance constant. The header's height
+     * changes with the cover size, the title's line count and the artist page's larger cover, and reading
+     * the laid-out bottom means none of that needs a second number kept in sync. When position 0 is
+     * recycled away entirely the fraction pins at 1.
+     *
+     * SAFE FOR THE RAIL: addOnScrollListener is a different registry from the addOnItemTouchListener the
+     * fast scroller uses, so the listener-ORDER hazard recorded in FastScrollerHelper does not apply here.
+     * Nothing about measurement, padding or the overlay changes.
+     */
+    private fun setupToolbarFade(appBar: AppBarLayout?, recyclerView: RecyclerView) {
+        appBar ?: return
+        val toolBar = requireParentFragment().view?.findViewById<MaterialToolbar>(R.id.toolBar) ?: return
+        val solid = ColorDrawable(MaterialColors.getColor(appBar, R.attr.navBackground)).apply {
+            alpha = 0
+        }
+        // Wraps whatever the layout set rather than replacing it, so @drawable/bg_toolbar_scrim stays the
+        // single source of the rest state and the XML keeps meaning what it says.
+        val scrim = appBar.background
+        appBar.background = LayerDrawable(listOfNotNull(scrim, solid).toTypedArray())
+        val titleColor = MaterialColors.getColor(toolBar, com.google.android.material.R.attr.colorOnSurface)
+
+        var lastAlpha = -1
+        fun update() {
+            val header = recyclerView.layoutManager?.findViewByPosition(0)
+            // Ramp over the bar's own height: the fade completes exactly as the header's last pixel passes
+            // under it. appBar.bottom and a child's bottom share an origin here — the CoordinatorLayout and
+            // the (translated) RecyclerView both start at the top of the screen.
+            val distance = appBar.height.coerceAtLeast(1)
+            val fraction = if (header == null) 1f
+            else (1f - (header.bottom - appBar.bottom).toFloat() / distance).coerceIn(0f, 1f)
+            val alpha = (fraction * 255).toInt()
+            if (alpha == lastAlpha) return
+            lastAlpha = alpha
+            solid.alpha = alpha
+            toolBar.setTitleTextColor(ColorUtils.setAlphaComponent(titleColor, alpha))
+        }
+
+        recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) = update()
+        })
+        // Scroll alone is not enough: the header arrives asynchronously (the item result binds after the
+        // view is created) and the page can be opened already at rest, where no scroll event ever fires.
+        // A layout listener catches both, and the lastAlpha guard makes the repeat cost two int compares.
+        recyclerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> update() }
+        update()
     }
 }

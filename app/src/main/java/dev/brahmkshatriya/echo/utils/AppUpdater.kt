@@ -289,6 +289,19 @@ object AppUpdater {
             // In this form a future channel that serves a plain APK needs NO CHANGE HERE - it falls to
             // `download` by default, which is the safe side. Only a channel that genuinely ships a zip
             // has to be named.
+            //
+            // (!) OBSERVED IN THE FIELD, NOT ONLY REASONED. Confirmed on BUILD 1078, device DNP-NX9,
+            // 2026-09-07 01:51:
+            //     java.lang.Exception: No APK file found in the zip
+            //         AppUpdater.unzipApk (AppUpdater.kt:335)
+            //         AppUpdater.updateApp (AppUpdater.kt:180)
+            // with app_update_attempted = true. So a real user WAS offered an update, the download
+            // completed, and this branch ate it - the self-updater failed on the first genuine attempt it
+            // ever made. Recorded because the change above was scoped while we believed nobody had reached
+            // this code yet: it was originally argued from a source read alone, and the field event turns
+            // "we reasoned this was broken" into "this was observed broken". Anyone weighing whether the
+            // arm change was worth its risk should weigh it against a confirmed failure, not a predicted
+            // one.
             val apk = if (appType == "nightly") unzipApk(download) else download
             CrashKeys.onAppUpdateStage("ready")
             apk

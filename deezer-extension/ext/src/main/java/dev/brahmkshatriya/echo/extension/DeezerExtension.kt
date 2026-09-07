@@ -61,6 +61,8 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
@@ -373,28 +375,84 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> = deezerSearchClient.loadSearchFeed(query, shelf)
 
+    /**
+     * ⚠️ A MISSING SECTION TITLE IS NOT A REASON TO DROP THE SECTION. Until 2026-09-07 this required
+     * `section.title` and returned null without it, which discarded the entire page: the device capture of
+     * channels/module/46b377f1 shows ONE section, `title=<null>`, layout=grid, holding 25 playlist items
+     * of which all 25 parse with the existing code. The items were never the problem — the header was.
+     * That is also why the four /channels/module/<uuid> Home rows opened to nothing.
+     *
+     * TITLE FALLBACK, in order, each level giving something the previous one cannot:
+     *   1. section["title"] — per-section, the only level that can distinguish two sections of one page.
+     *      Null on module pages; present on multi-section channel pages, which is who it is for.
+     *   2. results["title"] — the PAGE title (resultsKeys carries one even when the section does not).
+     *      For a module page this is the label Deezer is showing today.
+     *   3. "" — render with NO header rather than dropping. FeedType emits a Header for every Shelf.Lists,
+     *      and HeaderViewHolder does `title.isVisible = feed.title.isNotEmpty()`, so a blank title is an
+     *      invisible header row followed by the items. Content survives; only decoration is lost.
+     * Deliberately NOT a level: the caller's own shelf title from Home. It is the most stable string we
+     * hold, but channelFeed is reached through a `more` Feed lambda that does not carry it, so plumbing it
+     * through would mean threading a display string down two layers for a case level 2 already covers.
+     * Worth revisiting only if a module page turns up with no page title either.
+     *
+     * ⚠️ THE ID DOES NOT COME FROM THE TITLE. section_id, else module_id, else the target. Module labels
+     * ROTATE — 46b377f1 was "Summer in slow-mo" days before it was "Hello, sunshine" — so a title-derived
+     * id would change under the same content, and two untitled sections sharing a page title would collide
+     * on one cache key in Cached.getFeedShelf.
+     */
     suspend fun channelFeed(target: String): List<Shelf> {
         val jsonObject = api.page(target.substringAfter("/"))
-        val channelPageResults = jsonObject["results"]!!.jsonObject
-        val channelSections = channelPageResults["sections"]!!.jsonArray
+        // ⚠️ THESE TWO WERE `!!` UNTIL 2026-09-07 AND THE SECOND ONE CRASHED THE APP. `target` is not one
+        // endpoint, it is four families, and /artist/<id> is an ARTIST endpoint with no "sections" key at
+        // all — the retraced NPE (build 1077 mapping, pg_map_id 9d7725eb…, frame nm0.a:127). Returning an
+        // empty list instead is what makes an unhandled family DEGRADE rather than throw: the caller's
+        // `more` treats an empty fetch as "use the row's own items", so the arrow behaves exactly as it
+        // does with the fetch branch off. See the note at DeezerParser.toShelfItemsList's `more`.
+        // ⚠️ PERMANENT, NOT A TEMPORARY DIAGNOSTIC — same carve-out as the two DROP lines, and for the
+        // same reason. The `more` fallback in DeezerParser.toShelfItemsList makes a failed fetch look
+        // EXACTLY like a successful one (the row's own items appear either way), which is right for users
+        // and blinding for us: a family that quietly degrades is indistinguishable from one that works.
+        // A silent degradation is how "Made for you" went unnoticed for months. These fire ONLY on the
+        // failure path, so a working family is silent and a healthy session prints nothing.
+        val channelPageResults = jsonObject["results"] as? JsonObject ?: run {
+            println("GladixDeezer FALLBACK target=$target reason=no-results rootKeys=${jsonObject.keys}")
+            return emptyList()
+        }
+        val channelSections = channelPageResults["sections"] as? JsonArray ?: run {
+            // keys= is the field that earns this line: it names what the page DID return, which is the
+            // whole question for /channels/new and for any family nobody has captured.
+            println(
+                "GladixDeezer FALLBACK target=$target reason=no-sections " +
+                    "resultsKeys=${channelPageResults.keys}"
+            )
+            return emptyList()
+        }
+        val pageTitle = channelPageResults["title"]?.jsonPrimitive?.contentOrNull
         return supervisorScope {
             channelSections.map { section ->
                 async(Dispatchers.Default) {
                     parser.run {
-                        // ⚠️ PERMANENT — NOT A TEMPORARY DIAGNOSTIC. DO NOT STRIP. Twin of the line in
-                        // DeezerHomeFeedClient; see the reasoning there. June's blanket
-                        // "strip all GladixDeezer printlns" rule does not cover these two. Fires only on a
-                        // failure: a fetched page's titleless sections disappear with no signal otherwise.
-                        if (section.jsonObject["title"] == null)
-                            println("GladixDeezer DROP section=<no-title> reason=missing-title src=channelFeed")
-                        section.jsonObject["title"]?.jsonPrimitive?.content
-                            // Recursive by design: a channel page's rows get fetching arrows too when they
-                            // carry a target. See toShelfItemsList's depth note — bounded by Deezer's graph,
-                            // not by us.
-                            ?.let { section.toShelfItemsList(it) { t -> channelFeed(t) } }
+                        val obj = section.jsonObject
+                        val title = obj["title"]?.jsonPrimitive?.contentOrNull
+                            ?: pageTitle.orEmpty()
+                        val id = obj["section_id"]?.jsonPrimitive?.contentOrNull
+                            ?: obj["module_id"]?.jsonPrimitive?.contentOrNull
+                            ?: target
+                        // Recursive by design: a channel page's rows get fetching arrows too when they
+                        // carry a target. See toShelfItemsList's depth note — bounded by Deezer's graph,
+                        // not by us.
+                        section.toShelfItemsList(title, id) { t -> channelFeed(t) }
                     }
                 }
-            }.awaitAll().filterNotNull()
+            }.awaitAll().filterNotNull().also { shelves ->
+                // Third distinct cause: the page WAS section-shaped and still yielded nothing, i.e. the
+                // sections parsed to zero items. Distinguishing it from the two above is what separates
+                // "we asked the wrong endpoint" from "we asked the right one and cannot read it".
+                if (shelves.isEmpty() && channelSections.isNotEmpty()) println(
+                    "GladixDeezer FALLBACK target=$target reason=no-section-parsed " +
+                        "sections=${channelSections.size}"
+                )
+            }
         }
     }
 

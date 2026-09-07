@@ -130,10 +130,33 @@ class HealthMonitor(private val app: App) {
     // Tripwire for the resumption fix: on restore, the track at the saved index must be the track
     // that was current at save time. Fires only if a future change re-poisons the persisted index
     // with a non-full-basis value (e.g. a windowed index). Diagnostic only — restore still proceeds.
+    /**
+     * The saved INDEX pointed at a track whose id is not the saved CURRENT_ID.
+     *
+     * ⚠️ `found` IS THE SEVERITY, NOT A DETAIL — read it first. This fires PRE-HEAL (see the report site in
+     * ResumptionUtils.recoverQueue for why), so a mismatch that resolveCurrentIndex silently corrected and
+     * one that left the user on a different track both arrive here and used to be indistinguishable:
+     *   found = true  -> the saved current track IS in the restored list, at resolvedIndex. The stale index
+     *                    was corrected by id and the restore is CORRECT. Cosmetic.
+     *   found = false -> the saved current track is ABSENT. resolveCurrentIndex fell back to the stale
+     *                    index, so the user resumes on a DIFFERENT TRACK.
+     * The two are reported at different Scopes for exactly that reason.
+     *
+     * The message carries both indices and healed=, so the dedupe signature (class + message) separates
+     * them. That re-partitions this signature against pre-2026-09-07 reports — deliberately: the counts
+     * being merged was the defect.
+     */
     class ResumeIndexMismatchException(
-        val expectedId: String, val actualId: String, val index: Int, val size: Int
+        val expectedId: String,
+        val actualId: String,
+        val index: Int,
+        val size: Int,
+        val resolvedIndex: Int,
+        val found: Boolean,
     ) : HealthException(
-        "resume index/id mismatch: index=$index size=$size expected=$expectedId actual=$actualId", null
+        "resume index/id mismatch: index=$index resolved=$resolvedIndex size=$size healed=$found " +
+            "expected=$expectedId actual=$actualId",
+        null
     )
 
     // Benign teardown race: a media3 datasource raised a bare IllegalStateException from one of its

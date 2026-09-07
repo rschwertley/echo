@@ -206,10 +206,40 @@ object Cached {
     // verifyCleanKotlinOutput enforces that for release/nightly/stable, but it cannot help a local
     // install. `inline` is required here only for `reified T`; if that need ever goes away, drop the
     // keyword and this whole hazard with it.
+    /**
+     * @param preferCache serve a previously-cached [MediaState.Loaded] WITHOUT contacting the extension.
+     *   Defaults to false. Passed true from StreamableLoader ONLY — the playback path — and deliberately
+     *   NOT from MediaViewModel or TrackInfoViewModel, which open the media page where isSaved / isLiked /
+     *   followers are exactly the values that must be fresh.
+     *
+     * ⚠️ THIS MAKES AN EXISTING BEHAVIOUR EXPLICIT RATHER THAN INTRODUCING ONE. Restored Unified tracks
+     * already resolve from cache today — but only because UnifiedExtension.loadTrack throws on their
+     * missing extension_id and the fallback below catches it. Once that stamp is restored
+     * (ResumptionUtils.restamped) the throw stops, and without this flag every restored track would
+     * attempt a network call first. Offline that means waiting out the sub-extension's timeouts (Deezer:
+     * connect 15s + read 10s) INSIDE THE BUFFERING PATH, where it would meet the 5s buffering watchdog and
+     * the 60s stuck detector, on a queue that is the reliable offline case today.
+     *
+     * ⚠️ STALENESS IS UNBOUNDED, AND THAT IS A CHOSEN POLICY, NOT AN OVERSIGHT. Do not add a TTL here
+     * "as an obvious improvement": an age check reintroduces the network attempt for precisely the offline
+     * case this exists to protect, which is the one thing it must never do.
+     */
     suspend inline fun <reified T : EchoMediaItem> loadMedia(
-        app: App, extension: Extension<*>, state: MediaState<T>,
+        app: App, extension: Extension<*>, state: MediaState<T>, preferCache: Boolean = false,
     ) = coroutineScope {
         runCatching {
+            // ⚠️ SAFE TO PLAY FROM, AND THIS IS THE REASON — it is not obvious and it is what makes the
+            // whole flag sound: a cached MediaState.Loaded carries NO STREAM URL. Streams are resolved
+            // separately at play time by loadStreamableMedia, so a stale cached state cannot produce an
+            // expired or wrong playback URL. What it can hold stale is display/library metadata, which is
+            // why this is confined to the playback path and kept away from the media-page callers.
+            //
+            // The five capability probes below (isSaved / isFollowed / followers / isLiked / isHidden) are
+            // SKIPPED ENTIRELY on this path, not half-refreshed. None of them is displayed for a queue
+            // item being resolved for playback, and skipping them is exactly what happens today via the
+            // throw — half-refreshing would be new behaviour nobody asked for.
+            if (preferCache) getMedia<T>(app, extension.id, state.item.id).getOrNull()
+                ?.let { return@runCatching it }
             val result = runCatching {
                 val new = loadItem(extension, state.item).getOrThrow()
                 // Deleted/unavailable content: some extensions (e.g. Deezer) return a BLANK item (empty id)
@@ -274,6 +304,14 @@ object Cached {
                 fileCache.putData(id, newState)
                 newState
             }
+            // ⚠️ THIS FALLBACK IS CURRENTLY HIDING A REAL DEFECT — see UnifiedExtension.loadTrack.
+            // Every RESTORED Unified track throws there (its `extension_id` extra is destroyed on save by
+            // toSlim) and lands here, where a previously-cached MediaState.Loaded is served instead. The
+            // queue plays, nothing is reported, and restored tracks are silently never re-resolved.
+            // That accident is also load-bearing: because the throw precedes any I/O, the cached copy is
+            // served INSTANTLY, which is what makes an offline restore work. Correcting the stamp without
+            // making this ordering explicit for the playback call site would turn each restored track into
+            // a network attempt that must time out first. Read that note before changing either.
             result.getOrElse {
                 getMedia<T>(app, extension.id, state.item.id).getOrNull()
                     ?: throw it

@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.extensions.builtin.unified
 
 import android.content.Context
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.SimpleCache
@@ -124,6 +125,20 @@ class UnifiedExtension(
             find { it.id == id } ?: throw Exception("Extension $id not found")
 
         private fun List<Extension<*>>.getOrNull(id: String?) = find { it.id == id }
+
+        /**
+         * Non-throwing sibling of [extensionId], for callers where a missing stamp is not an error.
+         *
+         * ⚠️ PATTERN, LEARNED THE EXPENSIVE WAY: AN ELVIS AGAINST A THROWING ACCESSOR IS NOT A GUARD.
+         * The tracker callbacks below read `details?.track?.extras?.extensionId ?: return` for six weeks.
+         * That LOOKS like "no stamp, skip quietly" and BEHAVES like "no stamp, throw": [extensionId]
+         * raises ExtensionNotFoundException rather than returning null, so the elvis is unreachable on the
+         * only branch that matters. Anyone auditing the file saw a guarded call site and moved on — which
+         * is exactly why Unified tracking was silently dead for every restored queue from 92af04f5
+         * (2026-07-26, when Track.toSlim started stripping extras on save) until 2026-09-07.
+         * If you write `?: return` after an accessor, check that the accessor can actually return null.
+         */
+        val Map<String, String>.extensionIdOrNull get() = this[EXTENSION_ID]
 
         val Map<String, String>.extensionId
             // Typed, not a bare Exception: the skip reports group on the class, and a restored queue
@@ -355,6 +370,26 @@ class UnifiedExtension(
             list.map { Tab(it.id, it.name).injectId(it.id) }
         ) { tab ->
             val extensions = extensions()
+            // ⚠️ THE ELVIS COVERS `tab == null` ONLY — it is NOT a guard on a missing stamp.
+            // Read as one expression it looks like it handles both, so state which case is which:
+            //   tab == null            -> `?.` short-circuits, and we fall back to the first enabled
+            //                             non-Unified extension. Deliberate: the same terminal tier as
+            //                             getCurrentExtension's cold-start safety net.
+            //   tab != null, unstamped -> UNREACHABLE BY CONSTRUCTION. Every tab this function emits is
+            //                             built `Tab(...).injectId(it.id)`, which writes EXTENSION_ID, and
+            //                             FeedData only ever hands back a tab it found in `feed.tabs`. If it
+            //                             ever happens, extensionId throws — which is CORRECT here and must
+            //                             stay that way: `get(id)` on a WRONG id silently loads another
+            //                             extension's feed under the user's selected tab, the cross-extension
+            //                             bleed that the AA search cache key (String -> Pair(query, extId))
+            //                             was changed to stop. Loud beats guessing.
+            // No circularity: extensions() is extFlow, filtered `id != UNIFIED_ID && isEnabled` at
+            // setMusicExtensions, so the fallback can never select Unified itself. That filter is on the
+            // PRODUCER, which is why it is invisible from here. Producer-side filtering has left a gap
+            // once already on this same axis: AndroidAutoCallback.onGetChildren filters Unified out of the
+            // ROOT listing but its per-node lookup (`extensions.firstOrNull { it.id == extId }`, extId
+            // parsed out of parentId) reads the UNFILTERED extensionList. Confirmed still unfiltered
+            // 2026-09-07. When a filter lives at the producer, check every consumer separately.
             val id = tab?.extras?.extensionId ?: extensions.firstOrNull()?.id
             extensions.get(id).getFeedData(loadFeed)
         }
@@ -443,6 +478,34 @@ class UnifiedExtension(
         }
     }
 
+    /**
+     * ⚠️ KNOWN DEFECT, RECORDED 2026-09-07, NOT YET FIXED: `track.extras.extensionId` below THROWS FOR
+     * EVERY RESTORED TRACK, and it has been doing so since 2026-07-26.
+     *
+     * A queue is persisted through ResumptionUtils, which stores `QueueEntry(s.item.toSlim(), s.extensionId)`.
+     * History's Track.toSlim() sets `extras = emptyMap()` (HistoryEntity.kt), so the track's own
+     * `extension_id` stamp is destroyed on save. The id survives BESIDE the track in the QueueEntry and is
+     * restored into MediaState.Unloaded — which is why `mediaItem.extensionId` is correct everywhere — but
+     * nothing ever re-stamps the Track itself. Introduced by 92af04f5 (2026-07-26), whose own comment says
+     * "toSlim dropping streamables/extras/nested": the loss was stated and not traced. The 2026-08-10 OOM
+     * hoist (de6d344b) only re-routed the surviving copy and is innocent.
+     *
+     * ⚠️ WHY NOBODY NOTICED FOR MONTHS: the throw is CAUGHT AND HIDDEN. Cached.loadMedia wraps this call
+     * and its `result.getOrElse { getMedia(...).getOrNull() ?: throw it }` serves the previously-cached
+     * MediaState.Loaded instead. So a restored Unified queue plays fine — from cache — and the failure is
+     * invisible. It also means restored tracks are never re-resolved, which is faster and works offline,
+     * entirely by accident.
+     *
+     * The same missing stamp surfaces UNCAUGHT on other paths, which is how it was finally found:
+     * UnifiedExtension.radio (a non-fatal ExtensionNotFoundException("null") from PlayerRadio.loadPlaylist
+     * on a cold start restoring a one-item queue with auto-radio on) and loadFeed(track).
+     *
+     * ⚠️ FIXING THE STAMP ALONE WOULD REGRESS OFFLINE. Today the throw happens BEFORE any I/O, so the
+     * cache fallback is instant. With a correct id this would attempt the sub-extension's network call
+     * first and only fall back after its timeouts (Deezer: connect 15s + read 10s), inside the buffering
+     * path. The fix therefore needs the cache-first ordering made EXPLICIT at Cached.loadMedia's playback
+     * call site, not just the stamp restored.
+     */
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
         val cached = track.extras["cached"]?.toBoolean() ?: false
         if (cached) return track
@@ -616,27 +679,54 @@ class UnifiedExtension(
     }
 
     private var current: Track? = null
+    /**
+     * The tracker callbacks' extension lookup: skips tracking for an unstamped track, and SAYS SO.
+     *
+     * ⚠️ SKIPPING, NOT THROWING: tracking is telemetry, and a missing extension_id stamp is a
+     * known-and-fixed condition (ResumptionUtils.restamped), so it must not surface to the user
+     * mid-playback. Until 2026-09-07 two of the four callbacks had a `?: return` that could never fire —
+     * see the pattern note on extensionIdOrNull — and two had no guard at all, so this threw instead.
+     *
+     * ⚠️ AND NOT SILENTLY, WHICH IS THE POINT. The house rule from the swallowed-exception sweep is that
+     * a deliberate best-effort skip carries a rationale at the narrowest scope AND a log line; silence was
+     * explicitly rejected as the resolution. The cautionary case is tryWithSuspend returning null
+     * "normally" for a cancellation, which destroyed the distinction the caller needed — "cancelled" and
+     * "genuinely no image" were both null. The same risk applies here: a silent skip is indistinguishable
+     * from an extension that simply has no tracker, and this defect already hid for six weeks precisely
+     * because a site LOOKED guarded. A log line keeps it visible without competing for Crashlytics
+     * attention, which a known-and-fixed condition does not deserve.
+     */
+    private fun TrackDetails.trackerExtensionId(callback: String): String? =
+        track.extras.extensionIdOrNull ?: run {
+            Log.d(
+                "UnifiedTracker",
+                "skipping $callback: no extension_id stamp on track id=${track.id} \"${track.title}\""
+            )
+            null
+        }
+
     override suspend fun onTrackChanged(details: TrackDetails?) {
         current = details?.track
-        val id = details?.track?.extras?.extensionId ?: return
+        val id = details?.trackerExtensionId("onTrackChanged") ?: return
         val extension = extensions().get(id)
         extension.clientOrNull<TrackerClient, Unit> { onTrackChanged(details) }
     }
 
     override suspend fun onMarkAsPlayed(details: TrackDetails) {
-        val id = details.track.extras.extensionId
+        val id = details.trackerExtensionId("onMarkAsPlayed") ?: return
         val extension = extensions().get(id)
         extension.clientOrNull<TrackerMarkClient, Unit> { onMarkAsPlayed(details) }
     }
 
     override suspend fun onPlayingStateChanged(details: TrackDetails?, isPlaying: Boolean) {
-        val id = details?.track?.extras?.extensionId ?: return
+        val id = details?.trackerExtensionId("onPlayingStateChanged") ?: return
         val extension = extensions().get(id)
         extension.clientOrNull<TrackerClient, Unit> { onPlayingStateChanged(details, isPlaying) }
     }
 
     override suspend fun getMarkAsPlayedDuration(details: TrackDetails): Long? {
-        val extension = extensions().get(details.track.extras.extensionId)
+        val id = details.trackerExtensionId("getMarkAsPlayedDuration") ?: return null
+        val extension = extensions().get(id)
         return extension.clientOrNull<TrackerMarkClient, Long?> { getMarkAsPlayedDuration(details) }
     }
 
