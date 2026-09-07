@@ -232,9 +232,14 @@ class DeezerHomeFeedClient(
                 // DeezerParser.toSmartTracklist currently stores the SLOT form. If madeForMe returns the
                 // instance form, that line changes too — do not assume the current choice is right.
                 // The match= line below is the whole point: it is the gate on every later step.
-                val stlItem = sections?.filterIsInstance<JsonObject>()
-                    ?.flatMap { it["items"]?.jsonArray?.filterIsInstance<JsonObject>().orEmpty() }
-                    ?.firstOrNull { it["type"].prim() == "smarttracklist" }
+                // No `?.` on `sections`: the `if (id == null) return@runCatching` above already proves it
+                // non-null (K2 propagates nullability back through the safe-call chain `id` was built
+                // from), so a safe call here would be a check that cannot fire. If that early return is
+                // ever moved or removed, this stops COMPILING rather than silently changing — which is the
+                // outcome we want.
+                val stlItem = sections.filterIsInstance<JsonObject>()
+                    .flatMap { it["items"]?.jsonArray?.filterIsInstance<JsonObject>().orEmpty() }
+                    .firstOrNull { it["type"].prim() == "smarttracklist" }
                     ?.let { it["data"] as? JsonObject }
                 val homeDataId = stlItem?.get("ID").prim()
                 val homeConfigId = stlItem?.get("CONFIGURATION_ID").prim()
@@ -262,14 +267,16 @@ class DeezerHomeFeedClient(
                         // and revert the two-line outer-type fallback in DeezerParser.toEchoMediaItem
                         // rather than start guessing at id shapes.
                         val match = when {
-                            id != null && ids.contains(id) -> "slot"
+                            // `id` is non-null from here down — same early return as above. Only
+                            // homeDataId still needs a null check; it has no such guard.
+                            ids.contains(id) -> "slot"
                             homeDataId != null && ids.contains(homeDataId) -> "instance"
                             // A PREFIXED VARIANT IS THE AMBIGUOUS CASE AND MUST NOT REPORT AS "none".
                             // The repo's fixtures use "smart:daily_mix_1", so a real id may well be
                             // "smart:inspired-by-1" or similar. Exact equality would call that a miss and
                             // send us to revert, wrongly. If this fires, read the ids= line above and use
                             // the FULL returned string in step 2 — do not reconstruct the prefix.
-                            id != null && ids.any { it.endsWith(id) || it.contains(id) } -> "slot-prefixed"
+                            ids.any { it.endsWith(id) || it.contains(id) } -> "slot-prefixed"
                             homeDataId != null &&
                                 ids.any { it.endsWith(homeDataId) || it.contains(homeDataId) } ->
                                 "instance-prefixed"
