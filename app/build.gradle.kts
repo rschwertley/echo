@@ -281,12 +281,6 @@ tasks.register("verifyExtensionAbi") {
         // across 2.x→4.x. Deliberately NOT an experimental type (v36.0 removed the experimental
         // FieldOrder enum). Anchor added 2026-08-24 (rule 4 was previously unverified).
         "com.google.protobuf.MessageLite",
-        // XML-instantiated behavior (rule 5) - NOT extension ABI. Anchored here because the convention in
-        // proguard-rules.pro is that EVERY keep rule in that file gets a verified anchor, and because the
-        // check itself is the same question: did R8 leave the class under its original name? Nothing in
-        // code references this class (CoordinatorLayout reflects on the app:layout_behavior string), so
-        // without the rule it is renamed and fragment_media.xml fails to inflate in minified builds only.
-        "dev.brahmkshatriya.echo.utils.ui.OverlapScrollingViewBehavior",
     )
     doLast {
         val mappingFiles: List<File> = (mappingRoot.listFiles()?.toList().orEmpty())

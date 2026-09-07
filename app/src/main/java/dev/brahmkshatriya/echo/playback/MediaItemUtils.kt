@@ -313,6 +313,13 @@ object MediaItemUtils {
                 //     time), USER-SET items carry the full extension graph — so restored queues are near a
                 //     floor already and any measurement taken on one understates the user-set case.
                 //
+                //     SIBLING PARKED ITEM, SAME Car/AA HEAP INVESTIGATION: the force-instantiation at
+                //     AndroidAutoCallback's `Extension<*>.toMediaItem`, where building the AA browse root runs
+                //     instance.value() for EVERY enabled extension purely to set a tile flag, pinning every
+                //     extension graph for the process lifetime. That one is about HOW MANY GRAPHS ARE
+                //     RETAINED; this one is about HOW BIG EACH QUEUE ITEM IS. Different levers, same heap —
+                //     measure both before attributing a number to either.
+                //
                 // (3) CONTEXT HOISTING — 5,432 copies of ONE object, roughly 5-16 MB. NOT TAKEN because
                 //     MediaItem is the unit Media3 carries into the timeline; there is no per-queue side
                 //     channel, so hoisting needs a process-level map keyed by queue generation, with its

@@ -285,55 +285,63 @@ abstract class AndroidAutoCallback(
             extensionList.collect { extensions ->
                 Log.d("GladixAuto", "extensionWatcher: collected ${extensions.size} extensions: ${extensions.map { it.id }}")
                 if (extensions.isNotEmpty()) {
-                    // ⚠️ DIAGNOSTIC + CANDIDATE FIX, 2026-09-07. DHU capture showed NO onGetChildren(ROOT)
-                    // following either of two mid-session notifies (toggle off 11:40:27, toggle on 11:40:34),
-                    // 50s after connect, while the connect-time control DID log a ROOT query — and that
-                    // control preceded nothing: the notify at :35.151 came a millisecond AFTER the root at
-                    // :35.150 and a second BEFORE the query at :36.193, so it was Gearhead's own initial
-                    // browse, not a response. So the ROOT notify has delivered nothing, possibly since it was
-                    // written.
+                    // ⚠️ THE ROOT NOTIFY BELOW IS A PROVEN NO-OP. MEASURED, NOT SUSPECTED. It is kept
+                    // deliberately — see "why keep it" at the end — but DO NOT BUILD ANYTHING ON IT, and do
+                    // not "fix" it by swapping overloads: both were tried.
                     //
-                    // TWO CANDIDATE CAUSES, AND THE SILENCE ALONE CANNOT SEPARATE THEM:
-                    //   (a) nothing is subscribed to ROOT at all;
-                    //   (b) the wrong ControllerInfo was targeted — the SAME defect "recent" already had and
-                    //       was fixed for, by switching to the broadcast overload. This call was left in the
-                    //       targeted 4-arg form; the "recent" call below is already the 3-arg broadcast.
-                    // (b) is live because subscriptions are keyed by ControllerCb, not by package or by
-                    // ControllerInfo.equals: MediaLibrarySessionImpl.onSubscribeOnHandler stores
-                    // `checkNotNull(browser.getControllerCb())` and isSubscribed does containsEntry on that
-                    // map (media3-session 1.11.0, MediaLibrarySessionImpl.java:224-227 and :258-260), while
-                    // the dispatch returns silently at :302 when it misses. The browser that ISSUES
-                    // onGetLibraryRoot and the one that SUBSCRIBES to ROOT are free to be different objects.
+                    // DHU capture, build 1085, 2026-09-07, verbatim:
+                    //   12:14:41.340  ROOT subscribers=0 pkgs=[] includesRootBrowser=false   <- at connect
+                    //   12:14:41.340  calling notifyChildrenChanged ROOT count=6 (broadcast)
+                    //   12:14:42.399  onGetChildren ROOT: size=6 enabled=4   <- Gearhead's own browse, 1s AFTER
+                    //   12:15:16.798  ROOT subscribers=0 pkgs=[] includesRootBrowser=false   <- toggle off
+                    //   12:15:22.972  ROOT subscribers=0 pkgs=[] includesRootBrowser=false   <- toggle on
+                    //   (no onGetChildren ROOT after either toggle)
+                    // An earlier run on the TARGETED overload was identical in outcome: control ROOT query at
+                    // connect, silence after both toggles, and there too the notify PRECEDED the connect-time
+                    // query (11:39:35.151 vs 11:39:36.193), so even that query was Gearhead's own initial
+                    // browse rather than a response.
                     //
-                    // getSubscribedControllers reads parentIdToSubscribedControllers directly
-                    // (MediaLibraryService.java:828), so this settles it by READING the subscription rather
-                    // than inferring it from silence. PREDICTIONS, WRITTEN BEFORE THE RUN:
-                    //   subscribers=0                      -> cause (a). Broadcast cannot help either; it
-                    //     applies the same isSubscribed gate per controller. The ROOT-refresh companion
-                    //     scoped at the per-node dispatch is then fiction and must be deleted.
-                    //   subscribers>0, includesRootBrowser=false -> cause (b), the "recent" mistake exactly.
-                    //     The broadcast swap below IS the fix and a ROOT query should follow each notify.
-                    //   subscribers>0, includesRootBrowser=true  -> neither. Subscription and target were
-                    //     both right, so the silence has a third cause and needs its own investigation.
-                    // Also watch pkgs: if a System-UI-redirected controller appears among ROOT subscribers,
-                    // the broadcast swap has opened a dispatch that the targeted form did not — see below.
+                    // BOTH CANDIDATE CAUSES ARE NOW CLOSED:
+                    //   (a) NOTHING IS SUBSCRIBED TO ROOT — CONFIRMED. subscribers=0 holds AT CONNECT as well
+                    //       as after each toggle, so it is not a late-subscription race: no subscription is
+                    //       ever established. Not Gearhead, and pkgs=[] means not System UI either.
+                    //   (b) WRONG ControllerInfo TARGETED (the defect "recent" had) — REFUTED. With zero
+                    //       subscribers, no overload can deliver: broadcast applies the same isSubscribed
+                    //       gate per controller (MediaLibrarySessionImpl.java:302).
+                    // So this call has never been deliverable, by either overload, and on current evidence
+                    // has done nothing since it was written. Gearhead queries ROOT exactly once per connect
+                    // and takes no notifications for it.
+                    //
+                    // WHAT WOULD MAKE IT WORK: nothing on our side. Subscription is the CLIENT's choice — the
+                    // session cannot subscribe on a controller's behalf. Only a client that calls subscribe()
+                    // on ROOT can make this deliver. DHU is one client on one harness; a real head unit may
+                    // differ, which is the whole reason the probe stays.
+                    //
+                    // BROADCAST OVERLOAD KEPT (was targeted at `browser`), for two reasons: the targeted form
+                    // was aimed at the browser that ISSUES onGetLibraryRoot, and that browser is provably NOT
+                    // a subscriber, so targeting it is wrong in principle and not merely ineffective; and the
+                    // "recent" call on the next line is already broadcast, so one idiom across the pair stops
+                    // the next reader from "correcting" one to match the other in the wrong direction. It is
+                    // behaviourally identical today (zero subscribers => both are no-ops) and would reach a
+                    // future subscriber that the targeted form would miss. pkgs=[] confirms the swap opened
+                    // no System UI dispatch.
+                    //
+                    // PROBE KEPT, TRIMMED. It answers a question now answered, which is the argument for
+                    // deleting it — but we are deliberately keeping a call that does nothing, and this line is
+                    // the only thing that will say so. Without it the next reader sees a notify, assumes
+                    // delivery, and re-derives this whole investigation; with it, one glance at logcat settles
+                    // it. Cost is one map read per extensionList emission, and emissions are user-paced
+                    // (install / enable / disable). includesRootBrowser was dropped: it only discriminated
+                    // cause (b), which is closed.
                     val rootSubs = session.getSubscribedControllers(ROOT)
                     Log.d(
                         "GladixAuto",
-                        "extensionWatcher: ROOT subscribers=${rootSubs.size} " +
-                            "pkgs=${rootSubs.map { it.packageName }} " +
-                            "includesRootBrowser=${rootSubs.any { it == browser }}"
+                        "extensionWatcher: ROOT subscribers=${rootSubs.size} pkgs=${rootSubs.map { it.packageName }}"
                     )
-                    // SWAPPED TARGETED -> BROADCAST as the candidate fix for (b). Revert is one argument.
-                    // This opens NO NEW PATH in practice: the "recent" call on the next line is already the
-                    // broadcast overload and runs on this same emission, so the loop over
-                    // getConnectedControllers and the media-notification -> System UI redirect inside
-                    // notifyChildrenChangedOnHandler (MediaLibrarySessionImpl.java:293-298) are exercised on
-                    // every emission TODAY. The one residual difference is that the redirect only becomes an
-                    // actual IPC when the target is subscribed to THAT parentId, and these two calls carry
-                    // different parentIds — which is precisely what the log above measures for ROOT.
-                    Log.d("GladixAuto", "extensionWatcher: calling notifyChildrenChanged ROOT count=${extensions.size} (broadcast)")
+                    Log.d("GladixAuto", "extensionWatcher: calling notifyChildrenChanged ROOT count=${extensions.size} (broadcast, no-op while subscribers=0)")
                     session.notifyChildrenChanged(ROOT, extensions.size, null)
+                    // NOT known to be a no-op: "recent" has a separate subscription set, and the record has
+                    // AA responding to it immediately with onGetChildren("recent"). Leave it alone.
                     session.notifyChildrenChanged("recent", 1, null)
                 }
             }
@@ -487,14 +495,18 @@ abstract class AndroidAutoCallback(
         // the guard that filtered the root listing and getCurrentExtension) was reasoned about purely in
         // terms of OLD builds' stale trees, which made the residue look like it would age out. It does not
         // age out. Disable-while-cached regenerates it on demand, on the newest build there is.
-        //   Read with the ROOT watcher above, which is the partial mitigation and NOT a fix:
-        //   onGetLibraryRoot collects extensionList and fires notifyChildrenChanged(browser, ROOT, …), so a
-        //   disable that re-emits the flow WHILE A SESSION IS CONNECTED does invalidate the ROOT tile.
-        //   It invalidates ONLY ROOT. Nothing invalidates "<root>/<extId>/…", so a user already inside that
-        //   subtree, or a head unit restoring the deep node it was last on, still routes straight here.
-        //   INFERENCE, not read from source: that Gearhead retains deeper nodes across a ROOT invalidation,
-        //   and that toggling enablement re-emits `music` at all. Neither was verified; the gap does not
-        //   depend on either, since the deep-node path is uncovered whichever way both resolve.
+        //   ⚠️ AND THERE IS NO PARTIAL MITIGATION. An earlier revision of this note claimed the ROOT
+        //   watcher softened this — that a disable re-emitting the flow while connected would invalidate the
+        //   ROOT tile, leaving only deep nodes exposed. MEASURED AND REFUTED on DHU 2026-09-07: nothing is
+        //   subscribed to ROOT, so that notify delivers to no one (see the proven-no-op record at the
+        //   extension watcher in onGetLibraryRoot). NOTHING INVALIDATES ANYTHING.
+        //   The gap is therefore WIDER than first recorded, and confirmed rather than inferred: Gearhead
+        //   queries ROOT exactly once per connect, so a disabled extension's TILE STAYS ON THE ROOT SCREEN
+        //   for the whole session and browsing into it works. No deep-node-retention assumption is needed.
+        //   The one thing that does clear it is the NEXT CONNECT, when onGetLibraryRoot runs and Gearhead
+        //   re-queries ROOT (measured: root 12:14:41.340 -> ROOT query 12:14:42.399). So the stale state is
+        //   session-scoped, not permanent — and per the onDisconnected note, renegotiations are frequent
+        //   mid-drive, which shortens it further.
         //
         // ⚠️ WHY THIS KEEPS RECURRING — THE FREQUENCY-DROP TRAP. THIS IS THE THIRD APPEARANCE OF
         // THE SHAPE. The May guard cut the crash rate far enough that Crashlytics AUTO-RESOLVED the issue,
@@ -514,115 +526,65 @@ abstract class AndroidAutoCallback(
         //              forget, and forgetting is silent.
         // A filter applied at a call site is a convention, not a guarantee. Enumerate the consumers.
         //
-        // Fix scoped but not taken: one predicate here changes what a head unit sees for a node it is still
-        // displaying, so it belongs in its own pass alongside the tier-1 change. UNSHIPPED for want of a way
-        // to watch a head unit do it — the scoping below is the record of that pass, not a description of
-        // code that exists.
+        // ⚠️ THE PREDICATE FIX IS NOT SHIPPED, AND AS OF 2026-09-07 IT IS NOT RECOMMENDED. The reasoning
+        // is below; it changed when the refresh companion was refuted and when the tier-1 fix (change 2,
+        // shipped) removed the sharp edge. Read the whole block before reviving it — "just add the predicate"
+        // is the conclusion this note exists to argue against.
         //
-        // ── THE COMPANION, AND WHY IT IS NOT JUST "ADD THE PREDICATE" ──
+        // WHY NOT: the harm that actually bit was the VOICE-SEARCH TARGET — lastBrowsedExtId written from
+        // this unfiltered parse, then used unfiltered by getCurrentExtension. THAT IS ALREADY CLOSED, by
+        // aaEligible on tier 1 in both getCurrentExtension implementations. What remains here is browse
+        // COHERENCE: during the session in which the user disabled an extension, its cached tile still works.
+        // Rejecting converts "works when it arguably should not" into "fails, with no way to clear it in
+        // session" — a visible regression the user's own action caused, traded for coherence. Bad trade.
+        // The Unified half of the predicate is available separately and nearly worthless: ROOT has filtered
+        // Unified since May, so a "<root>/unified/…" node can only come from a pre-May cached tree, which
+        // genuinely does age out. Costs nothing, gains nothing. Take it only for closure on that axis.
+        // WHAT WOULD CHANGE THE ANSWER: a non-zero subscriber count at the probe, which would make the
+        // failure self-clearing again. That is the only open one.
+        // ⚠️ THE MEMORY ARGUMENT IS CLOSED, NOT OPEN — AND IT CLOSES AGAINST CHANGE 1. An earlier version
+        // of this note wondered whether browsing a stale tile force-instantiates an extension the user
+        // disabled, which would have been a real cost worth the error tile. IT DOES NOT. The pinning happens
+        // at ROOT BUILD time, in Extension.toMediaItem, for every ENABLED extension — before the user taps
+        // anything. A DISABLED extension is filtered out of that set and is therefore NOT instantiated by the
+        // root build; and every enabled extension is already pinned regardless of what any tile does. So
+        // browsing a stale tile costs no instantiation that has not already happened, and the disabled case
+        // costs none at all. Do not reopen this as a reason for the predicate.
+        // The force-instantiation is a REAL and separate problem with its own lever — see the note at
+        // Extension.toMediaItem. It is parked there, not here.
+        //
+        // ── THE ROOT-REFRESH COMPANION: BUILT, TESTED, REFUTED, DELETED 2026-09-07 ──
         // Rejecting here returns auto_error_loading for a tile the head unit is STILL DISPLAYING, and the
-        // tile does not go away: it came from a cached parent that nothing invalidates, so it fails again on
-        // every tap, forever. Today the tap WORKS on a disabled extension; after the predicate it visibly
-        // fails and stays failing, which for the disable-while-cached case is arguably worse than the bug.
-        // The companion is therefore a ROOT refresh on the rejection, so the failure is self-clearing.
-        // Falling back to the ROOT LISTING instead was considered and rejected: returning ROOT children
-        // under a "<root>/<extId>/…" parentId leaves the breadcrumb naming the dead extension while the list
-        // shows every other one, and the back stack then holds a node whose contents contradict its title.
+        // tile does not go away by itself within the session. So a companion was scoped that would fire a
+        // ROOT refresh on rejection to make the failure self-clearing — a one-shot flag, a captured
+        // rootBrowser field with a ControllerInfo equality guard, a per-renegotiation ceiling.
+        // ALL OF IT RESTED ON AN INVALIDATION THAT CANNOT ARRIVE, and the DHU capture below killed it. The
+        // mechanism is deleted rather than parked: it is not "not yet built", it is refuted. Do not rebuild
+        // it without first re-running the subscriber probe and getting a NON-ZERO answer.
+        // Falling back to the ROOT LISTING instead was separately considered and rejected, and that still
+        // stands on its own reasoning: returning ROOT children under a "<root>/<extId>/…" parentId leaves the
+        // breadcrumb naming the dead extension while the list shows every other one, and the back stack then
+        // holds a node whose contents contradict its title.
         //
-        // ⚠️ GATE EVERYTHING BELOW ON ONE CHEAP CHECK FIRST — THE EXISTING ROOT NOTIFY MAY BE A NO-OP.
-        // From MediaLibrarySessionImpl.notifyChildrenChangedOnHandler (media3-session 1.11.0,
-        // MediaLibrarySessionImpl.java:301): the dispatch ends in `if (!isSubscribed(callback, parentId))
-        // return;`. A targeted notify to a controller NOT SUBSCRIBED to that parentId is a SILENT NO-OP —
-        // no error, no log, nothing. That is exactly the "recent" defect one node over, now read in source
-        // rather than inferred. So if Gearhead never subscribes to ROOT, the extensionWatcher notify in
-        // onGetLibraryRoot has done nothing since it was written, the ROOT-invalidation mitigation described
-        // above DOES NOT EXIST, and this whole companion is moot.
-        //   NO NEW LOGGING IS NEEDED to settle it — both sides already log:
-        //     "extensionWatcher: calling notifyChildrenChanged ROOT count=…"  (onGetLibraryRoot's watcher)
-        //     "onGetChildren ROOT: extensionList.first size=…"                (the ROOT branch above)
-        //   Procedure: connect AA, then TOGGLE AN EXTENSION IN THE APP WHILE STILL CONNECTED (a LATER
-        //   emission — the first one fires adjacent to the initial ROOT query and cannot discriminate).
-        //   PREDICTIONS, STATED BEFORE THE RUN so the log cannot come out "unclear":
-        //     a "onGetChildren ROOT" line within ~1s of the notify -> Gearhead IS subscribed, the notify
-        //       lands, the mitigation is real, and the companion below is worth building.
-        //     NO ROOT line, only the notify                        -> isSubscribed is false, the :256 notify
-        //       has always been a no-op, and BOTH the mitigation in the reachability note above and this
-        //       companion are fiction. Delete them and reason about the gap as permanently uncleared.
-        //
-        // If it lands, the companion is THREE parts, not one:
-        // (a) THE OVERLOAD MUST BE THE TARGETED ONE, AND THE "recent" PRECEDENT POINTS THE WRONG WAY HERE.
-        //     Both overloads funnel into the same per-controller path, so the broadcast form is NOT "spray at
-        //     everyone" — it loops getConnectedControllers() and each delivery still passes the isSubscribed
-        //     gate (MediaLibrarySessionImpl.java:271-281). But that loop includes the media notification
-        //     controller, and notifyChildrenChangedOnHandler REDIRECTS that one to getSystemUiControllerInfo()
-        //     (MediaLibrarySessionImpl.java:293-298). So BROADCAST IS THE OVERLOAD THAT CAN REACH THE SYSTEM
-        //     UI PHANTOM BINDING; a targeted notify to the Gearhead browser cannot. The "recent" fix switched
-        //     TO broadcast; do not carry that lesson here, it inverts.
-        // (b) TARGET THE ROOT-SUBSCRIBED BROWSER, NOT THE ONE THAT ISSUED THE FAILING REQUEST. Whether the
-        //     browser arriving at onGetChildren is the same ControllerInfo that subscribed to ROOT is
-        //     unanswered — and does not need answering: capture the browser from onGetLibraryRoot (today it
-        //     is only closure-captured by extensionWatcherJob) and target that, so isSubscribed passes by
-        //     construction and the System UI redirect is never entered.
-        //     A SINGLE FIELD HAS THE lastBrowsedExtId PROBLEM — Gearhead, System UI and Assistant can all
-        //     connect, and one field is last-writer-wins. If it held System UI's browser when a Gearhead
-        //     rejection fired, the notify would go to System UI: Gearhead's stale tile would NOT refresh (the
-        //     entire point lost) AND the phantom binding would be poked (the thing targeting was chosen to
-        //     avoid). Worst of both, silently.
-        //     A MAP KEYED BY ControllerInfo IS OVERKILL; an EQUALITY GUARD is the answer. onGetLibraryRoot
-        //     already returns early for any browser whose packageName is not gearhead BEFORE starting the
-        //     watcher, and extensionWatcherJob?.cancel() means one watcher lives at a time — the file already
-        //     assumes a single Gearhead browsing session. So: set the field beside `extensionWatcherJob = …`
-        //     (same lifetime), and at the rejection notify ONLY when `browser == rootBrowser`. That turns the
-        //     race from a mis-target into a no-op.
-        //     TYING IT TO THE WATCHER IS THE ESTABLISHED SHAPE HERE, NOT AN ARBITRARY CHOICE: the phantom-
-        //     binding IPC loop this file already suffered was closed by CANCELLING extensionWatcherJob in
-        //     onDisconnected — i.e. bounded by LIFECYCLE rather than by throttling. A rootBrowser whose
-        //     lifetime is the watcher's inherits that same bound for free; a field with an independent
-        //     lifetime would not.
-        //     ControllerInfo.equals (MediaSession.java, media3-session 1.11.0) compares controllerCb by
-        //     identity when either side is non-null, falling back to remoteUserInfo only when both are null —
-        //     so `==` here is a genuine SAME-CONNECTION test, not a same-package one. That is what is wanted.
-        // (c) A ONE-SHOT FLAG, BECAUSE notifyChildrenChanged HAS ALREADY CAUSED AN UNTHROTTLED IPC LOOP IN
-        //     THIS FILE. The cycle cannot self-drive through ROOT (the ROOT branch returns long before this
-        //     dispatch), so it needs the client to re-request the DEEP node on its own — which the record
-        //     says AA does TIGHTLY, having been observed answering a notification immediately, fast enough to
-        //     beat an async queue write mid-flight. rejection -> notify -> deep re-query -> rejection is then
-        //     unbounded with no user input. A one-shot ceiling is one extra notify per connection whatever
-        //     the client does.
-        //     Prefer it over a debounce or a per-extId set because IT COSTS NO COVERAGE: the ROOT refresh is
-        //     GLOBAL — one invalidation drops every stale tile at once — so a second notify for a different
-        //     extId conveys nothing the first did not. A per-extId set is unbounded in extIds and buys zero
-        //     extra effect; a debounce leaves the loop running at the debounce rate forever.
-        //     It matters more than it looks: the extensionWatcher above ALREADY fires a notify on every
-        //     extensionList emission with no throttle, so this would be a SECOND untracked trigger on a
-        //     mechanism that has misbehaved once.
-        //     ⚠️ RESET IT IN onDisconnected, NOT IN onGetLibraryRoot. onGetLibraryRoot IS NOT THE
-        //     CONNECTION BOUNDARY: its clearCaches() block runs only from there, and those caches survive AA
-        //     disconnect and persist while the app idles — deliberately, they are warm-start caches.
-        //     onDisconnected already clears exactly this class of per-session state (userQueueSet,
-        //     lastBrowsedExtId); the flag belongs beside them.
-        //     ⚠️ BUT onDisconnected IS NOT THE CONNECTION BOUNDARY EITHER, SO SAY "PER RENEGOTIATION".
-        //     It fires on every AA SESSION RENEGOTIATION, which is not the user leaving the car — established
-        //     when an immediate player.pause() here was found pausing playback mid-drive, removed from
-        //     playback control on the finding that no production app uses onDisconnected that way, and
-        //     replaced by CarConnection as the real disconnect detector. Renegotiations can be frequent
-        //     mid-drive. So the ceiling is ONE EXTRA NOTIFY PER RENEGOTIATION, NOT PER CONNECTION — looser
-        //     than it first reads, and it must not be written down as the tighter bound.
-        //     ⚠️ AND THE REAL BOUND IS THE USER'S TAP, NOT THE FLAG. Every notify requires a deliberate
-        //     tap on a stale tile, so nothing self-sustains no matter how often the flag resets. What the
-        //     flag buys is narrower than "one per session": IT STOPS A SINGLE TAP FROM PRODUCING REPEATED
-        //     NOTIFIES if the client re-requests the deep node on invalidation. That is the whole of its job.
-        //     Do not reason as though the flag is what makes the loop finite.
-        //     ⚠️ AND THE WRITE MUST STAY OUTSIDE cacheMutex. That mutex is taken by every browse node and
-        //     by clearCaches(), held across a 15s withTimeoutOrNull with unbounded waiters, and a third-party
-        //     extension doing non-cancellable blocking I/O wedges it — a reset placed inside that block would
-        //     fail to run in precisely the degraded state where it is needed. Both writes satisfy this as
-        //     scoped: onDisconnected does not take the mutex, and the rejection below returns BEFORE the
-        //     `cacheMutex.withLock` that begins after the extension resolves (verified at HEAD 2026-09-07).
-        //     Resetting per-controller does open a small hole — a System UI disconnect clears the flag and
-        //     permits one more Gearhead notify — but that is bounded by disconnect events, which are
-        //     user/system-paced, not loop-paced. Acceptable; the ceiling that matters is that no single
-        //     tap-and-requery cycle can sustain itself.
+        // THE SOURCE FINDINGS SURVIVE THE REFUTATION AND ARE WORTH KEEPING — they are what a future reader
+        // would otherwise re-derive backwards from the "recent" precedent (media3-session 1.11.0):
+        //   • A TARGETED NOTIFY TO AN UNSUBSCRIBED CONTROLLER IS A SILENT NO-OP.
+        //     notifyChildrenChangedOnHandler ends in `if (!isSubscribed(callback, parentId)) return;`
+        //     (MediaLibrarySessionImpl.java:302). No error, no log, nothing.
+        //   • SUBSCRIPTIONS ARE KEYED BY ControllerCb, NOT BY PACKAGE OR ControllerInfo.equals.
+        //     onSubscribeOnHandler stores `checkNotNull(browser.getControllerCb())` into
+        //     controllerToSubscribedParentIds, and isSubscribed does containsEntry on it
+        //     (MediaLibrarySessionImpl.java:224-227, :258-260). The controller that ISSUES a browse and the
+        //     one that SUBSCRIBES are free to be different objects — which is exactly how the "recent" bug
+        //     worked, and why "we targeted the browser we were handed" is not a safety argument.
+        //   • BROADCAST IS THE OVERLOAD THAT CAN REACH SYSTEM UI; TARGETED CANNOT. The 3-arg form loops
+        //     getConnectedControllers (MediaLibrarySessionImpl.java:271-281) and each delivery passes through
+        //     the media-notification -> getSystemUiControllerInfo redirect at :293-298 before the same
+        //     isSubscribed gate. So broadcast is NOT "spray at everyone" — but it is the one with a System UI
+        //     path. The "recent" fix switched TO broadcast; that lesson INVERTS if the concern is System UI.
+        //   • MediaLibrarySession.getSubscribedControllers(mediaId) is PUBLIC (MediaLibraryService.java:828)
+        //     and reads parentIdToSubscribedControllers. Subscription state can be READ; never again infer it
+        //     from silence, which is what cost this investigation two DHU runs.
         val extId = parentId.substringAfter("$ROOT/").substringBefore("/")
         // The isNotEmpty() condition is DELIBERATE, NOT INCIDENTAL: lastBrowsedExtId updates only on DEEPER
         // paths ("<root>/<extId>/home") and deliberately IGNORES tab-level clicks ("<root>/<extId>"). Reason
@@ -1229,6 +1191,34 @@ abstract class AndroidAutoCallback(
         }
 
         private suspend fun Extension<*>.toMediaItem(context: Context): MediaItem {
+            // ⚠️ PARKED WORK — THIS LINE FORCE-INSTANTIATES EVERY ENABLED EXTENSION, PERMANENTLY.
+            // Verified at HEAD 2026-09-07. The project record cites this as AndroidAutoCallback:922; it is
+            // this statement in Extension.toMediaItem. NAVIGATE BY THE SYMBOL — a replacement line number is
+            // not recorded here on purpose: the first version of this note gave one and it was stale by the
+            // end of the same edit, which is the drift the house rule exists to stop.
+            //
+            // The ROOT branch of onGetChildren does `enabled.map { it.toMediaItem(context) }`, so opening the
+            // AA browse root runs instance.value() for EVERY enabled non-Unified extension — purely to set a
+            // browsable/playable flag on a tile. Injectable.data is `lazy { runCatching { getter() } }`
+            // (common/…/helpers/Injectable.kt) with NO release and NO WeakReference, so the resulting object
+            // graphs are PINNED FOR THE PROCESS LIFETIME: one AA browse permanently retains Spotify + Tidal +
+            // SoundCloud + Deezer at once. Belongs with the Car/AA heap work (the per-item payload note at
+            // MediaItemUtils.toMetaData is its sibling), not with any browse-routing fix.
+            // ⚠️ THE TIMING IS LOAD-BEARING ELSEWHERE: because this fires at ROOT BUILD for ENABLED
+            // extensions only, browsing a stale tile costs no instantiation that has not already happened,
+            // and a DISABLED extension is never instantiated here at all. That is what closes the memory
+            // argument against the browse-filter fix in onGetChildren's per-node dispatch note. If this
+            // line ever moves to a lazier trigger, THAT NOTE'S CONCLUSION CHANGES TOO — revisit both.
+            //
+            // CHEAPEST LEVER ON RECORD: read `instance.data.isInitialized()` instead — a Lazy state read that
+            // instantiates nothing.
+            // ⚠️ BUT IT IS NOT A DROP-IN, AND THE ONE-LINE FORM OF THIS ADVICE HIDES THAT. The two express
+            // different things: `success` means "this extension LOADS", isInitialized() means "this extension
+            // is ALREADY LOADED". A never-instantiated extension would report false and its tile would be
+            // marked unbrowsable, which breaks browsing into any extension on a fresh connect — the exact
+            // opposite of the intent. Taking the lever means DECIDING WHAT THE FLAG SHOULD SAY when load
+            // state is unknown; the defensible answer is optimistic (mark it browsable, discover failure on
+            // tap, where an error is already handled) but that is a behaviour change and needs its own pass.
             val success = instance.value().isSuccess
             val artworkData = if (extensionIconCache.containsKey(id)) {
                 extensionIconCache[id]

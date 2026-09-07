@@ -125,6 +125,40 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
      * Cached.carriesExpiry — an item with an `expires` extra is never written to the durable store, so a
      * bad first load cannot stick for 24h).
      */
+    /**
+     * ⚠⚠ DO NOT WRITE THE OBVIOUS GRAPHQL MAPPER HERE. IT WOULD LOOK FIXED AND BE UNPLAYABLE. ⚠⚠
+     *
+     * Deezer serves smarttracklist tracks over GRAPHQL (pipe.deezer.com, query GetSmartTracklist,
+     * response at data.smartTracklist.tracks.edges[].node) — verified from
+     * music-assistant/deezer-python-gql, queries/get_smart_tracklist.graphql. The tempting move once that
+     * lands is to map those nodes straight to our Track. DO NOT.
+     *
+     * The node comes from the repo's TrackFields fragment: id, title, ISRC, diskInfo, duration,
+     * isExplicit, isFavorite, popularity, album, contributors. THERE IS NO MD5_ORIGIN, NO FILESIZE_*, AND
+     * NO TRACK_TOKEN — which are exactly the fields DeezerParser.toTrack builds `streamables` from. A
+     * mapped Track therefore renders perfectly: right title, right artist, right cover, right duration —
+     * and cannot play. THAT IS WORSE THAN TODAY'S FAILURE, which at least announces itself: a mix that
+     * opens to a full track list and then fails at playback looks like a streaming bug, not a parsing
+     * gap, and it costs a build plus a device test to discover. Today's version throws immediately.
+     * A second mapper would also fork Deezer track parsing in two, so every future field change to
+     * toTrack silently misses one path.
+     *
+     * THE SHAPE THAT WORKS: use GraphQL for the ID LIST ONLY (edges[].node.id), then fetch full gateway
+     * records for those ids and hand them to the existing toTrack unchanged. Zero new parsing, real
+     * streamables, one code path. That needs a chunked song.getListData wrapper in api/DeezerTrack.kt
+     * (which has none today — `track(id)` posts a single SNG_ID, and N single calls for a 40-track mix is
+     * not acceptable). MATCH THE SHIPPED CALL SHAPE FROM THE PIPER WORK: chunked, parameter SNG_IDS,
+     * UPPERCASE, response read at results.data. gw-light params are effectively case-insensitive, so this
+     * is consistency with a known-working call site rather than a requirement — take it anyway, it is free.
+     *
+     * GATED ON THE ID QUESTION, WHICH IS NOT YET ANSWERED. See the STL-ID probe in
+     * DeezerHomeFeedClient.probeSmartTracklist: our Home item carries a SLOT id (SMARTTRACKLIST_ID,
+     * "inspired-by-1", identical to CONFIGURATION_ID) and an INSTANCE id (data.ID, embedding a user id and
+     * a date). Which one GraphQL accepts is unknown, the repo's fixtures are hand-written and prove
+     * nothing, and open-source verification establishes that an endpoint EXISTS — not that it accepts the
+     * ids we hold. playlist.getSongs was verified exactly this way, shipped, and did not answer the
+     * question being asked of it. Do not build past the probe.
+     */
     private suspend fun smartTracklistTracks(stlId: String): List<Track> {
         val jsonObject = api.page("smarttracklist/$stlId")
         val sections = jsonObject["results"]?.jsonObject?.get("sections")?.jsonArray

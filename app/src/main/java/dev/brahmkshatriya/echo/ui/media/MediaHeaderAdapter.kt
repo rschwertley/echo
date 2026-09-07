@@ -86,6 +86,14 @@ class MediaHeaderAdapter(
      * Loading is invisible anyway (its holder sets itemView.alpha = 0f) and is padded only for
      * consistency; Error is the state this is actually for.
      */
+    // ⚠️ ALWAYS 0 SINCE THE 2026-09-07 OVERLAP REVERT — KEPT, NOT LIVE. Its one writer was
+    // MediaDetailsFragment's applyInsets block, which set it to insets.top + ?actionBarSize while the list
+    // spanned the full viewport under a transparent toolbar. With @string/appbar_scrolling_view_behavior
+    // back on the container the list is positioned below the AppBarLayout, so Error/Loading need no inset
+    // of their own and nothing writes this. The field and its use below are therefore inert, and left in
+    // place because they are correct for a future overlap attempt — read the five device symptoms in
+    // fragment_media.xml first. If you are wondering why a header state is not being inset: it is because
+    // it no longer needs to be, not because this broke.
     var topInset: Int = 0
         set(value) {
             if (field == value) return

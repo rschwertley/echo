@@ -22,6 +22,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
@@ -238,6 +240,16 @@ class DeezerApi(private val session: DeezerSession) {
                 }
             }
 
+            // ⚠️ THIS BRANCH IS A CSRF HANDLER, NOT A GENERAL ERROR HANDLER — AND THAT IS DELIBERATE.
+            // It was written for VALID_TOKEN_REQUIRED specifically; the @Suppress("KotlinConstantConditions")
+            // it once carried was added because `result["error"] is JsonObject` looked constant to the
+            // compiler and was recorded as "genuinely reachable — Deezer returns JsonObject for CSRF
+            // VALID_TOKEN_REQUIRED errors". It does its job correctly. The problem is that a SINGLE-PURPOSE
+            // handler sits at the position where a GENERAL one is also needed, so the chokepoint READS as
+            // guarded: every other gateway rejection falls past it and `result` is returned as if it were
+            // data. Do not "finish" this branch — it is not unfinished. The general check goes BELOW it, and
+            // below is load-bearing: the CSRF arm re-logins and re-enters callApi, and a general check
+            // placed first would pre-empt that retry.
             val errorObj = result["error"] as? JsonObject
             if (errorObj != null) {
                 if (errorObj["VALID_TOKEN_REQUIRED"]?.jsonPrimitive?.content?.contains("Invalid CSRF token") == true) {
@@ -251,6 +263,81 @@ class DeezerApi(private val session: DeezerSession) {
                         return@withContext callApi(method, paramsBuilder, gatewayInput)
                     }
                 }
+            }
+
+            // ⚠️ LOG-ONLY DETECTION, 2026-09-07. DOES NOT THROW YET, BY DESIGN. This measures how often a
+            // gateway REJECTION reaches a caller disguised as data, before anything changes behaviour on a
+            // chokepoint that all 44 callApi sites pass through.
+            //
+            // WHY THIS EXISTS: a rejected request is currently indistinguishable from an empty one. Measured
+            // on 2026-09-07 — page.get for PAGE="smarttracklist/<id>" returns
+            //   rootKeys=[error, results, payload]
+            //   error={"REQUEST_ERROR":"Page type smarttracklist does not exist"}
+            //   results={}
+            // and DeezerPlaylistClient.smartTracklistTracks read that as "sections=0", i.e. an empty mix. Two
+            // investigation rounds went into guessing a response shape while the server's refusal sat unread
+            // in a sibling key.
+            //
+            // THE STRONGEST ARGUMENT FOR FIXING IT HERE RATHER THAN AT THE NEXT CALLER WHO NOTICES: SOMEONE
+            // ALREADY FIXED IT LOCALLY. DeezerPlaylistClient.loadTracks (the playlistSongs branch) carries a
+            // hand-rolled version with a comment naming the defect verbatim — "callApi returns non-CSRF
+            // errors un-thrown" — extracting Deezer's message and throwing. One caller solved it; the other
+            // 43 did not. AND ITS RULE WOULD HAVE MISSED THIS CASE: it triggers on `results` ABSENT, while the
+            // capture above has `results` PRESENT AND EMPTY. A local fix written against the one shape its
+            // author happened to see is exactly why a chokepoint fix is worth the higher bar.
+            //
+            // ⚠️ AND THIS IS A DELIBERATE DEPARTURE FROM A HOUSE POLICY, NOT A CORRECTION OF SLOPPINESS.
+            // This extension deliberately makes every JsonObject/JsonArray cast safe so that unexpected field
+            // shapes are silently skipped — that policy is right for PARSING, where a field we do not
+            // recognise should not take down a page. It is wrong ONE LAYER UP: A REJECTION IS NOT AN
+            // UNEXPECTED SHAPE, IT IS THE SERVER SAYING NO. Do not "restore consistency" here by
+            // re-swallowing it; the inconsistency is the point, and it is scoped to this one check.
+            //
+            // WHAT THE DATA DECIDES — TWO CANDIDATE RULES, and `resultsUsable` below is the field that
+            // separates them:
+            //   RULE A — fire when `results` is ABSENT. The existing PlaylistClient precedent. Near-zero
+            //            risk, and would NOT have caught the smarttracklist case.
+            //   RULE B — fire when `error` is a JsonObject with >= 1 entry (what is logged here). Catches it.
+            //            Deezer's success responses conventionally carry `"error": []`, and the `as?
+            //            JsonObject` cast above already yields null for an array, so the common benign shape
+            //            is excluded by construction. What is NOT known from our tree is whether any SUCCESS
+            //            response carries a non-empty error OBJECT. That is the entire risk, and it is
+            //            measurable rather than arguable — hence this build.
+            //
+            // PREDICTIONS, STATED BEFORE THE RUN so the log cannot come back "unclear":
+            //   Every hit has resultsUsable=false and names a real refusal (REQUEST_ERROR, quota, geo)
+            //     -> Rule B is safe. Next build turns this into a throw carrying `errorText`.
+            //   ANY hit has resultsUsable=true on content that actually rendered — a playable album, a
+            //     populated playlist — -> RULE B IS WRONG. Narrow to Rule A plus an explicit REQUEST_ERROR
+            //     case, and record which method produced the benign hit.
+            //   No hits at all across normal use -> the rejection path is rarer than the smarttracklist case
+            //     suggested; re-run while deliberately touching a region-locked or pulled item before
+            //     concluding anything.
+            //
+            // WHEN THIS BECOMES A THROW, THE MESSAGE IS A CONSTRAINT, NOT A NICETY. It must CARRY Deezer's
+            // own text, attached rather than substituted: a generic user-facing string for the UI, with
+            // `errorText` on the exception for the log and Crashlytics. The precedent is ClientException
+            // .LoginRequired, which "carries nothing — no message, no fields" and so cannot distinguish "user
+            // must sign in" from "internal token went stale, no user action possible". A typed failure that
+            // drops the detail would have left this investigation exactly where it started: the entire value
+            // of the capture above was the sentence "Page type smarttracklist does not exist".
+            if (errorObj != null && errorObj.isNotEmpty()) {
+                val errorText = runCatching {
+                    errorObj.entries.joinToString { (k, v) ->
+                        "$k=${(v as? JsonPrimitive)?.contentOrNull ?: v.toString()}"
+                    }
+                }.getOrNull() ?: "<unreadable>"
+                val resultsElement = result["results"]
+                val resultsUsable = when (resultsElement) {
+                    null, is JsonNull -> false
+                    is JsonObject -> resultsElement.isNotEmpty()
+                    is JsonArray -> resultsElement.isNotEmpty()
+                    else -> true
+                }
+                println(
+                    "GladixDeezer GATEWAY-ERROR method=$method resultsUsable=$resultsUsable " +
+                        "error=${errorText.take(300)}"
+                )
             }
             result
         }
@@ -549,6 +636,63 @@ class DeezerApi(private val session: DeezerSession) {
     }
 
     //<============= Lyrics =============>
+
+    // == TEMPORARY: "MADE FOR ME" ID-SHAPE PROBE =================================================
+    // (!) DELETE THIS FUNCTION AND ITS CALL IN DeezerHomeFeedClient.probeSmartTracklist once the ids are
+    // in hand. It costs two network round-trips on the first Home load of each process.
+    //
+    // WHAT IT ANSWERS, AND WHY IT CANNOT BE ANSWERED ANY OTHER WAY. Deezer serves smarttracklist tracks
+    // over GRAPHQL at pipe.deezer.com, not over the gw-light.php gateway — page.get with
+    // PAGE="smarttracklist/<id>" is refused outright ("Page type smarttracklist does not exist",
+    // measured 2026-09-07). The query is verified from open source:
+    //   music-assistant/deezer-python-gql, queries/get_smart_tracklist.graphql —
+    //     query GetSmartTracklist($smartTracklistId: String!, $first: Int = 50, $after: String)
+    //     { smartTracklist(smartTracklistId: $smartTracklistId) { … tracks(first:, after:)
+    //       { edges { cursor node { ...TrackFields } } pageInfo { … } } } }
+    //   response path data.smartTracklist.tracks.edges[].node, confirmed twice — by the .graphql
+    //   document and by the generated model deezer_python_gql/generated/get_smart_tracklist.py
+    //   (smart_tracklist aliased "smartTracklist", page_info aliased "pageInfo").
+    //
+    // ⚠️ WHAT THAT VERIFICATION DOES NOT ESTABLISH — AND THIS PROJECT HAS BEEN BURNED BY EXACTLY THIS.
+    // It establishes that the endpoint EXISTS and what shape it returns. IT DOES NOT ESTABLISH THAT IT
+    // ACCEPTS THE IDS WE HOLD. playlist.getSongs was verified the same way, against the same class of
+    // repo, applied and committed — and the following session opened with "the prior playlist.getSongs
+    // switch did NOT fix the wrong Piper (both methods read the same mis-attributed stored records)".
+    // The method was real exactly as documented; it did not answer the question being asked of it.
+    //
+    // AND THE FIXTURES IN THAT REPO CANNOT SETTLE IT. tests/fixtures/get_smart_tracklist.json and
+    // get_made_for_me.json give ids "smart:daily_mix_1" / "flow:default" with covers at
+    // .../images/misc/smart_1/264x264.jpg. Those are HAND-WRITTEN, not captured: real Deezer covers are
+    // md5-addressed (/images/cover/<32-hex>/…, which is what DeezerParser.getCover builds). They match
+    // NEITHER form our Home payload carries. The field is a String; that is all a fixture can prove.
+    //
+    // SO ASK THE API FOR ITS OWN IDS. `me { madeForMe }` returns SmartTracklist nodes whose `id` is BY
+    // DEFINITION what smartTracklist(smartTracklistId:) accepts — same schema, same type. Comparing those
+    // against the two ids in our Home item is a measurement, not a guess. Query shape taken verbatim from
+    // music-assistant/deezer-python-gql, queries/get_made_for_me.graphql; PageInfoFields is dropped here
+    // because only the ids matter and inlining the fragment would add nothing.
+    suspend fun probeMadeForMe(): JsonObject {
+        val request = Request.Builder()
+            .url("https://auth.deezer.com/login/arl?jo=p&rto=c&i=c")
+            .post(RequestBody.EMPTY)
+            .headers(Headers.headersOf("Cookie", "arl=$arl; sid=$sid"))
+            .build()
+        val response = clientNP.newCall(request).await()
+        val jwt = decodeJson(response.body.string())["jwt"]?.jsonPrimitive?.content
+        val params = encodeJson {
+            put("operationName", "GetMadeForMe")
+            put("query", $$"query GetMadeForMe($first: Int = 10) { me { madeForMe(first: $first) { edges { node { __typename ... on SmartTracklist { id title subTitle } ... on Flow { id title } } } } } }")
+            putJsonObject("variables") {
+                put("first", 10)
+            }
+        }
+        val pipeRequest = Request.Builder()
+            .url("https://pipe.deezer.com/api")
+            .post(params.toRequestBody())
+            .headers(Headers.headersOf("Authorization", "Bearer $jwt", "Content-Type", "application/json"))
+            .build()
+        return decodeJson(clientNP.newCall(pipeRequest).await().body.string())
+    }
 
     suspend fun lyrics(id: String): JsonObject {
         val request = Request.Builder()

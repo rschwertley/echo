@@ -104,7 +104,25 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
 
         observe(viewModel.itemResultFlow) { result ->
             val item = result?.getOrNull()?.item ?: item
-            binding.toolBar.title = item.title.trim()
+            // ⚠️ NO TOOLBAR TITLE HERE SINCE 2026-09-07, DELIBERATELY. This line read
+            // `binding.toolBar.title = item.title.trim()`. The title now lives in the header content
+            // (MediaHeaderAdapter.Success.bind sets it from the SAME source, state.item.title.trim()), and
+            // having both on screen at rest was redundant — during the reverted overlap build they also
+            // rendered overlapping mid-scroll.
+            // CHECKED BEFORE REMOVING, so this is not an accessibility regression:
+            //   • NOTHING READS IT BACK. `toolBar.title` was write-only across the whole app.
+            //   • IT IS NOT AN ACTION BAR TITLE. There is no setSupportActionBar call anywhere in this
+            //     app, so this MaterialToolbar is a plain view — its title was never announced on screen
+            //     entry, only when focused. No accessibilityPaneTitle or announceForAccessibility exists
+            //     anywhere either, so nothing else depended on it.
+            //   • THE TEXT IS STILL THERE FOR A SCREEN READER. The header's @id/title is a real TextView,
+            //     and ellipsize="end" + maxLines="2" truncate only visually — TalkBack reads the full
+            //     string. A contentDescription on the toolbar would duplicate it, not replace it.
+            // KNOWN COST: once the header scrolls past, the bar is empty and the page has no persistent
+            // label. That is what the old collapsing header prevented. A scroll-driven HANDOFF (toolbar
+            // title fades in only once the header title has passed) is the fix if that reads badly — it
+            // does NOT need the reverted overlap; see the note at MediaDetailsFragment's removed
+            // setupToolbarFade for why the previous attempt's arithmetic cannot simply be restored.
             // The cover load and the artist 240dp/circle cap moved to MediaHeaderAdapter.Success.bind on
             // 2026-09-05 — the cover is item 0 now, and a ViewHolder is reused, so both must run per bind
             // rather than once per result as they did here.

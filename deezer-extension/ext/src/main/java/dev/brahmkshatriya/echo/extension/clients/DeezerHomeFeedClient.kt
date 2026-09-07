@@ -112,11 +112,43 @@ class DeezerHomeFeedClient(
                 // whether Home's sections carry them too.
                 val target = obj["target"]?.jsonPrimitive?.contentOrNull ?: "?"
                 val items = obj["items"]?.jsonArray ?: JsonArray(emptyList())
-                // Same __TYPE__ extraction as DeezerParser.hasChannelItems() so the logged
-                // breakdown reflects exactly the field that drives Home routing.
+                // Same __TYPE__ extraction as DeezerParser.hasChannelItems() so the logged breakdown
+                // reflects exactly the field that drives Home routing — but EVERY item is now counted under
+                // some bucket, never dropped.
+                //
+                // ⚠️ THE INVARIANT IS THE POINT, NOT THE EXTRA FIELD: `sum(types) == items`. A reader can
+                // check it at a glance, and it FAILS LOUDLY if a future item shape escapes both lookups.
+                // This is the fourth extension of this line — it began as title/layout, gained
+                // module_id/target, then items=N, then `target` on Home to confirm it there. Each closed a
+                // blind spot the previous version had, and each was still merely WIDER. This one is the
+                // first that is SELF-CHECKING. Keep that property: if you add a bucket, make sure it still
+                // totals.
+                //
+                // ⚠️ WHAT IT FIXES, AND WHY IT WENT UNSEEN FOR WEEKS. The old form was
+                //   items.mapNotNull { (it as? JsonObject)?.unwrap()?.str("__TYPE__") }
+                // and mapNotNull SILENTLY DISCARDED every item with no `data.__TYPE__` — which is exactly the
+                // smarttracklist shape, since those carry their type at the OUTER level. The 2026-09-07 Home
+                // capture read `New releases for you/horizontal-grid/…/items=12/types={album:11}`: the line
+                // was REPORTING the discrepancy (12 vs 11) without naming the missing item, so the one shape
+                // the log existed to find was the one shape it could not show. An `outer:` bucket would have
+                // surfaced it weeks ago, and would have shown that smarttracklist items are scattered
+                // through ordinary rows rather than confined to "Made for you".
+                //
+                // ⚠️ PATTERN, STATED PLAINLY BECAUSE IT HAS NOW COST FOUR TIMES: mapNotNull over a
+                // HETEROGENEOUS collection discards precisely the cases you most need to see. The other
+                // members are the swallowed gateway `error` key (see DeezerApi.callApi), the titleless-section
+                // DROP lines below, and — same operator, different data — Android clearing cacheDir under
+                // storage pressure, which made a mapNotNull drop the item with no signal at all.
+                // A COUNT-BASED DIAGNOSTIC MUST PUBLISH AN INVARIANT THAT FAILS LOUDLY WHEN IT BREAKS.
                 val typeCounts = parser.run {
-                    items.mapNotNull { (it as? JsonObject)?.unwrap()?.str("__TYPE__") }
-                        .groupingBy { it }.eachCount()
+                    items.map { item ->
+                        val obj = item as? JsonObject
+                        obj?.unwrap()?.str("__TYPE__")
+                            // Outer-level type: the smarttracklist shape, and whatever else Deezer sends
+                            // this way next. Prefixed so it can never be confused with a real __TYPE__.
+                            ?: obj?.str("type")?.let { "outer:$it" }
+                            ?: "<no-type>"
+                    }.groupingBy { it }.eachCount()
                 }
                 val types = typeCounts.entries.joinToString(", ") { "${it.key}:${it.value}" }
                 "$title/$layout/$moduleId/$target/items=${items.size}/types={$types}"
@@ -189,6 +221,65 @@ class DeezerHomeFeedClient(
                     println("GladixDeezer PROBE stl=<none-in-home> (no outer type=smarttracklist item)")
                     return@runCatching
                 }
+                // == STEP 1 OF THE SMARTTRACKLIST WORK: WHICH ID DOES THE GRAPHQL API USE? ==========
+                // (!) DELETE WITH DeezerApi.probeMadeForMe. Three lines out, one line in.
+                // Our Home item carries TWO candidate ids and they are different KINDS of thing:
+                //   data.SMARTTRACKLIST_ID = "inspired-by-1"  — identical to data.CONFIGURATION_ID, so it
+                //                                               reads as a SLOT/config name, not an instance
+                //   data.ID = "6563868601.1.1125.2179.2707.20260829" — reads as an INSTANCE: it embeds what
+                //                                               looks like a user id and a date, matching
+                //                                               these regenerating daily (EXPIRATION_DATE)
+                // DeezerParser.toSmartTracklist currently stores the SLOT form. If madeForMe returns the
+                // instance form, that line changes too — do not assume the current choice is right.
+                // The match= line below is the whole point: it is the gate on every later step.
+                val stlItem = sections?.filterIsInstance<JsonObject>()
+                    ?.flatMap { it["items"]?.jsonArray?.filterIsInstance<JsonObject>().orEmpty() }
+                    ?.firstOrNull { it["type"].prim() == "smarttracklist" }
+                    ?.let { it["data"] as? JsonObject }
+                val homeDataId = stlItem?.get("ID").prim()
+                val homeConfigId = stlItem?.get("CONFIGURATION_ID").prim()
+                println(
+                    "GladixDeezer STL-ID home stl=$id dataId=${homeDataId ?: "-"} " +
+                        "configId=${homeConfigId ?: "-"}"
+                )
+                runCatching { api.probeMadeForMe() }
+                    .onFailure { println("GladixDeezer STL-ID madeForMe FAILED: ${it.message}") }
+                    .onSuccess { gql ->
+                        val errors = gql["errors"]?.toString()?.take(300)
+                        val edges = gql["data"]?.jsonObject?.get("me")?.jsonObject
+                            ?.get("madeForMe")?.jsonObject?.get("edges") as? JsonArray
+                        val nodes = edges?.filterIsInstance<JsonObject>()
+                            ?.mapNotNull { it["node"] as? JsonObject }.orEmpty()
+                        val ids = nodes.map { it["id"].prim() ?: "-" }
+                        println(
+                            "GladixDeezer STL-ID madeForMe n=${nodes.size} " +
+                                "types=${nodes.map { it["__typename"].prim() ?: "-" }} ids=$ids " +
+                                "errors=${errors ?: "-"}"
+                        )
+                        // The gate. `slot` -> toSmartTracklist already stores the right id and step 2 can
+                        // proceed unchanged. `instance` -> it stores the wrong one and must change first.
+                        // `none` -> the GraphQL API does not address our items by either id we hold; STOP,
+                        // and revert the two-line outer-type fallback in DeezerParser.toEchoMediaItem
+                        // rather than start guessing at id shapes.
+                        val match = when {
+                            id != null && ids.contains(id) -> "slot"
+                            homeDataId != null && ids.contains(homeDataId) -> "instance"
+                            // A PREFIXED VARIANT IS THE AMBIGUOUS CASE AND MUST NOT REPORT AS "none".
+                            // The repo's fixtures use "smart:daily_mix_1", so a real id may well be
+                            // "smart:inspired-by-1" or similar. Exact equality would call that a miss and
+                            // send us to revert, wrongly. If this fires, read the ids= line above and use
+                            // the FULL returned string in step 2 — do not reconstruct the prefix.
+                            id != null && ids.any { it.endsWith(id) || it.contains(id) } -> "slot-prefixed"
+                            homeDataId != null &&
+                                ids.any { it.endsWith(homeDataId) || it.contains(homeDataId) } ->
+                                "instance-prefixed"
+                            // Zero nodes or a GraphQL error is INCONCLUSIVE, not a miss. Only a populated
+                            // response with no relationship to either id is grounds to revert.
+                            nodes.isEmpty() -> "inconclusive-empty"
+                            else -> "none"
+                        }
+                        println("GladixDeezer STL-ID match=$match")
+                    }
                 val page = api.page("smarttracklist/$id")
                 println("GladixDeezer PROBE stl=$id rootKeys=${page.keys}")
                 val results = page["results"] as? JsonObject
@@ -200,7 +291,11 @@ class DeezerHomeFeedClient(
                     "GladixDeezer PROBE stl resultsShapes=" +
                         results?.entries?.joinToString { "${it.key}=${shapeOf(it.value)}" }
                 )
-                val raw = (results ?: page).toString()
+                // Dump the WHOLE page, not `results ?: page`: the 2026-09-07 capture returned a
+                // PRESENT-BUT-EMPTY `results`, so the elvis took that branch and printed `{}` while the
+                // top-level `error` and an unexamined `payload` key went unseen. rootKeys was
+                // [error, results, payload]; only `payload` is still uncharacterised.
+                val raw = page.toString()
                 val chunks = raw.chunked(PROBE_LOG_CAP)
                 chunks.take(PROBE_MAX_CHUNKS).forEachIndexed { i, chunk ->
                     println("GladixDeezer PROBE stl raw[${i + 1}/${chunks.size}] $chunk")
