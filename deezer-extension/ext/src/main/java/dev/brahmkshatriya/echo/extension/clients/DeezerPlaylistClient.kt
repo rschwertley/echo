@@ -160,31 +160,49 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
      * question being asked of it. Do not build past the probe.
      */
     private suspend fun smartTracklistTracks(stlId: String): List<Track> {
-        val jsonObject = api.page("smarttracklist/$stlId")
-        val sections = jsonObject["results"]?.jsonObject?.get("sections")?.jsonArray
-            ?: JsonArray(emptyList())
-        val tracks = sections.filterIsInstance<JsonObject>().flatMap { section ->
-            section["items"]?.jsonArray?.filterIsInstance<JsonObject>().orEmpty()
-        }.mapNotNull { item ->
+        // TWO STEPS, AND THE SPLIT IS THE WHOLE DESIGN (see the block above): GraphQL supplies IDS ONLY,
+        // the gateway supplies the RECORDS, and DeezerParser.toTrack — unchanged, shared with every other
+        // track path in this extension — does the parsing.
+        val ids = api.smartTracklistTrackIds(stlId)
+        if (ids.isEmpty()) {
+            println("GladixDeezer DROP smarttracklist=$stlId reason=no-ids-from-graphql")
+            throw Exception("Failed to load tracks for this mix")
+        }
+        // song.getListData returns results.data[] per chunk — the SAME shape playlist.getSongs returns, so
+        // the parse below mirrors loadTracks' rather than inventing a second one.
+        val entries = api.getListData(ids).flatMap { page ->
+            (page["results"] as? JsonObject)?.get("data")?.jsonArray
+                ?.filterIsInstance<JsonObject>().orEmpty()
+        }
+        val baseTracks = entries.mapNotNull { entry ->
             parser.run {
-                val data = item.unwrap()
-                // Song-only: a mix page may also carry artist/album promo tiles, and toTrack() on one of
-                // those would produce a track with no SNG_ID rather than fail loudly.
-                if (data.str("__TYPE__")?.contains("song") != true) null
-                else runCatching { data.toTrack() }.getOrNull()
+                val d = entry.unwrap()
+                // Song-only, same reason as the old traversal: a mix can carry non-song entries and
+                // toTrack on one would yield a track with no SNG_ID rather than fail loudly.
+                if (d.str("__TYPE__")?.contains("song") != true) null
+                else runCatching { d.toTrack() }.getOrNull()
             }
         }.distinctBy { it.id }
-        if (tracks.isEmpty()) {
+        if (baseTracks.isEmpty()) {
+            // Separated from the no-ids case on purpose: "GraphQL gave us nothing" and "GraphQL gave us
+            // ids the gateway would not resolve" are different failures with different next steps.
             println(
-                "GladixDeezer DROP smarttracklist=$stlId reason=no-tracks sections=${sections.size}"
+                "GladixDeezer DROP smarttracklist=$stlId reason=no-tracks-parsed " +
+                    "ids=${ids.size} entries=${entries.size}"
             )
             throw Exception("Failed to load tracks for this mix")
         }
-        return tracks.mapIndexed { index, track ->
+        // A partial resolve is worth seeing but NOT worth failing: the mix plays with what came back.
+        if (baseTracks.size < ids.size) println(
+            "GladixDeezer PARTIAL smarttracklist=$stlId ids=${ids.size} resolved=${baseTracks.size}"
+        )
+        return baseTracks.mapIndexed { index, track ->
             // NEXT only — no "playlist_id". DeezerUtil.log maps that key to ctxtT="playlist_page" plus the
             // id, and this id is not a playlist, so it would report a context Deezer cannot resolve. The
             // else-branch's empty context is the honest value for a context we have no logging name for.
-            track.copy(extras = track.extras + mapOf("NEXT" to tracks.getOrNull(index + 1)?.id.orEmpty()))
+            track.copy(
+                extras = track.extras + mapOf("NEXT" to baseTracks.getOrNull(index + 1)?.id.orEmpty())
+            )
         }
     }
 

@@ -2,11 +2,14 @@ package dev.brahmkshatriya.echo.ui.media
 
 import android.os.Bundle
 import android.view.View
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePaddingRelative
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import dev.brahmkshatriya.echo.R
 import dev.brahmkshatriya.echo.common.models.Artist
+import dev.brahmkshatriya.echo.utils.ui.UiUtils.isTv
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.databinding.FragmentMediaBinding
@@ -14,14 +17,17 @@ import dev.brahmkshatriya.echo.ui.common.UiViewModel
 import dev.brahmkshatriya.echo.ui.common.UiViewModel.Companion.applyBackPressCallback
 import dev.brahmkshatriya.echo.ui.common.UiViewModel.Companion.applyGradient
 import dev.brahmkshatriya.echo.ui.feed.viewholders.MediaViewHolder.Companion.icon
+import dev.brahmkshatriya.echo.ui.feed.viewholders.MediaViewHolder.Companion.placeHolder
 import dev.brahmkshatriya.echo.ui.media.more.MediaMoreBottomSheet
 import dev.brahmkshatriya.echo.ui.playlist.delete.DeletePlaylistBottomSheet
 import dev.brahmkshatriya.echo.utils.ContextUtils.observe
 import dev.brahmkshatriya.echo.utils.Serializer.getSerialized
 import dev.brahmkshatriya.echo.utils.Serializer.putSerialized
+import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadInto
 import dev.brahmkshatriya.echo.utils.image.ImageUtils.loadWithThumb
 import dev.brahmkshatriya.echo.utils.ui.AnimationUtils.setupTransition
 import dev.brahmkshatriya.echo.utils.ui.UiUtils.configureAppBar
+import dev.brahmkshatriya.echo.utils.ui.UiUtils.dpToPx
 import kotlinx.coroutines.launch
 import org.koin.androidx.viewmodel.ext.android.activityViewModel
 import org.koin.androidx.viewmodel.ext.android.viewModel
@@ -53,13 +59,9 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
         val binding = FragmentMediaBinding.bind(view)
         setupTransition(view)
         applyBackPressCallback()
-        // coverContainer.alpha = 1 - offset removed 2026-09-05 with the CollapsingToolbarLayout: the
-        // cover now lives in MediaHeaderAdapter (item 0) and there is no collapse to fade against.
-        // `offset` is still meaningful for the outline — a non-scrolling AppBarLayout reports 0, so the
-        // outline simply stays hidden until something scrolls, which is the behaviour it already had at
-        // rest.
         binding.appBarLayout.configureAppBar { offset ->
             binding.appbarOutline.alpha = offset
+            binding.coverContainer.alpha = 1 - offset
         }
         // Landscape (nav rail) only: the CTL/AppBar header is otherwise rail-unaware, so its
         // content (cover, back button, collapsed + expanded title) sits behind the left rail.
@@ -82,50 +84,32 @@ class MediaFragment : Fragment(R.layout.fragment_media), MediaDetailsFragment.Pa
             )
             true
         }
-        // ⚠️ `if (isTV) appBarLayout.setExpanded(false, false)` REMOVED 2026-09-05, not lost. It existed so
-        // TV opened with the header collapsed and content D-pad-reachable without scrolling past a
-        // full-size cover. Two reasons it goes rather than being replaced:
-        //   1. It is now INERT. With no `scroll` flag on any AppBarLayout child, getTotalScrollRange()
-        //      returns 0 (decoded from the Material 1.14.0 AAR), so there is nothing to collapse. Leaving
-        //      the call would read as active TV handling while doing nothing.
-        //   2. The need it served should now be met by focus-driven scrolling: the cover is a CardView
-        //      with no click listener and is not focusable, while item 0's buttons are — so the first
-        //      D-pad focus lands on a button and RecyclerView scrolls it into view on its own.
-        // ⚠️ (2) WAS REASONED, NOT MEASURED — and as written on 2026-09-05 its premise was wrong: the
-        // AppBarLayout was child 0 of fragment_media.xml, and ViewGroup.onRequestFocusInDescendants
-        // (android-34 sources, :3355-3380) walks mChildren in RAW INDEX ORDER, so the first D-pad focus
-        // landed on the toolbar's navigation icon, not on a button. The 2026-09-06 overlay-toolbar change
-        // reorders that file so the FragmentContainerView is child 0, which makes the claim true. Still
-        // verify on a TV that opening an artist/album lands focus on a button rather than stranding it
-        // above a full-height cover. If it does strand, the fix is a
-        // values-land-television override of @dimen/media_header_cover_size (that folder already exists),
-        // NOT scrollToPosition(1) — position 1 skips item 0 entirely and takes the buttons off screen with
-        // it, which the collapsed header never did.
+        val isTV = requireContext().isTv()
+        if (isTV) binding.appBarLayout.setExpanded(false, false)
 
         observe(viewModel.itemResultFlow) { result ->
             val item = result?.getOrNull()?.item ?: item
-            // ⚠️ NO TOOLBAR TITLE HERE SINCE 2026-09-07, DELIBERATELY. This line read
-            // `binding.toolBar.title = item.title.trim()`. The title now lives in the header content
-            // (MediaHeaderAdapter.Success.bind sets it from the SAME source, state.item.title.trim()), and
-            // having both on screen at rest was redundant — during the reverted overlap build they also
-            // rendered overlapping mid-scroll.
-            // CHECKED BEFORE REMOVING, so this is not an accessibility regression:
-            //   • NOTHING READS IT BACK. `toolBar.title` was write-only across the whole app.
-            //   • IT IS NOT AN ACTION BAR TITLE. There is no setSupportActionBar call anywhere in this
-            //     app, so this MaterialToolbar is a plain view — its title was never announced on screen
-            //     entry, only when focused. No accessibilityPaneTitle or announceForAccessibility exists
-            //     anywhere either, so nothing else depended on it.
-            //   • THE TEXT IS STILL THERE FOR A SCREEN READER. The header's @id/title is a real TextView,
-            //     and ellipsize="end" + maxLines="2" truncate only visually — TalkBack reads the full
-            //     string. A contentDescription on the toolbar would duplicate it, not replace it.
-            // KNOWN COST: once the header scrolls past, the bar is empty and the page has no persistent
-            // label. That is what the old collapsing header prevented. A scroll-driven HANDOFF (toolbar
-            // title fades in only once the header title has passed) is the fix if that reads badly — it
-            // does NOT need the reverted overlap; see the note at MediaDetailsFragment's removed
-            // setupToolbarFade for why the previous attempt's arithmetic cannot simply be restored.
-            // The cover load and the artist 240dp/circle cap moved to MediaHeaderAdapter.Success.bind on
-            // 2026-09-05 — the cover is item 0 now, and a ViewHolder is reused, so both must run per bind
-            // rather than once per result as they did here.
+            binding.toolBar.title = item.title.trim()
+            // ⚠️ NO `else` BRANCH, AND THAT IS SAFE ONLY BECAUSE THIS VIEW IS NOT RECYCLED. The artist
+            // branch mutates `radius` and `matchConstraintMaxWidth` and nothing ever resets them. That
+            // holds today because MediaFragment binds ONE coverContainer per page instance: an album page
+            // gets a fresh view that was never made circular. IT WOULD STOP HOLDING the moment an artist
+            // page and an album page share a fragment instance — the album would inherit the artist's
+            // circle and 240dp cap, and it would present as "album covers are round sometimes", found by
+            // looking rather than by any error.
+            // NOT HYPOTHETICAL AS A SHAPE: while this lived in MediaHeaderAdapter.Success (2026-09-05 to
+            // 2026-09-07) it DID carry an else branch resetting both, because a ViewHolder IS recycled.
+            // That branch was correct there and is unnecessary here; it was dropped with the 2026-09-07
+            // restore rather than lost. If this logic ever moves into a recycled holder again, the reset
+            // must move with it.
+            if (item is Artist) binding.coverContainer.run {
+                val maxWidth = 240.dpToPx(context)
+                radius = maxWidth.toFloat()
+                updateLayoutParams<ConstraintLayout.LayoutParams> {
+                    matchConstraintMaxWidth = maxWidth
+                }
+            }
+            item.cover.loadInto(binding.cover, null, item.placeHolder)
             val gradientScope = viewLifecycleOwner.lifecycleScope
             item.background.loadWithThumb(view) { gradientScope.launch { applyGradient(view, it) } }
         }

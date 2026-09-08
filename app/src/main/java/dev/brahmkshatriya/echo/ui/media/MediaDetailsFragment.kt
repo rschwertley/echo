@@ -3,7 +3,6 @@ package dev.brahmkshatriya.echo.ui.media
 import android.os.Bundle
 import android.view.View
 import androidx.core.view.ViewCompat
-import androidx.recyclerview.widget.RecyclerView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.paging.LoadState
@@ -118,63 +117,28 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
         // from the parent rather than from binding.
         val appBar = requireParentFragment().view?.findViewById<AppBarLayout>(R.id.appBarLayout)
         val scroller = FastScrollerHelper.applyTo(binding.recyclerView, appBar, traceTag = "media")
-        // ⚠⚠ setupToolbarFade REMOVED 2026-09-07, WITH THE OVERLAP. It faded a solid colour in behind the
-        // toolbar and ramped the toolbar title's alpha as the header slid under the bar. IT CANNOT WORK
-        // HERE ANY MORE, for two independent reasons, and neither is a bug to fix:
-        //   1. NOTHING PASSES UNDER THE TOOLBAR. The bar is opaque and the list is positioned below it by
-        //      ScrollingViewBehavior, so there is no rest state to fade FROM and nothing to fade AGAINST.
-        //   2. ITS ARITHMETIC ASSUMED A SHARED ORIGIN. It computed
-        //      `1 - (header.bottom - appBar.bottom) / appBar.height`, which was only meaningful while the
-        //      CoordinatorLayout and the RecyclerView both started at y=0. The RecyclerView now starts
-        //      below the bar, so the two are in different coordinate spaces and the fraction is wrong at
-        //      every scroll position. It also wrapped appBar.background in a LayerDrawable to preserve
-        //      @drawable/bg_toolbar_scrim as the rest state — and that scrim is gone too.
-        // It never worked on device regardless: symptom 4 of the five was that the toolbar title stayed
-        // solid the whole time and doubled with the header title mid-scroll.
-        // [CORRECTED 2026-09-07] This note previously read "OPEN, NOT A DEFECT: MediaFragment still sets
-        // binding.toolBar.title … deliberately left alone". IT NO LONGER DOES — that line was removed the
-        // same day; see the note in its place in MediaFragment. The toolbar carries no title on these
-        // pages, so there is nothing to fade and nothing to double.
-        // STILL OPEN: once the header scrolls past, the bar is empty. A scroll-driven HANDOFF is the fix if
-        // that reads badly, and it does NOT require the overlap — but it cannot reuse the arithmetic above.
-        // What it needs instead: compare the header title's bottom to the RecyclerView's OWN top, entirely
-        // inside the list's coordinate space, rather than comparing a child's bottom to appBar.bottom
-        // across two spaces. findViewByPosition(0) -> findViewById(R.id.title) -> bottom <= 0 means passed.
-        // Null header (recycled away, or not yet bound) means passed, same as the old `header == null` arm.
-        // Needs the same two triggers the old one used — addOnScrollListener AND addOnLayoutChangeListener,
-        // because the item result binds asynchronously and a page can open already at rest with no scroll
-        // event ever firing.
         val uiViewModel by activityViewModel<UiViewModel>()
         applyInsets(viewModel.uiResultFlow, uiViewModel.tvMiniPlayerVisible) {
             val miniExtra = if (isRail && tvMiniPlayerVisible.value) 85.dpToPx(binding.recyclerView.context) else 0
             binding.recyclerView.applyContentInsets(it, 20, 0, 16 + miniExtra)
-            // ⚠⚠ TRIED AND REVERTED 2026-09-07 — NO TOP PADDING HERE, AND THAT IS THE POINT. ⚠⚠
-            // For one build (1085) this RecyclerView spanned the full viewport under a transparent toolbar
-            // (OverlapScrollingViewBehavior on the container in fragment_media.xml) and wrote its own
-            // paddingTop here — `if (isTv()) it.top + toolbarPx else 0`, with a TypedValue lookup of
-            // androidx.appcompat.R.attr.actionBarSize and a matching MediaHeaderAdapter.topInset. Read the
-            // five device symptoms recorded in fragment_media.xml before reviving any of it.
-            //
-            // ⚠️ WHY THE REVERT IS "NO PADDING" AND NOT "PADDING RESTORED TO insets.top + ?actionBarSize",
-            // WHICH IS THE OBVIOUS-SOUNDING FIX AND WOULD BE A NEW DEFECT: with
-            // @string/appbar_scrolling_view_behavior back on the container, ScrollingViewBehavior POSITIONS
-            // the whole view below the AppBarLayout. The toolbar clearance is already paid, once, by
-            // layout. Adding a toolbar-height padding on top of that would inset the content TWICE and
-            // push the cover down by a full bar height. Verified against the pre-overlap file
-            // (e787edd6^): there was no updatePaddingRelative and no toolbarPx at all — only
-            // applyContentInsets(it, 20, 0, 16 + miniExtra) with its third argument 0, exactly as now.
-            //
-            // The `top = 0` on the scroller line below is UNCHANGED and its ORIGINAL reason is true again:
-            // this RecyclerView sits BELOW the AppBarLayout, so it never extends under the status bar and
-            // the track must not be inset for one. (The overlap build kept the same 0 for the opposite
-            // reason. Same value, different justification — do not quote the overlap-era wording back.)
-            //
-            // KNOWN COST OF THE REVERT, ACCEPTED DELIBERATELY: the fast-scroll rail begins below the
-            // toolbar strip again, so the thumb's resting position is not at the very top of the screen.
-            // That is the problem the overlap was built to solve. It is smaller than any one of the five
-            // symptoms the overlap caused — and symptom 5 was that the thumb ended up UNGRABBABLE behind
-            // the toolbar anyway, so the overlap did not actually deliver the benefit it cost five defects
-            // to attempt.
+            // top = 0, disagreeing with the full-bleed screens ON PURPOSE — see applyInsets' `top` param.
+            // ⚠️ THE SAME VALUE HAS NOW CARRIED THREE DIFFERENT JUSTIFICATIONS. Do not quote an older one
+            // back; they are not interchangeable, and two of them are false under the current layout:
+            //   1. PRE-MIGRATION (this, and true again): the RecyclerView sits BELOW the AppBarLayout in a
+            //      CoordinatorLayout — HeaderScrollingViewBehavior positions it there — so it never extends
+            //      under the status bar; the collapsing header does. Adding insets.top here would inset the
+            //      scroll TRACK by a status bar this view does not contain, parking the thumb below the top
+            //      of its own track (the "mid-track at rest" symptom).
+            //   2. OVERLAP BUILD (1085, reverted): the view DID span the full viewport and DID contain the
+            //      status bar, and 0 was kept for the OPPOSITE reason — so the rail spanned the screen with
+            //      the thumb grabbable at the very top. That wording is now false and is gone.
+            //   3. POST-OVERLAP, PRE-RESTORE: the list was positioned below a non-collapsing AppBarLayout,
+            //      so (1)'s reasoning held but the header consumed no scroll.
+            // Reading (1) applies as of the 2026-09-07 CollapsingToolbarLayout restore.
+            // Matches the `0` passed to applyContentInsets on the line above: one view, one answer about
+            // the top inset. There is NO paddingTop written here and there must not be — the toolbar
+            // clearance is paid once, by layout, and writing it again would inset the content twice.
+            // ⚠️ This fixes the thumb's POSITION, not the dead drag — that was the listener order above.
             scroller.applyInsets(binding.recyclerView.context, it, top = 0)
         }
         val lineAdapter = LineAdapter()
@@ -204,16 +168,6 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
                 feedAdapter.withLoading(this)
             ),
         )
-        // ⚠️ KNOWN DEFECT, PRE-EXISTING, NOT INTRODUCED BY THE 2026-09-05 HEADER MIGRATION.
-        // This safe cast is ALWAYS NULL here: fragment_media_details.xml declares a plain
-        // androidx.recyclerview.widget.RecyclerView, not TvAwareRecyclerView. The 2026-06-06 pass that
-        // swapped four layouts to TvAwareRecyclerView covered fragment_home, fragment_library,
-        // fragment_search and fragment_recycler_with_refresh — fragment_media_details was not among them.
-        // So this D-pad nav-rail wiring has never run on artist, album or playlist detail on TV, and the
-        // `as?` swallows it silently.
-        // Deliberately left alone: changing the view class mid-migration would alter measurement and focus
-        // behaviour on the exact screens being changed. Fix it as its own pass, and note there is no
-        // layout-land-television variant of this file, so the swap would be in the single shared layout.
         (binding.recyclerView as? TvAwareRecyclerView)?.navRailView =
             requireActivity().findViewById(R.id.navRailContainer)
         val loadingFlow = viewModel.isRefreshingFlow
@@ -233,5 +187,4 @@ class MediaDetailsFragment : Fragment(R.layout.fragment_media_details) {
             ViewCompat.setNestedScrollingEnabled(binding.recyclerView, true)
         }
     }
-
 }

@@ -15,6 +15,7 @@ import dev.brahmkshatriya.echo.common.models.Radio
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -195,9 +196,43 @@ class DeezerParser(private val session: DeezerSession) {
                 // Fires ONLY on the fallback path: a working family prints nothing. channelFeed prints the
                 // REASON (no-results / no-sections / no-section-parsed); this prints that it happened and
                 // which section it happened to, so the two compose into one story per target.
+                // ⚠️ PATTERN, NAMED ONCE HERE RATHER THAN RE-DISCOVERED A FIFTH TIME:
+                //   runCatching CATCHES Throwable. CancellationException IS a Throwable. So EVERY
+                //   runCatching around suspending work LAUNDERS CANCELLATION INTO FAILURE.
+                // The caller is then told its work failed when it was merely cancelled, and whatever the
+                // failure path does — fall back, log, report an error, resume a continuation — runs against
+                // a scope that is already going away. Four instances in this project:
+                //   1. ImageUtils.tryWithSuspend        FIXED — rethrow ahead of the generic catch.
+                //   2. PlayerBitmapLoader:31            FIXED — was laundering a cancellation into
+                //                                       error("Failed to load bitmap…"), i.e. telling Media3
+                //                                       the load FAILED when it was CANCELLED.
+                //   3. CoroutineUtils.futureCatching    STILL CATCHING at 2026-09-07, deliberately — see the
+                //                                       note there; a naive rethrow leaves the SettableFuture
+                //                                       never completed and hangs Media3, so it needs the
+                //                                       future CANCELLED, not the exception rethrown.
+                //   4. this one                         FIXED 2026-09-07, below.
+                // If you write runCatching around a suspend call, decide what cancellation should do BEFORE
+                // you write the catch. "Nothing" is never the answer.
                 more = if (block != null && !target.isNullOrBlank()) PagedData.Single<Shelf> {
                     val fetched = runCatching { block(target) }
                         .onFailure { e ->
+                            // ⚠️ REthrow BEFORE THE LOG AS WELL AS BEFORE THE FALLBACK, and the log ordering
+                            // is not incidental. This fetch is cancelled ROUTINELY, not exceptionally: the
+                            // exception seen on device is kotlinx.coroutines' internal
+                            // ChildCancelledException ("Child of the scoped flow was cancelled",
+                            // flow/internal/FlowExceptions.kt:9, coroutines 1.11.0), thrown by
+                            // ChannelFlowTransformLatest.flowCollect at flow/internal/Merge.kt:25 —
+                            // transformLatest's cancel-the-PREVIOUS-transform path, verbatim. flowScope
+                            // survives it because FlowCoroutine.childCancelled returns true for exactly
+                            // this cause (flow/internal/FlowCoroutine.kt:53-56), so only the in-flight work
+                            // dies. On this screen family that is the combineTransformLatest churn.
+                            // CONSEQUENCE FOR ANYONE READING OLD LOGS: EVERY
+                            // `reason=threw:ChildCancelledException` LINE RECORDED BEFORE 2026-09-07 IS A
+                            // FALSE FAILURE REPORT. The fetch was not failing and Deezer was not at fault —
+                            // the page was being replaced mid-flight and the 12-item re-wrap was served in
+                            // place of the 25 items the fetch would have returned. Do not treat those lines
+                            // as evidence of anything about /channels/module.
+                            if (e is CancellationException) throw e
                             println(
                                 "GladixDeezer FALLBACK target=$target section=\"$name\" " +
                                     "reason=threw:${e::class.simpleName} msg=${e.message?.take(120)}"

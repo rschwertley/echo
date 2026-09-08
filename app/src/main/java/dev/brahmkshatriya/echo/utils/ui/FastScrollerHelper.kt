@@ -153,6 +153,35 @@ object FastScrollerHelper {
      * exactly, so the six full-bleed call sites are unchanged by construction rather than by testing.
      * [traceTag] labels the temporary GladixScroll lines; REMOVE WITH THE TRACE.
      */
+    /**
+     * ⚠️ THE COMPOSITE PATH WENT LIVE AGAIN ON 2026-09-07 AND HAS NOT RUN SINCE 4c4fb267. READ THIS
+     * BEFORE FILING A THUMB DEFECT ON ARTIST/ALBUM/PLAYLIST DETAIL.
+     *
+     * [appBar] makes PixelFastScrollViewHelper's arithmetic composite: appBarRange
+     * (appBar.totalScrollRange) and appBarConsumed (-verticalOffset, from an OnOffsetChangedListener) are
+     * added to the list's own extent and offset. BOTH TERMS ARE ZERO WHENEVER NO CHILD OF THE AppBarLayout
+     * CARRIES A `scroll` FLAG — AppBarLayout.getTotalScrollRange() breaks its loop at i=0 and returns
+     * Math.max(0, 0) = 0 (decoded from the 1.14.0 AAR) — so on a non-collapsing screen the whole thing
+     * reduces to the flat-screen path exactly.
+     *
+     * That is what artist/album/playlist detail did between the 2026-09-05 header migration (5e4b9413) and
+     * the 2026-09-07 CollapsingToolbarLayout restore: no scroll flags, both terms 0, reduced path. The
+     * restore puts a CTL back, so TOTALSCROLLRANGE IS NON-ZERO AGAIN AND THE FULL ARITHMETIC RETURNS IN ONE
+     * STEP, WITH NO CODE CHANGE HERE. Nothing in this file or in PixelFastScrollViewHelper was edited for
+     * it; the terms simply stopped being 0.
+     * SO: IF THE THUMB MISBEHAVES ON THOSE PAGES AFTER 2026-09-07, READ IT AS THE COMPOSITE PATH RETURNING,
+     * NOT AS A NEW DEFECT. The suspect is this arithmetic, which last ran in anger under 4c4fb267.
+     *
+     * IT SHOULD BEHAVE BETTER THAN IT DID THEN, NOT WORSE — three fixes landed after 4c4fb267 and all are
+     * still in place: the matched-span fix, the pre-draw rest hook, and the span-aware revert. None of them
+     * was touched by the migration or by the restore, so the composite path returns onto a repaired base
+     * rather than the one that produced the original symptoms.
+     *
+     * KNOWN AND ACCEPTED, NOT A DEFECT: with a collapsing header the rail can only span the RecyclerView,
+     * which HeaderScrollingViewBehavior positions BELOW the header — so the thumb rests below the header
+     * and is not grabbable until the header scrolls away. That trade was made deliberately at the restore;
+     * see the note in fragment_media.xml before trying to "fix" it.
+     */
     fun applyTo(
         view: RecyclerView,
         appBar: AppBarLayout? = null,

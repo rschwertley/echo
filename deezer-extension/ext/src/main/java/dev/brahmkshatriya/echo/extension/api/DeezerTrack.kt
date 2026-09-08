@@ -3,6 +3,8 @@ package dev.brahmkshatriya.echo.extension.api
 import dev.brahmkshatriya.echo.extension.DeezerApi
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.add
 
 class DeezerTrack(private val deezerApi: DeezerApi) {
 
@@ -15,6 +17,58 @@ class DeezerTrack(private val deezerApi: DeezerApi) {
             np = true
         )
     }
+
+    /**
+     * Full gateway records for a list of track ids, chunked. Response is `results.data[]` per call, the
+     * SAME shape playlist.getSongs returns, so DeezerParser.toTrack consumes it unchanged.
+     *
+     * ⚠️ PARAMETER IS `SNG_IDS`, UPPERCASE, AND THE PROJECT RECORD CONTRADICTS ITSELF ON THIS.
+     * One summary records the open-source verification as lowercase `{"sng_ids":[...]}`; a later one
+     * records the shipped call as uppercase SNG_IDS. NEITHER could be checked against this tree, because
+     * NO song.getListData CALL EXISTED HERE AT ALL before 2026-09-07 — the "shipped re-resolve" both
+     * summaries describe is not in the code. Settled by reading the source again (deezer-py, gw.py):
+     *     def get_tracks(self, sng_ids):
+     *         body = self.api_call('song.getListData', {'SNG_IDS': sng_ids})
+     * UPPERCASE, ids passed as a list, response read at data[] under results. Use that.
+     *
+     * ⚠️ AND DO NOT LEAN ON "gw-light PARAMS ARE CASE-INSENSITIVE" — NOBODY VERIFIED IT. This file is
+     * itself mixed (deezer.pageTrack takes lowercase `sng_id`; favorite_song.add/remove take uppercase
+     * `SNG_ID`) and both work — but that is equally consistent with each METHOD having its own fixed
+     * casing, which is the likelier reading. Match the verified casing per method; do not generalise.
+     *
+     * ⚠️ THE CHUNK SIZE IS STILL UNVERIFIED — BUT IT IS NOT ARBITRARY. "Safe batch limit to be
+     * verified" was left open by an earlier session and is still open: deezer-py sends the WHOLE list in
+     * one call with no slicing, so there is no known upper bound and no evidence one exists. Nothing here
+     * probed the ceiling either, and this chunking is a NO-OP for the case it was built for (a
+     * smarttracklist is ~40 tracks — one call), so the multi-chunk path ships untested in anger. If a large
+     * list ever fails, this number is the first suspect and the answer is a capture, not a guess.
+     * WHAT IT DOES HAVE IS FIELD HISTORY: chunked(100) SHIPPED in d221f4c2 and ran until 04c67817. This is
+     * the same number re-landing, not a fresh guess.
+     *
+     * ⚠️ AND THE HISTORY IS WHY THIS FUNCTION LOOKS NEW BUT IS NOT. A song.getListData wrapper existed
+     * before: added by d221f4c2 (canonical re-resolve for the playlist wrong-artist bug) and DELETED by
+     * 04c67817 when the FALLBACK graft superseded it. Two project summaries describe it as shipped and
+     * NEITHER records the deletion — which is why "match the shipped call shape" had nothing in the tree to
+     * match when this was rebuilt. If a summary describes code you cannot find, check whether it was
+     * removed rather than assuming it never landed.
+     *
+     * ⚠️ THE STRONGEST EVIDENCE FOR THE GITHUB-VERIFICATION RULE IS THIS FUNCTION. Two people, a month
+     * apart, with no access to each other's working notes, went to deezer-py's gw.py and came back with
+     * the SAME two answers: SNG_IDS uppercase, and chunked at 100. The deleted d221f4c2 version carried
+     * the comment "SNG_IDS is UPPERCASE (confirmed vs deezer-py)"; this one was derived the same way after
+     * the summaries were found to contradict each other. Same source, same answer, twice — while four
+     * traffic-capture attempts on the official app have produced nothing. Read the source.
+     */
+    suspend fun getListData(ids: List<String>): List<JsonObject> =
+        ids.chunked(GET_LIST_DATA_CHUNK).map { chunk ->
+            deezerApi.callApi(
+                method = "song.getListData",
+                paramsBuilder = {
+                    putJsonArray("SNG_IDS") { chunk.forEach { add(it) } }
+                },
+                np = true
+            )
+        }
 
     suspend fun getTracks(userId: String): JsonObject {
         return deezerApi.callApi(
@@ -45,5 +99,10 @@ class DeezerTrack(private val deezerApi: DeezerApi) {
                 put("SNG_ID", id)
             }
         )
+    }
+
+    companion object {
+        // See getListData's note: self-imposed, not a discovered limit.
+        private const val GET_LIST_DATA_CHUNK = 100
     }
 }

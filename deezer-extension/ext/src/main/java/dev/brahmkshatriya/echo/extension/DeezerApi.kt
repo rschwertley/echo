@@ -536,6 +536,8 @@ class DeezerApi(private val session: DeezerSession) {
 
     suspend fun track(id: String): JsonObject = deezerTrack.track(id)
 
+    suspend fun getListData(ids: List<String>): List<JsonObject> = deezerTrack.getListData(ids)
+
     suspend fun getTracks(): JsonObject = deezerTrack.getTracks(userId)
 
     suspend fun addFavoriteTrack(id: String) = deezerTrack.addFavoriteTrack(id)
@@ -692,6 +694,68 @@ class DeezerApi(private val session: DeezerSession) {
             .headers(Headers.headersOf("Authorization", "Bearer $jwt", "Content-Type", "application/json"))
             .build()
         return decodeJson(clientNP.newCall(pipeRequest).await().body.string())
+    }
+
+    /**
+     * Track ids for one smarttracklist, over GRAPHQL. NOT the gateway — page.get has no smarttracklist
+     * page type ("Page type smarttracklist does not exist", measured 2026-09-07), which is why this looks
+     * nothing like its neighbours.
+     *
+     * QUERY VERIFIED FROM OPEN SOURCE, not from traffic capture: music-assistant/deezer-python-gql,
+     * queries/get_smart_tracklist.graphql — variables $smartTracklistId: String!, $first: Int = 50,
+     * $after: String; tracks at data.smartTracklist.tracks.edges[].node, confirmed twice (the .graphql
+     * document and the generated model deezer_python_gql/generated/get_smart_tracklist.py, whose aliases
+     * are "smartTracklist" and "pageInfo"). Fragments are inlined to the ONE field we consume.
+     *
+     * ⚠️ WE ASK FOR `node { id }` AND NOTHING ELSE, DELIBERATELY. TrackFields carries no MD5_ORIGIN, no
+     * FILESIZE_* and no TRACK_TOKEN, so a Track built from it renders correctly and CANNOT PLAY. The ids
+     * go to song.getListData and the existing DeezerParser.toTrack does the rest — see the block note on
+     * DeezerPlaylistClient.smartTracklistTracks before changing this selection set.
+     *
+     * WHICH ID: the SLOT form (data.SMARTTRACKLIST_ID, e.g. "inspired-by-1"), NOT the compound instance id
+     * (data.ID). Measured 2026-09-07 — `me { madeForMe }` returned
+     * [6563868601, inspired-by-1 … inspired-by-5, new-releases], so the API addresses these by slot and
+     * DeezerParser.toSmartTracklist already stores the right one. The leading bare-numeric id is the Flow
+     * node (the user id), a different type in the same union; it is not handled here.
+     *
+     * JWT PER CALL, NOT CACHED. The token's TTL is ~6 minutes, so a cache needs expiry tracking AND a
+     * 401-refresh path — and the 401 path has to exist either way, so the cache adds a second mechanism
+     * without removing the first. Opening a mix is one user action; one extra round-trip is invisible
+     * there. If a second pipe consumer appears, factor a cached holder THEN. Mirrors `lyrics` below.
+     */
+    suspend fun smartTracklistTrackIds(id: String, first: Int = 100): List<String> {
+        val request = Request.Builder()
+            .url("https://auth.deezer.com/login/arl?jo=p&rto=c&i=c")
+            .post(RequestBody.EMPTY)
+            .headers(Headers.headersOf("Cookie", "arl=$arl; sid=$sid"))
+            .build()
+        val jwt = decodeJson(clientNP.newCall(request).await().body.string())["jwt"]
+            ?.jsonPrimitive?.content
+        val params = encodeJson {
+            put("operationName", "GetSmartTracklist")
+            put("query", $$"query GetSmartTracklist($smartTracklistId: String!, $first: Int = 50) { smartTracklist(smartTracklistId: $smartTracklistId) { id tracks(first: $first) { edges { node { id } } } } }")
+            putJsonObject("variables") {
+                put("smartTracklistId", id)
+                put("first", first)
+            }
+        }
+        val pipeRequest = Request.Builder()
+            .url("https://pipe.deezer.com/api")
+            .post(params.toRequestBody())
+            .headers(Headers.headersOf("Authorization", "Bearer $jwt", "Content-Type", "application/json"))
+            .build()
+        val body = decodeJson(clientNP.newCall(pipeRequest).await().body.string())
+        // GraphQL reports failures in a top-level `errors` array with HTTP 200 and a null data field — the
+        // same shape of trap as the gateway's `error` key, so it is read rather than left to surface as an
+        // empty list. Same house rule as callApi's GATEWAY-ERROR line: a refusal must not look like "none".
+        body["errors"]?.let {
+            println("GladixDeezer STL-GQL id=$id errors=${it.toString().take(300)}")
+        }
+        val edges = body["data"]?.jsonObject?.get("smartTracklist")?.jsonObject
+            ?.get("tracks")?.jsonObject?.get("edges") as? JsonArray
+        return edges?.filterIsInstance<JsonObject>()
+            ?.mapNotNull { (it["node"] as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull }
+            .orEmpty()
     }
 
     suspend fun lyrics(id: String): JsonObject {

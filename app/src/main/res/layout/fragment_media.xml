@@ -7,89 +7,138 @@
     android:layout_height="match_parent"
     android:fitsSystemWindows="true">
 
-    <!-- ⚠️ NON-COLLAPSING BY DESIGN (2026-09-05). Do not reintroduce a CollapsingToolbarLayout here.
-         WHY: the fast-scroll rail is drawn into the RecyclerView's ViewGroupOverlay (FastScroller's
-         constructor calls mView.getOverlay().add(...) three times), so the rail can only ever span the
-         RecyclerView. Under a CollapsingToolbarLayout, HeaderScrollingViewBehavior sized the RecyclerView
-         to `viewport - collapsedHeight` and positioned it BELOW the header, so the rail began ~633px down
-         the screen and the thumb rested there at the top of its own track. Four models were built hunting
-         a displaced thumb before a rest: capture showed offset=0 padTop=0 thumbFrac=0.000 — it had always
-         been at the top of a track that started too low. Drawing the rail higher dies on touch delivery:
-         a RecyclerView.OnItemTouchListener only sees events delivered to the RecyclerView.
-         With no `scroll` flag on any child, AppBarLayout.getTotalScrollRange() breaks its loop at i=0 and
-         returns Math.max(0, 0) = 0 (decoded from the 1.14.0 AAR), so PixelFastScrollViewHelper's composite
-         terms are both 0 and the arithmetic reduces to the flat-screen path exactly — the same reduction
-         Home already gets. The cover moved into MediaHeaderAdapter (item 0); the
-         TITLE did not follow it there - it is set on the toolbar instead (MediaFragment,
-         binding.toolBar.title).
-         DELIBERATELY GIVEN UP: the pinned collapsed title and the cover parallax/fade.
+    <!-- ⚠⚠ COLLAPSING HEADER RESTORED 2026-09-07, REVERTING THE 2026-09-05 MIGRATION (5e4b9413). ⚠⚠
+         This file is the pre-migration structure checked out verbatim from 5e4b9413^. The record below is
+         carried forward BY HAND because it has no other copy — what is still true is kept, what the restore
+         makes obsolete is MARKED OBSOLETE rather than deleted, so that nothing here reads as current
+         guidance when it is not.
 
-         paddingBottom="49dp" IS NOT MISSING — it was DELETED, not lost. It was residue of the CTL's
-         circular measurement dependency (AppBarLayout and CTL both wrap_content, CTL height scaling ~1.5x
-         paddingBottom rather than 1:1, cover size and expanded-title space contending through one knob),
-         settled empirically at 43dp on 2026-06-15 after three uiautomator dumps and later carried at 49dp.
-         With the CTL gone none of those inputs exist and the value has no justification HERE.
-         (!) BUT IT WAS DOING A SECOND JOB, AND THIS NOTE ORIGINALLY MISSED IT (corrected 2026-09-06): the
-         padding sat below the cover, so its visual effect was the cover-to-buttons gap, which is a design
-         element and outlived the CTL. Deleting it flattened that gap to 0 and was reported from device as
-         a regression on artist, album and playlist. The gap is now rebuilt where it belongs - as
-         paddingBottom on the cover wrapper in item_media_header.xml, at 49dp + the RecyclerView's 8dp
-         paddingTop = 57dp, since that 8dp now falls above the cover instead of below it. Read the note
-         there before touching either number. What stays true is the narrow claim: do not restore 49dp TO
-         THIS FILE, where nothing measures against it any more. The same applies to the 2026-06-13 title work — titleCollapseMode fade,
-         maxLines 2, expandedTitleMarginEnd, and the expandedTitleEllipsize attribute that does not exist in
-         Material 1.14.0 — all CTL attributes with no successor here. -->
-    <!-- ⚠⚠ TRIED AND REVERTED 2026-09-07 — DO NOT RE-PROPOSE THE OVERLAP AS AN OBVIOUS WIN. ⚠⚠
-         For one build (1085) the FragmentContainerView carried
-         app:layout_behavior="dev.brahmkshatriya.echo.utils.ui.OverlapScrollingViewBehavior" instead of
-         @string/appbar_scrolling_view_behavior, so the list spanned the full viewport and the artwork
-         scrolled under a transparent, scrimmed toolbar. The goal was real and narrow: the fast-scroll rail
-         is drawn into the RecyclerView's own overlay, so a RecyclerView that starts below the toolbar has
-         a rail that starts below the toolbar, and the thumb sits in a strip the user cannot reach.
-         IT PRODUCED FIVE DEFECTS AT ONCE, all reported from device on album and artist:
+         WHAT WAS TRADED, KNOWINGLY: under a CollapsingToolbarLayout the fast-scroll rail can only span the
+         RecyclerView, and HeaderScrollingViewBehavior sizes that view to `viewport - collapsedHeight` and
+         positions it BELOW the header. So the rail begins below the header and THE THUMB IS NOT GRABBABLE
+         until the header has scrolled away. That is the accepted cost of this restore, not a defect to
+         re-fix. Four models were built hunting a "displaced" thumb before it was understood as a rest
+         position: the capture read offset=0 padTop=0 thumbFrac=0.000 — the thumb had always been at the
+         top of a track that started too low. Drawing the rail higher does not work either: a
+         RecyclerView.OnItemTouchListener only sees events delivered to the RecyclerView.
+
+         ⚠️ OBSOLETE AS OF THIS RESTORE, KEPT SO IT IS NOT RE-DERIVED: the migration-era claim that
+         "AppBarLayout.getTotalScrollRange() breaks its loop at i=0 and returns Math.max(0, 0) = 0 (decoded
+         from the 1.14.0 AAR), so PixelFastScrollViewHelper's composite terms are both 0 and the arithmetic
+         reduces to the flat-screen path exactly". That was TRUE ONLY WHILE NO CHILD CARRIED A `scroll`
+         FLAG. The CollapsingToolbarLayout below does, so totalScrollRange is non-zero again and BOTH
+         composite terms (appBarRange, appBarConsumed) go live with no code change. The decode itself
+         remains correct and is worth keeping: it is why the terms read 0 on every non-collapsing screen.
+         See the note at FastScrollerHelper.applyTo.
+
+         ⚠️ OBSOLETE: "the cover moved into MediaHeaderAdapter (item 0); the TITLE did not follow it there
+         — it is set on the toolbar instead". Both halves are reversed now. The CTL owns the cover
+         (coverContainer/cover below, loaded by MediaFragment), and the toolbar title is the COLLAPSED title
+         with the CTL's expandedTitleTextAppearance providing the expanded one. ONE OWNER EACH — that is the
+         hybrid this restore had to avoid: a CTL with the header content still drawing a title renders the
+         name twice, and a CTL with the toolbar title still deleted leaves the collapsed bar nameless.
+
+         RESTORED WITH IT, DELIBERATELY: MediaFragment's `if (isTV) binding.appBarLayout.setExpanded(false,
+         false)`. That decision was dead while the header could not collapse; it is live again.
+
+         ── paddingBottom="49dp" ON THE ConstraintLayout BELOW — READ BEFORE TOUCHING ──
+         It is back, and it is the ONLY owner of the cover-to-buttons gap again. History, because it has
+         been got wrong twice: it is residue of the CTL's circular measurement dependency (AppBarLayout and
+         CTL both wrap_content, CTL height scaling ~1.5x paddingBottom rather than 1:1, cover size and
+         expanded-title space contending through one knob), settled empirically at 43dp on 2026-06-15 after
+         three uiautomator dumps and later carried at 49dp. The migration deleted it on the reasoning "the
+         CTL is gone, none of those inputs exist" — correct as far as it went, but IT MISSED THAT THE
+         PADDING WAS DOING A SECOND JOB: it sat below the cover, so its visual effect was the
+         cover-to-buttons gap, which is a design element that outlived the CTL. Deleting it flattened that
+         gap to 0 and was reported from device as a regression on artist, album and playlist. It was then
+         rebuilt in item_media_header.xml as 57dp on the cover wrapper, later split to 4dp + 22dp.
+         ⚠️ THAT REBUILD IS NOW DELETED, and it must stay deleted: with 49dp back here, keeping the wrapper
+         padding as well would DOUBLE-COUNT the gap. One owner.
+
+         ⚠️ DO NOT RE-PROPOSE THE OVERLAP. TRIED AND REVERTED, 2026-09-06 to 2026-09-07 (e787edd6 ->
+         c9649426). For one build the FragmentContainerView carried a custom OverlapScrollingViewBehavior
+         instead of @string/appbar_scrolling_view_behavior so the list spanned the full viewport and the art
+         scrolled under a transparent, scrimmed toolbar — an attempt to get the rail to span the screen
+         WITHOUT a collapsing header. It produced FIVE defects at once, all reported from device on album
+         and artist:
            1. The cover was CLIPPED AT THE TOP — its upper edge ran under the status bar.
-           2. appbarOutline drew a HORIZONTAL LINE ACROSS THE MIDDLE OF THE ARTWORK (it is anchored to the
-              AppBarLayout's bottom, which now fell inside the cover instead of above it).
+           2. appbarOutline drew a HORIZONTAL LINE ACROSS THE MIDDLE OF THE ARTWORK (anchored to the
+              AppBarLayout's bottom, which fell inside the cover instead of above it).
            3. The scrim DID NOT VISIBLY DARKEN ANYTHING — back arrow and overflow floated over bright art.
-           4. Mid-scroll the title rendered TWICE AND OVERLAPPING, once in the header content and once in
-              the toolbar: the scroll-driven toolbar fade never worked and the toolbar title was solid the
-              whole time.
+           4. Mid-scroll the title rendered TWICE AND OVERLAPPING, header content and toolbar: the
+              scroll-driven fade never worked and the toolbar title was solid throughout.
            5. The thumb RESTED BEHIND THE TOOLBAR and could not be grabbed — the exact problem the overlap
               existed to solve, reintroduced one layer up.
-         The rail starting below the toolbar strip — what this was meant to fix — is a SMALLER problem than
-         any single one of those.
-         ⚠️ WHY IT IS NOT A ONE-ATTRIBUTE WIN: the overlap needs the outline anchor, the scrim, the
-         scroller padding, the cover's top inset and the title fade ALL SOLVED TOGETHER. Each is load-bearing
-         and none of them was solved. Anyone reviving this should treat it as five pieces of work with one
-         switch, not as a layout_behavior swap — and should start from the fact that symptom 5 means the
-         motivating benefit did not even materialise.
-         KEPT FROM THAT WORK, because none of it was implicated: the media-header migration itself, the
-         title in the header content, and the 4dp/22dp spacing in item_media_header.xml.
-         REMOVED WITH IT: OverlapScrollingViewBehavior (class deleted, plus its -keep rule in
-         proguard-rules.pro and its anchor in verifyExtensionAbi's `critical` list, 15 anchors -> 14),
-         android:background="@drawable/bg_toolbar_scrim" on the AppBarLayout below, liftOnScroll="false",
-         stateListAnimator="@null", the RecyclerView top padding and MediaDetailsFragment.setupToolbarFade.
-         The scrim, the lift suppression and the declaration order below existed ONLY to make the overlap
-         readable/touchable; with the toolbar opaque and above the content again they have no job, and the
-         drawable @drawable/bg_toolbar_scrim is left in the tree unreferenced for whoever tries this next.
-         ⚠️ AND THE DECLARATION ORDER IS PART OF THE REVERT. For that one build the FragmentContainerView
-         was declared FIRST so the AppBarLayout would win CoordinatorLayout's reverse-order hit test.
-         Restoring it to LAST also restores TV initial focus to the toolbar's navigation icon
-         (ViewGroup.onRequestFocusInDescendants walks children in RAW INDEX ORDER, unlike directional
-         D-pad and FOCUS_FORWARD which are geometric and were never affected). That is the pre-1085
-         behaviour; the note claiming first focus should land on a button described the overlap build. -->
+         It needs the outline anchor, the scrim, the scroller padding, the cover inset and the title fade
+         ALL SOLVED TOGETHER; none of them was. And symptom 5 means it never delivered the benefit it cost
+         five defects to attempt. Anyone reviving it is starting a five-part piece of work, not flipping an
+         attribute. @drawable/bg_toolbar_scrim was deleted with it.
+
+         THE 2026-06-13 TITLE WORK IS BACK, BUT NOT ALL IN THIS FILE: expandedTitleMarginEnd and maxLines
+         are inline attributes below; titleCollapseMode=fade comes via style="@style/EchoCollapsingBar"
+         (styles.xml:41-43), not from a line here — do not add it inline, and do not conclude it is missing.
+         `expandedTitleEllipsize` is genuinely absent and must stay absent: it does not exist in Material
+         1.14.0 (confirmed by inspecting the AAR's attrs.xml directly, not from documentation).
+         No contentScrim is set here and none ever was: @style/EchoCollapsingBar never had one, and the only
+         contentScrim line in the project is a commented-out item in @style/TopCollapsingBar. The multi-line
+         title overlapping the cover during expansion is standard Material 3 CTL behaviour with no
+         contentScrim — recorded as such at the time, and unchanged by this restore. -->
     <com.google.android.material.appbar.AppBarLayout
         android:id="@+id/appBarLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:fitsSystemWindows="true">
 
-        <com.google.android.material.appbar.MaterialToolbar
-            android:id="@+id/toolBar"
-            style="@style/Toolbar"
-            android:background="@android:color/transparent"
-            app:menu="@menu/more_menu"
-            tools:title="@tools:sample/full_names" />
+        <!-- ⚠️ expandedTitleMarginBottom BELOW DELIBERATELY SUPERSEDES THE STYLE. @style/TopCollapsingBar
+             (styles.xml:34, inherited through @style/EchoCollapsingBar) sets it to 20dp; the inline 14dp
+             here is the tuned value and wins. READING styles.xml ALONE WOULD SAY THE 20 → 14 TUNING WAS
+             LOST — it was not, it lives in this file. The same pass that dropped it also raised
+             @dimen/media_header_cover_size 160 → 220 → 250dp, and all of these contend through the CTL's
+             circular measurement (see the paddingBottom note above), so changing one without the others
+             re‑opens a tuning that took three uiautomator dumps to settle.
+             expandedTitleMarginStart/End (24dp) and titleCollapseMode=fade come from the style and are NOT
+             overridden here; do not add them inline. -->
+        <com.google.android.material.appbar.CollapsingToolbarLayout
+            android:id="@+id/collapsingToolbar"
+            style="@style/EchoCollapsingBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:expandedTitleMarginBottom="14dp"
+            app:expandedTitleMarginEnd="24dp"
+            app:expandedTitleTextAppearance="@style/MediaHeaderTitle"
+            app:maxLines="2">
+
+            <androidx.constraintlayout.widget.ConstraintLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:paddingTop="16dp"
+                android:paddingBottom="49dp">
+
+                <androidx.cardview.widget.CardView
+                    android:id="@+id/coverContainer"
+                    style="@style/ItemCover"
+                    tools:ignore="MissingConstraints">
+
+                    <ImageView
+                        android:id="@+id/cover"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:importantForAccessibility="no"
+                        tools:ignore="ImageContrastCheck" />
+
+                </androidx.cardview.widget.CardView>
+
+            </androidx.constraintlayout.widget.ConstraintLayout>
+
+
+            <com.google.android.material.appbar.MaterialToolbar
+                android:id="@+id/toolBar"
+                style="@style/Toolbar"
+                android:background="@android:color/transparent"
+                app:menu="@menu/more_menu"
+                tools:title="@tools:sample/full_names" />
+
+        </com.google.android.material.appbar.CollapsingToolbarLayout>
 
     </com.google.android.material.appbar.AppBarLayout>
 
