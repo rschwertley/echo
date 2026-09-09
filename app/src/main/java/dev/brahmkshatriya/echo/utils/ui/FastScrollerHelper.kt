@@ -172,6 +172,14 @@ object FastScrollerHelper {
      * SO: IF THE THUMB MISBEHAVES ON THOSE PAGES AFTER 2026-09-07, READ IT AS THE COMPOSITE PATH RETURNING,
      * NOT AS A NEW DEFECT. The suspect is this arithmetic, which last ran in anger under 4c4fb267.
      *
+     * ✅ CONFIRMED CLEAN ON DEVICE, BUILD 1088 (2026-09-08) — THIS IS NO LONGER AN OPEN RISK. Artist and
+     * album collapse correctly (cover at top, name below it, name shrinking into the toolbar on scroll, one
+     * cover), the thumb rests below the header exactly as the trade predicted, and HOLDING A STILL FINGER
+     * MID-DRAG PRODUCES NO FLASHING. That last one is the specific thing that had never been tested with the
+     * composite live: the matched-span fix holds with appBarRange/appBarConsumed non-zero. Keep the
+     * paragraphs above — they are still the right reading if a NEW symptom appears — but do not treat the
+     * reactivation itself as unverified.
+     *
      * IT SHOULD BEHAVE BETTER THAN IT DID THEN, NOT WORSE — three fixes landed after 4c4fb267 and all are
      * still in place: the matched-span fix, the pre-draw rest hook, and the span-aware revert. None of them
      * was touched by the migration or by the restore, so the composite path returns onto a repaired base

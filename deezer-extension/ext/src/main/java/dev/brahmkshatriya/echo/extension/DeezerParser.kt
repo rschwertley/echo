@@ -75,6 +75,33 @@ class DeezerParser(private val session: DeezerSession) {
      * channelFeed and every caller for a case not observed, and the navigation stack is the user's exit.
      * If a loop is ever seen, the guard belongs at channelFeed — one place, with the target in hand.
      *
+     * [OBSERVED 2026-09-08 — THE "UNOBSERVED CASE" CAVEAT ABOVE NOW HAS A TRACED EXAMPLE, AND IT TERMINATES.]
+     * The deepest chain reachable from Home was walked end to end on device:
+     *   Home "New releases for you" (12 items)
+     *     → arrow → /channels/new, a SIX-SECTION landing page (Fresh picks of the week / New releases for
+     *       you / Popular / Dig Deeper / Rock / Movies & series)
+     *     → its own "New releases for you" row (the same 12)
+     *     → arrow → a page with ONE carousel, "New releases for you", 15+ items, first 12 identical
+     *     → nothing further.
+     * THE INNER SECTION'S TARGET POINTS AT THE MODULE, NOT BACK AT /channels/new. The self-referential
+     * cycle this note worried about does not exist in Deezer's data on this path, and the chain ends by
+     * TERMINATING CONDITION 1 — the last page's sections carry no target, so `more` takes its else branch
+     * and emits Shelf.Item with no arrow.
+     * SO NO DEPTH GUARD IS NEEDED, and the reasoning for leaving it unguarded is now evidence rather than
+     * assumption. Four terminating conditions exist in this file and channelFeed between them: (1) section
+     * has no target; (2) section parses to zero items and is dropped by filterNotNull; (3) the fetch fails
+     * or returns empty and falls back to the re-wrap; (4) the fetch returns exactly ONE section and is
+     * flattened to Shelf.Item. Only a MULTI-section page whose sections carry targets can descend at all,
+     * and the one such page reachable from Home descends exactly two levels and stops.
+     * ⚠️ IF A TRUE CYCLE IS EVER SEEN, none of this changes where the guard goes — channelFeed, one
+     * place, with the target in hand. What changed is that "not observed" is now "observed and bounded".
+     * ⚠️ AND THE FLATTENING MADE RECURSION *LESS* LIKELY, NOT MORE, which is worth stating because the
+     * intuition runs the other way. Flattening IS terminating condition (4): it applies only to a
+     * SINGLE-section fetch and converts that page's contents to Shelf.Item, which carry no `more`, so such
+     * a page TERMINATES AT DEPTH 1 exactly as the arrow's original spec said it should. Module rows can no
+     * longer recurse at all. The multi-section branch is unchanged, so it removes recursive paths without
+     * adding any.
+     *
      * ⚠️ THE ARROW NOW FETCHES WHEN THE SECTION CARRIES A `target`, AND RE-WRAPS WHEN IT DOES NOT.
      * Section targets are `/channels/module/<uuid>` — exactly the shape api.page(target.substringAfter("/"))
      * consumes, the same resolution toChannel/channelFeed already use for ITEM-level targets. Confirmed
@@ -246,7 +273,115 @@ class DeezerParser(private val session: DeezerSession) {
                             "GladixDeezer FALLBACK target=$target section=\"$name\" reason=empty"
                         )
                         list.map { item -> item.toShelf() }
-                    } else fetched
+                    } else {
+                        // ⚠️ FLATTEN A SINGLE-SECTION FETCH — THIS RESTORES THE ARROW'S DOCUMENTED DESIGN,
+                        // it does not invent a new one. When the expand arrow shipped it was specified as
+                        // "terminates after one level BY TYPE — the expansion emits Shelf.Item, and only
+                        // Shelf.Lists produces a Header". The re-wrap arm above honours that exactly
+                        // (list.map { it.toShelf() } -> Shelf.Item -> vertical rows). THE FETCH ARM
+                        // SILENTLY VIOLATED IT: channelFeed returns Shelf.Lists.Items per section, so a
+                        // tapped arrow rendered Header + HORIZONTAL CAROUSEL — a page that reproduced the
+                        // row the user had just tapped, only with more items in it (15+ vs 12 on device,
+                        // 2026-09-08). Same arrow, two presentations, and the fetch path picked the one
+                        // that looks like nothing happened.
+                        // PRECEDENT — THIS IS THE ESTABLISHED PATTERN HERE, NOT A NEW JUDGEMENT. One session
+                        // made TWO of these conversions at once:
+                        //   • an artists shelf replaced with flat Shelf.Item per artist, for "no nested
+                        //     horizontal scroll, consistent with how artists render elsewhere";
+                        //   • getShelves() changed from mapNotNull to flatMap so buildTopTracksShelf()
+                        //     returns a Shelf.Category PLUS individual Shelf.Item per track.
+                        // and that note ends "albums and Related Artists carousels unchanged". THAT IS THIS
+                        // RULE ALREADY: flatten what should be a list, leave genuine carousels alone. The
+                        // singleOrNull test below is the same decision expressed structurally.
+                        //
+                        // ⚠️ ONE RECORDED DOWNSIDE OF THOSE CONVERSIONS, AND WHY IT DOES NOT TRANSFER HERE.
+                        // A later session found the flat Shelf.Item rows "difficult to scroll upward —
+                        // gestures were frequently swallowed" on the PLAYER'S INFO TAB. That tab lives in a
+                        // BOTTOM SHEET, and BottomSheetBehavior competes for vertical drags with its content:
+                        // it cooperates with exactly ONE scrolling child (findScrollingChild, a depth-first
+                        // search for the first nested-scrolling-enabled view) and treats drags it does not
+                        // route there as sheet drags. AN EXPANDED FEED PAGE HAS NO BOTTOM SHEET IN ITS
+                        // PARENT CHAIN — the arrow opens FeedFragment, which is
+                        // R.layout.fragment_generic_collapsable: CoordinatorLayout > AppBarLayout >
+                        // CollapsingToolbarLayout + FragmentContainerView. So that mechanism cannot apply.
+                        // What DOES exist there is the same CLASS of consumer — that CollapsingToolbarLayout
+                        // eats the first header-height of every upward drag — but it is unchanged by this
+                        // fix: it consumed exactly the same scroll when the arrow rendered carousels. And
+                        // flattening REMOVES inner horizontal RecyclerViews, i.e. removes a competitor for
+                        // drags, which pushes the opposite way from the recorded symptom.
+                        // IF GESTURES ARE EVER SWALLOWED ON ONE OF THESE PAGES, the suspect is not the row
+                        // type: it is the fast scroller's OnItemTouchListener, which latches by registration
+                        // order (see FastScrollerHelper) and is row-type-independent.
+                        //
+                        // THE RULE IS STRUCTURAL, NOT TEXTUAL:
+                        //   exactly ONE Shelf.Lists.Items -> flatten to its items, matching the re-wrap
+                        //   MORE than one              -> keep them as sections, headers and all
+                        // One section means "the arrow found the same row, fuller". Several means it found
+                        // a PAGE, which is a legitimately different thing and needs its headers to be
+                        // legible. Anything that is not a single Shelf.Lists.Items (a Category, a bare
+                        // Shelf.Item) is passed through untouched — `as?` makes that the default.
+                        //
+                        // ⚠️ NO TITLE COMPARISON, DELIBERATELY, AND THE DUPLICATE HEADER GOES AWAY AS A
+                        // CONSEQUENCE. The page previously rendered its name twice — page header, then a
+                        // section header of the same name — because channelFeed gives an untitled section
+                        // the page title. Suppressing that by comparing the two strings WOULD ROT: module
+                        // labels rotate, and module_id 46b377f1-fbd5-4e04-979e-177b5df21183 has been
+                        // "Summer in slow-mo", "Hello, sunshine" and (2026-09-08) "Focus flows for summer
+                        // work" — the same module, three names. Flattening removes the section header
+                        // structurally, so there is nothing to compare and nothing to drift. channelFeed's
+                        // title fallback STAYS: in a multi-section page an untitled section still needs a
+                        // label, and there the page title is the best available.
+                        //
+                        // ⚠️ WHY HERE AND NOT IN channelFeed: channelFeed serves TWO intents. This one —
+                        // "expand a row" — wants a flat list. The channel-tile / toShelfCategoryList callers
+                        // want a browse PAGE and must keep their sections. The intent lives at the call
+                        // site, so the adaptation does too; flattening inside channelFeed would silently
+                        // reshape the tile pages as well.
+                        //
+                        // THE RECURSION FLATTENS TOO, AND THAT IS INTENDED (confirmed 2026-09-08): a
+                        // channel page's own rows get fetching arrows via this same function, so a nested
+                        // single-section page flattens as well. An arrow means "show me all of this"
+                        // wherever it appears.
+                        //
+                        // [CORRECTED 2026-09-08] This read "/channels/new IS HANDLED, NOT ASSUMED — UNTESTED
+                        // EITHER WAY". It is now tested. Device capture: tapping "New releases for you"
+                        // opens Deezer's New Releases LANDING PAGE — Fresh picks of the week, New releases
+                        // for you (the row tapped from), Popular, Dig Deeper, Rock, Movies & series. SEVERAL
+                        // SECTIONS, so this rule keeps their headers and that page is unchanged by the fix.
+                        // Working as designed; do not "fix" it into a flat list without reading the note
+                        // below.
+                        //
+                        // ⚠️ THE ODDITY IS UPSTREAM OF THE SHAPE, AND IT IS NOT A BUG IN THIS FUNCTION. That
+                        // row's `target` points at a LANDING PAGE THAT CONTAINS THE ROW, not at the row's
+                        // own contents — unlike /channels/module/<uuid>, which returns exactly that one
+                        // module. So for /channels/new the arrow navigates to somewhere containing the row
+                        // rather than expanding it. Deezer chose the target; we render what it points at.
+                        // CONSIDERED AND NOT TAKEN: a pre-fetch rule ("only fetch when the target is a
+                        // /channels/module/<uuid>"). The positive half is sound — a module IS one row by
+                        // definition — but the COMPLEMENT is a claim about every other target family, and
+                        // only four have ever been seen. It would silently suppress fetching for any
+                        // single-row family nobody has captured, and suppress the FALLBACK logging with it,
+                        // since no attempt would be made. That is the same shape as the AA producer-side
+                        // filter and the SUPPORT-map misread, both of which cost builds this month.
+                        // The section count is the RELIABLE discriminator and it is already measured here,
+                        // post-fetch — which is why the rule below keys on it rather than on the target.
+                        //
+                        // ALSO CONSIDERED AND DROPPED 2026-09-08: making the arrow mean ONE thing everywhere
+                        // by RE-WRAPPING on the multi-section branch instead of showing the fetched page.
+                        // That would have given uniform "expand this row" semantics with no guessing from
+                        // target strings, at the cost of one wasted page.get per landing page. Dropped on
+                        // three device findings, not on preference:
+                        //   • the landing page has GENUINE CONTENT worth reaching — Fresh picks of the week,
+                        //     Popular, Dig Deeper, Rock, Movies & series are not on Home;
+                        //   • the descent TERMINATES (see the traced chain at the depth note above), so the
+                        //     open-ended navigation it would have prevented does not occur;
+                        //   • it would make the multi-section branch below DEAD CODE. That branch is live and
+                        //     exercised, which is the clearest signal that keeping it is right.
+                        // Taking it would trade a working navigation path for consistency. Do not revive it
+                        // without a case where the descent does NOT terminate.
+                        val single = fetched.singleOrNull() as? Shelf.Lists.Items
+                        if (single != null) single.list.map { it.toShelf() } else fetched
+                    }
                 }.toFeed()
                 else PagedData.Single<Shelf> { list.map { item -> item.toShelf() } }.toFeed()
             )
